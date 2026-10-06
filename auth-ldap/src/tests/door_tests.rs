@@ -114,7 +114,10 @@ fn the_statement_states_a_non_blocking_credential_login_over_one_need() {
     assert_eq!(need.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE);
     assert_eq!(text(need.transport), "tcp");
     assert_eq!(text(need.target_from), "", "the target is named per login");
-    assert_eq!(text(need.trust_from), "settings.ca_cert_pem");
+    assert!(
+        text(need.trust_from).is_empty(),
+        "the connector's own trust"
+    );
 
     assert_eq!(STATEMENT.secret_refs_len, 1);
     assert_eq!(text(SECRET_REFS[0]), "bind_service_password");

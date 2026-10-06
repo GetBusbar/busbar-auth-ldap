@@ -34,12 +34,12 @@ use std::task::Poll;
 use busbar_contract::abi::auth::{
     AuthTail, BeginLoginIn, BeginLoginOut, CompleteLoginIn, FieldsIn, FieldsOut, IdentifyOut,
     IdentityBuf, LoginField, OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut,
-    VerifyIn, BEGIN_FORM, CANCEL_ABANDONED, CAP_INBOUND, CAP_LOGIN, FACT_CACHEABLE, FORM_PASSWORD,
-    FORM_TEXT, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL, LOGIN_IDENTITY, LOGIN_KIND_CREDENTIAL,
-    LOGIN_OUTAGE, SPAN_ABSENT, VERDICT_PASS,
+    VerifyIn, BEGIN_FORM, CANCEL_ABANDONED, CAP_INBOUND, CAP_LOGIN, DECISION_CONTINUE,
+    FACT_CACHEABLE, FORM_PASSWORD, FORM_TEXT, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL,
+    LOGIN_IDENTITY, LOGIN_KIND_CREDENTIAL, LOGIN_OUTAGE, POINT_HEAD, SPAN_ABSENT, VERDICT_PASS,
 };
 use busbar_contract::abi::host::conn::connector::{
-    Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE,
+    Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, Span, BLOB_ABSENT};
 use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement, REWRITE_ALIAS};
@@ -84,9 +84,13 @@ const TAIL: AuthTail = AuthTail {
     caps: CAP_INBOUND | CAP_LOGIN,
     facts: FACT_CACHEABLE,
     login_kind: LOGIN_KIND_CREDENTIAL,
-    _reserved: 0,
+    // `verify` judges no credential (always PASS): it needs only the head, once per request.
+    inbound_points: POINT_HEAD,
     styles: ptr::null(),
     styles_len: 0,
+    operator_principal: NONE,
+    credential_kinds: ptr::null(),
+    credential_kinds_len: 0,
 };
 
 /// The need every login's stream is established on.
@@ -96,16 +100,17 @@ pub const NEED: u32 = 0;
 /// itself), under the `operator-infrastructure` egress class (directories: private, loopback and
 /// plaintext allowed; pinned; cloud metadata hosts refused; BUSBAR-1.6.0.md §5). The plugin names
 /// the target per login (`host:port`, read off the `url` setting), so no `target_from`: the
-/// carrier's target is `host:port`, never an `ldap://` URL. The trust anchors come from the
-/// `ca_cert_pem` setting (`trust_from`), which, as in 1.5.5, the module still refuses, so the
-/// connector's defaults are trusted. The timeout is the module's own, per login (`timeout_secs`).
+/// carrier's target is `host:port`, never an `ldap://` URL. No `trust_from`: as in 1.5.5 the module
+/// refuses a `ca_cert_pem` setting, so the connector's own trust is the one used (a need whose
+/// `trust_from` names a setting the configuration leaves unset is not declared, so naming it would
+/// leave the module no stream at all). The timeout is the module's own, per login (`timeout_secs`).
 pub const NEEDS: &[Need] = &[Need {
     direction: DIRECTION_OUTBOUND,
     egress_class: EGRESS_OPERATOR_INFRASTRUCTURE,
     transport: abi_str("tcp"),
     auth: NONE,
     target_from: NONE,
-    trust_from: abi_str("settings.ca_cert_pem"),
+    trust_from: NONE,
     details: Blob {
         ptr: ptr::null(),
         len: 0,
@@ -115,6 +120,11 @@ pub const NEEDS: &[Need] = &[Need {
     keep_response_headers: ptr::null(),
     keep_response_headers_len: 0,
     timeout_ms: 0,
+    // A raw stream has no response head: the named (empty) list.
+    keep_mode: KEEP_NAMED,
+    _reserved: 0,
+    deny_response_headers: ptr::null(),
+    deny_response_headers_len: 0,
 }];
 
 /// The settings keys whose values are secret references, resolved in this order into
@@ -200,6 +210,8 @@ impl Slot for Verify {
     type Out = IdentifyOut;
     fn call(_: *mut c_void, _: &VerifyIn, out: &mut IdentifyOut) -> Outcome {
         out.verdict = VERDICT_PASS;
+        // Not this module's credential: the request goes on to the chain's next method.
+        out.decision = DECISION_CONTINUE;
         Outcome::Ready
     }
 }
