@@ -378,10 +378,16 @@ fn login_cookie(resp: &reqwest::blocking::Response) -> String {
         .expect("begin sets the busbar_login cookie")
 }
 
-fn wait_for_health(client: &reqwest::blocking::Client, url: &str, child: &mut std::process::Child) {
+fn wait_for_health(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    child: &mut std::process::Child,
+    log: &std::path::Path,
+) {
     for _ in 0..150 {
         if let Ok(Some(status)) = child.try_wait() {
-            panic!("busbar exited early during health poll: {status}");
+            let said = std::fs::read_to_string(log).unwrap_or_default();
+            panic!("busbar exited early during health poll: {status}\n{said}");
         }
         if client
             .get(url)
@@ -458,6 +464,7 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
         format!(
             "listen: \"127.0.0.1:{data_port}\"\n\
              public_url: \"https://gate.busbar.e2e\"\n\
+             store:\n  module: memory\n\
              identity-providers:\n  admin-tokens: {{ module: admin-tokens, token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
              \x20 ldap:\n    module: ldap\n    browser_login: {{}}\n\
              \x20   settings:\n      url: \"{url}\"\n\
@@ -477,6 +484,7 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
     )
     .unwrap();
 
+    let stderr_log = work.join("busbar.stderr");
     let mut child = std::process::Command::new(&busbar_bin)
         .env("BUSBAR_CONFIG", &config)
         .env("BUSBAR_PROVIDERS", &providers)
@@ -484,11 +492,11 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
         .env("BUSBAR_ADMIN_TOKEN", "e2e-admin-token")
         .env("BUSBAR_STATE_FILE", "")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&stderr_log).expect("busbar's stderr log"))
         .spawn()
         .expect("spawn busbar with identity-providers.ldap");
     let base = format!("http://127.0.0.1:{data_port}");
-    wait_for_health(&client, &format!("{base}/healthz"), &mut child);
+    wait_for_health(&client, &format!("{base}/healthz"), &mut child, &stderr_log);
 
     // begin: GET ?method=ldap → 200 credential form + cookie.
     let begin = client
