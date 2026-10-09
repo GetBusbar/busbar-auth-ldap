@@ -1,333 +1,449 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! **ONE LDAP DOOR, BOTH WAYS IN, ONE TRANSCRIPT**: the LDAP module's linked + dropped-in
-//! conformance on the auth kind's memory ABI (THE DESIGN §11.4), run against the busbar rev this
-//! repo pins (`.busbar-ref`).
+//! **ONE LDAP DOOR, BOTH WAYS IN** — the LDAP module's linked + dropped-in conformance on the auth
+//! kind's door (THE DESIGN §11), run against the busbar rev this repo pins (`.busbar-ref`).
 //!
-//! The module is held two ways at once: LINKED (the logic crate's `door::door`, its row's Statement
-//! rendered by `LinkedRow::of` and admitted by the loader's `load_linked`) and DROPPED IN (this
-//! crate's built cdylib, `dlopen`ed by `load_dropped`, which resolves `busbar_plugin_door` and admits
-//! it only when its Statement renders byte for byte as the linked row's). Each is bound to a real
-//! dispatcher and driven over the same script through the auth table: `validate` over the module's
-//! refusals, `open`, `verify` (PASS), `begin_login` (the credential form), `complete_login` without
-//! a password, with an empty password, and against a directory that is not there
-//! (OUTAGE), an outbound op (REFUSED), `refresh` refused and accepted, `close`. The two transcripts
-//! must be equal. The live BIND against a real directory is `tests/e2e.rs` (OpenLDAP container).
+//! THE PUBLISHED SUITE (busbar-plugin-loader's `conformance` feature, at the pin): the linked door
+//! and the built cdylib, each through the one loader, driven by the auth kind's script over the
+//! inputs `conformance.json` names: `verify` (always PASS: LDAP judges no bearer credential), the
+//! credential login (`begin_login`'s form; `complete_login` SUBMITTED on a ticket, the suite's
+//! user's credential an identity, a wrong password refused), exact crossing counts, the two folds equal,
+//! its RED arms.
 //!
-//! THE RED ARMS, same file: the door asked for as another kind is refused; a stated rendering that
-//! differs from the door's by one byte is refused (the Statement check is not vacuous). A missing
-//! cdylib PANICS: this test IS the dropped-in door's proof, and never skips.
+//! THE HOST: the module's one `tcp` need is served by busbar's own connector, composed as the root
+//! composes it (`conformance_host`, rendered by the fleet template), dialling the live directory
+//! (plugin-ci's `openldap` service on loopback, plaintext as the operator-infrastructure class
+//! allows). So every login proves the module reaches its directory only through the host's
+//! connection, never a socket of its own.
+//!
+//! THE RED ARMS of this repo's own, same file: the Statement declares its one need and secret
+//! reference and never blocks; a directory that takes the connection and never answers is an
+//! outage at the login's deadline; and THE BAN ([`net_ban`]): the shipped closure holds no socket
+//! crate and no TLS stack.
 
-use std::mem::zeroed;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+use std::net::TcpListener;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
+use busbar_auth_ldap::door::door;
 use busbar_contract::abi::auth::{
-    slot, BeginLoginIn, BeginLoginOut, CompleteLoginIn, IdentifyOut, IdentityBuf, LoginField,
-    NamedValue, OpenOutboundIn, OpenOutboundOut, VerifyIn, BEGIN_FORM, LOGIN_BAD_CREDENTIAL,
-    LOGIN_OUTAGE, VERDICT_PASS,
+    slot, CompleteLoginIn, IdentifyOut, IdentityBuf, NamedValue, IDENTITY_BUF_BYTES,
+    IDENTITY_GROUPS, LOGIN_OUTAGE,
+};
+use busbar_contract::abi::host::conn::connector::{
+    DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE,
 };
 use busbar_contract::abi::mechanism::call::{
-    AbiStr, Blob, Span, BLOB_JSON, BLOB_OCTETS, BLOB_SECRET,
+    AbiStr, Blob, DeadlineClass, Outcome, Span, BLOB_OCTETS, BLOB_SECRET,
 };
-use busbar_contract::abi::mechanism::lifecycle::{
-    slot as lc, OpenIn, OpenOut, RefreshIn, ValidateIn,
-};
+use busbar_contract::abi::mechanism::door::MARK_BLOCKS;
+use busbar_contract::abi::mechanism::rendering;
+use busbar_plugin_loader::conformance::{self, Leg, Subject};
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
-use busbar_plugin_loader::dispatch::kinds::secret::Secret;
-use busbar_plugin_loader::dispatch::{
-    in_head, load_dropped, load_linked, out_head, Bind, Called, DispatchConfig, Dispatcher, Frame,
-    LinkedRow, NoSink, Plugin,
-};
+use busbar_plugin_loader::dispatch::{now_ns, DispatchConfig, Dispatcher, Frame, LinkedRow};
 
-fn z<T>() -> T {
-    // SAFETY: every `in`/`out` here is plain C data; all-zero is a valid value of each.
-    unsafe { zeroed() }
+#[path = "support/conformance_host.rs"]
+mod conformance_host;
+
+#[path = "support/net_ban.rs"]
+mod net_ban;
+
+busbar_plugin_loader::conformance_suite! {
+    door: busbar_auth_ldap::door::door,
+    cdylib: "busbar_auth_ldap_plugin",
+    inputs: include_str!("conformance.json"),
+    host: host,
 }
 
-/// This crate's built cdylib (uplifted or under `deps`, newest wins). A missing artifact is a
-/// failure, never a skip.
-fn cdylib() -> PathBuf {
-    let exe = std::env::current_exe().expect("the test binary has a path");
-    let profile = exe
-        .parent()
-        .and_then(|d| d.parent())
-        .expect("target/<profile>");
-    let file = busbar_plugin_loader::plugin_library_filename("busbar_auth_ldap_plugin");
-    [profile.join(&file), profile.join("deps").join(&file)]
-        .into_iter()
-        .filter_map(|p| Some((std::fs::metadata(&p).ok()?.modified().ok()?, p)))
-        .max()
-        .map(|(_, p)| p)
-        .unwrap_or_else(|| panic!("the busbar-auth-ldap-plugin cdylib ({file}) is not built"))
-}
-
-/// The operator config: a directory on a loopback port nothing listens on, so a BIND fails fast
-/// and identically through either door.
-fn config() -> String {
-    let port = std::net::TcpListener::bind("127.0.0.1:0")
-        .and_then(|l| l.local_addr())
-        .expect("a loopback port")
-        .port();
-    serde_json::json!({
-        "url": format!("ldaps://127.0.0.1:{port}"),
-        "bind_dn_template": "uid={username},ou=people,dc=example,dc=org",
-        "base_dn": "dc=example,dc=org",
-        "timeout_secs": 2,
+/// The live directory's address (`BUSBAR_TEST_LDAP_URL`'s authority; the service container's
+/// default when unset).
+fn upstream() -> &'static str {
+    static AT: OnceLock<String> = OnceLock::new();
+    AT.get_or_init(|| {
+        let url = std::env::var("BUSBAR_TEST_LDAP_URL").unwrap_or_default();
+        url.split_once("://")
+            .map(|(_, rest)| rest)
+            .and_then(|rest| rest.split('/').next())
+            .filter(|at| !at.is_empty())
+            .unwrap_or("127.0.0.1:389")
+            .to_owned()
     })
-    .to_string()
 }
 
-fn row() -> LinkedRow {
-    LinkedRow::of(busbar_auth_ldap::door::door).expect("the door states itself")
+/// The live directory's administrator (the service container's own, from its env).
+const ADMIN_DN: &str = "cn=admin,dc=example,dc=org";
+const ADMIN_PW: &str = "adminpassword";
+
+/// The entry the suite logs in as, and its password (`conformance.json`'s login).
+const USER_DN: &str = "cn=conformance,dc=example,dc=org";
+const USER_PW: &str = "conformance-password";
+
+/// The suite's user in the live directory, added once over plaintext LDAP on loopback by the
+/// administrator (`ldap3`, a dev-only client; the module speaks its own codec): the container makes
+/// its base suffix and its root DN, but no entry the module could read groups off. Best effort: with
+/// no directory (a macOS runner) nothing is added, and the live arms, skipped there, would read an
+/// outage.
+fn seed_user() {
+    static SEEDED: OnceLock<()> = OnceLock::new();
+    SEEDED.get_or_init(|| {
+        let Ok(mut ldap) = ldap3::LdapConn::new(&format!("ldap://{}", upstream())) else {
+            return;
+        };
+        if !ldap
+            .simple_bind(ADMIN_DN, ADMIN_PW)
+            .is_ok_and(|r| r.success().is_ok())
+        {
+            return;
+        }
+        let attrs = vec![
+            (
+                "objectClass",
+                ["simpleSecurityObject", "organizationalRole"].into(),
+            ),
+            ("cn", ["conformance"].into()),
+            ("userPassword", [USER_PW].into()),
+        ];
+        match ldap.add(USER_DN, attrs).and_then(|r| r.success()) {
+            // 68 = entryAlreadyExists: a rerun against a warm directory.
+            Ok(_) => {}
+            Err(ldap3::LdapError::LdapResult { result }) if result.rc == 68 => {}
+            Err(e) => panic!("the suite's user {USER_DN} cannot be added: {e}"),
+        }
+        let _ = ldap.unbind();
+    });
 }
 
-fn bind(d: &Dispatcher) -> Bind {
-    Bind {
-        instance: Arc::from("corp-ad"),
-        max_inflight_cap: 64,
-        sink: Arc::new(NoSink),
-        dispatcher: d.adopter(),
-        conns: None,
-    }
+/// The host the suite binds the module over, with the suite's user in the live directory.
+fn host(
+    wake: Arc<dyn Fn(u64) + Send + Sync>,
+    anchors: Option<&str>,
+) -> Arc<dyn busbar_contract::conn::DeclaredConns> {
+    seed_user();
+    conformance_host::host(wake, anchors)
 }
 
-fn json(bytes: &[u8]) -> Blob {
-    Blob {
-        ptr: bytes.as_ptr(),
-        len: bytes.len(),
-        fmt: BLOB_JSON,
-        flags: 0,
-    }
+/// RED: the Statement declares the module's ONE need (an outbound `tcp` stream of the
+/// operator-infrastructure egress class, its target named per login, its trust the connector's
+/// own) and its ONE secret reference, and states no call that blocks; the dropped-in library
+/// states the same Statement.
+#[test]
+fn red_the_statement_declares_one_operator_infrastructure_stream_and_never_blocks() {
+    let stated = LinkedRow::of(door)
+        .expect("the linked door renders")
+        .statement;
+    let read = rendering::read(&stated).expect("the rendering reads");
+    assert_eq!(read.needs.len(), 1);
+    let need = &read.needs[0];
+    assert_eq!(need.direction, DIRECTION_OUTBOUND);
+    assert_eq!(need.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE);
+    assert_eq!(need.transport, "tcp");
+    assert!(need.target_from.is_empty());
+    assert!(
+        need.trust_from.is_empty(),
+        "the connector's own trust: the module refuses ca_cert_pem"
+    );
+    assert_eq!(read.secret_refs, vec!["bind_service_password".to_string()]);
+    assert_eq!(read.marks & MARK_BLOCKS, 0, "no call blocks");
+    let subject = Subject::new(door, "busbar_auth_ldap_plugin", "{}");
+    assert_eq!(subject.stated(), stated);
 }
 
-fn abi(s: &str) -> AbiStr {
-    AbiStr {
-        ptr: s.as_ptr(),
-        len: s.len(),
-    }
+/// A loopback listener that takes every connection and never answers (the connections are held
+/// open); its address.
+fn silent_directory() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a local listener");
+    let at = listener.local_addr().expect("its address").to_string();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        for tcp in listener.incoming().flatten() {
+            held.push(tcp);
+        }
+    });
+    at
 }
 
-/// A call's answer as the transcript spells it: outcome, lease, and error text.
-fn spelled(c: &Called) -> String {
-    let text = c
-        .error
-        .as_deref()
-        .map(String::from_utf8_lossy)
-        .unwrap_or_default();
-    format!("{:?} lease={} {text}", c.outcome, c.lease != 0)
-}
-
-fn validate(p: &Plugin<Auth>, settings: &str) -> String {
-    let mut reason = vec![0_u8; 1024];
-    let mut i: ValidateIn = z();
-    i.head = in_head();
-    i.settings = json(settings.as_bytes());
-    i.err_buf = reason.as_mut_ptr();
-    i.err_cap = reason.len();
-    let mut f = Frame::new(i, out_head());
-    spelled(&p.call(lc::VALIDATE, &mut f))
-}
-
-fn open(p: &Plugin<Auth>, settings: &str) -> String {
-    let mut reason = vec![0_u8; 1024];
-    let mut i: OpenIn = z();
-    i.head = in_head();
-    i.settings = json(settings.as_bytes());
-    i.generation = 1;
-    i.err_buf = reason.as_mut_ptr();
-    i.err_cap = reason.len();
-    let mut o: OpenOut = z();
-    o.head = out_head();
-    let mut f = Frame::new(i, o);
-    spelled(&p.call(lc::OPEN, &mut f))
-}
-
-fn refresh(p: &Plugin<Auth>, settings: &str, generation: u64) -> String {
-    let mut i: RefreshIn = z();
-    i.head = in_head();
-    i.generation = generation;
-    i.settings = json(settings.as_bytes());
-    let mut f = Frame::new(i, out_head());
-    spelled(&p.call(lc::REFRESH, &mut f))
-}
-
-fn close(p: &Plugin<Auth>) -> String {
-    let mut f = Frame::new(in_head(), out_head());
-    spelled(&p.call(lc::CLOSE, &mut f))
-}
-
-fn identify_out() -> IdentifyOut {
-    let mut o: IdentifyOut = z();
-    o.head = out_head();
-    o
-}
-
-fn verify(p: &Plugin<Auth>) -> String {
-    let mut i: VerifyIn = z();
-    i.head = in_head();
-    let mut f = Frame::new(i, identify_out());
-    let c = p.call(slot::VERIFY, &mut f);
-    format!("{} verdict={}", spelled(&c), f.out.verdict)
-}
-
-/// The form `begin_login` answers, read out of the plugin's memory while it is loaded.
-fn begin_login(p: &Plugin<Auth>) -> String {
-    let mut i: BeginLoginIn = z();
-    i.head = in_head();
-    let mut o: BeginLoginOut = z();
-    o.head = out_head();
-    let mut f = Frame::new(i, o);
-    let c = p.call(slot::BEGIN_LOGIN, &mut f);
-    let text = |s: AbiStr| {
-        // SAFETY: the plugin's `'static` form text, alive while the plugin is loaded.
-        String::from_utf8_lossy(unsafe { std::slice::from_raw_parts(s.ptr, s.len) }).into_owned()
+/// One credential login SUBMITTED on a ticket (as the host submits it) and awaited: the answer and
+/// the verdict it names.
+fn login(
+    p: &busbar_plugin_loader::dispatch::Plugin<Auth>,
+    d: &Dispatcher,
+    username: &str,
+    password: &str,
+) -> String {
+    let secret = |b: &[u8]| Blob {
+        ptr: b.as_ptr(),
+        len: b.len(),
+        fmt: BLOB_OCTETS,
+        flags: BLOB_SECRET,
     };
-    let form: Vec<String> = if f.out.form.is_null() {
-        Vec::new()
-    } else {
-        // SAFETY: `form_len` fields at `form`, the plugin's `'static` memory.
-        unsafe { std::slice::from_raw_parts::<LoginField>(f.out.form, f.out.form_len) }
-            .iter()
-            .map(|l| {
-                format!(
-                    "{}:{}:{}:{}",
-                    text(l.name),
-                    text(l.label),
-                    l.kind,
-                    l.required
-                )
-            })
-            .collect()
-    };
-    format!("{} shape={} form={form:?}", spelled(&c), f.out.shape)
-}
-
-fn complete_login(p: &Plugin<Auth>, fields: &[(&str, &str)]) -> String {
-    let submitted: Vec<NamedValue> = fields
-        .iter()
-        .map(|(k, v)| NamedValue {
-            name: abi(k),
-            value: Blob {
-                ptr: v.as_ptr(),
-                len: v.len(),
-                fmt: BLOB_OCTETS,
-                flags: BLOB_SECRET,
-            },
-        })
-        .collect();
-    let mut bytes = vec![0_u8; 4096];
-    let mut groups: Vec<Span> = vec![z(); 16];
-    let mut i: CompleteLoginIn = z();
-    i.head = in_head();
-    i.submitted = submitted.as_ptr();
-    i.submitted_len = submitted.len();
-    i.out_buf = IdentityBuf {
+    let named = [
+        NamedValue {
+            name: AbiStr::over(b"username"),
+            value: secret(username.as_bytes()),
+        },
+        NamedValue {
+            name: AbiStr::over(b"password"),
+            value: secret(password.as_bytes()),
+        },
+    ];
+    let mut bytes = vec![0_u8; IDENTITY_BUF_BYTES];
+    let mut groups = vec![Span { offset: 0, len: 0 }; IDENTITY_GROUPS as usize];
+    let mut f: Frame<CompleteLoginIn, IdentifyOut> =
+        Frame::new(conformance::input(), conformance::output());
+    f.input.submitted = named.as_ptr();
+    f.input.submitted_len = named.len();
+    f.input.out_buf = IdentityBuf {
         buf: bytes.as_mut_ptr(),
         buf_cap: bytes.len(),
         groups: groups.as_mut_ptr(),
         groups_cap: groups.len() as u32,
         _reserved: 0,
     };
-    let mut f = Frame::new(i, identify_out());
-    let c = p.call(slot::COMPLETE_LOGIN, &mut f);
-    format!("{} verdict={}", spelled(&c), f.out.verdict)
+    let deadline = now_ns().saturating_add(Duration::from_secs(30).as_nanos() as u64);
+    let (called, frame) =
+        conformance::on_ticket_frame(p, d, slot::COMPLETE_LOGIN, f, DeadlineClass::Call, deadline);
+    let verdict = match frame {
+        Some(f) if called.outcome == Outcome::Ready => f.out.verdict.to_string(),
+        _ => "none".to_string(),
+    };
+    format!("{:?} verdict={verdict}", called.outcome)
 }
 
-fn open_outbound(p: &Plugin<Auth>) -> String {
-    let mut i: OpenOutboundIn = z();
-    i.head = in_head();
-    let mut o: OpenOutboundOut = z();
-    o.head = out_head();
-    let mut f = Frame::new(i, o);
-    spelled(&p.call(slot::OPEN_OUTBOUND, &mut f))
-}
+/// Host services offering the clock alone (the dispatcher's own timebase), refusing the rest: the
+/// login arms its deadline off the host's clock, as the kernel serves it.
+struct ClockOnly;
 
-/// What one door does with the module, as one comparable transcript.
-fn transcript(p: &Plugin<Auth>, cfg: &str) -> Vec<String> {
-    let upn = r#"{"url":"ldaps://ad.example","bind_dn_template":"{username}@corp.example","base_dn":"dc=x"}"#;
-    vec![
-        format!("name={}", p.name()),
-        validate(p, ""),
-        validate(p, "{ not json"),
-        validate(p, upn),
-        validate(p, cfg),
-        open(p, cfg),
-        verify(p),
-        begin_login(p),
-        complete_login(p, &[("username", "alice")]),
-        complete_login(p, &[("username", "alice"), ("password", "")]),
-        complete_login(p, &[("username", "alice"), ("password", "pw")]),
-        open_outbound(p),
-        refresh(p, "", 2),
-        refresh(p, cfg, 3),
-        close(p),
-    ]
-}
-
-/// The LDAP door admits and answers as ONE plugin through either way in, and the RED arms show the
-/// admission is not vacuous.
-#[test]
-fn the_linked_and_the_dropped_in_ldap_door_are_one_module() {
-    let d = Dispatcher::new(DispatchConfig {
-        workers: 2,
-        watchdog_period: Duration::from_millis(20),
-        ..DispatchConfig::default()
-    });
-    let cfg = config();
-    let stated = row().statement;
-    let linked: Plugin<Auth> = load_linked(&row(), bind(&d)).expect("the linked door loads");
-    let dropped: Plugin<Auth> =
-        load_dropped(&cdylib(), &stated, bind(&d)).expect("the dropped-in door loads");
-
-    let a = transcript(&linked, &cfg);
-    let b = transcript(&dropped, &cfg);
-    assert_eq!(a, b, "the two doors are not one module");
-
-    // Not a vacuous pass: the module answered what it must.
-    let text = a.join("\n");
-    assert_eq!(a[0], "name=busbar-auth-ldap", "{text}");
-    assert!(
-        a[1].starts_with("Failed") && a[1].contains("requires config"),
-        "{text}"
-    );
-    assert!(a[2].contains("invalid ldap plugin config"), "{text}");
-    assert!(a[3].contains("is not a DN"), "{text}");
-    assert!(a[4].starts_with("Ready"), "{text}");
-    assert!(a[5].starts_with("Ready"), "{text}");
-    assert!(a[6].ends_with(&format!("verdict={VERDICT_PASS}")), "{text}");
-    assert!(
-        a[7].contains(&format!("shape={BEGIN_FORM}"))
-            && a[7].contains("username:Username:1:1")
-            && a[7].contains("password:Password:2:1"),
-        "{text}"
-    );
-    for line in &a[8..=9] {
-        assert!(
-            line.starts_with("Ready") && line.ends_with(&format!("verdict={LOGIN_BAD_CREDENTIAL}")),
-            "{text}"
-        );
+impl busbar_contract::services::HostServices for ClockOnly {
+    fn now(&self) -> busbar_contract::services::Reading {
+        busbar_contract::services::Reading {
+            wall_ns: 0,
+            mono_ns: now_ns(),
+        }
     }
-    assert!(
-        a[10].starts_with("Ready") && a[10].ends_with(&format!("verdict={LOGIN_OUTAGE}")),
-        "a directory that is not there is an outage, not a bad credential: {text}"
-    );
-    assert!(a[11].starts_with("Refused"), "{text}");
-    assert!(a[12].starts_with("Failed"), "{text}");
-    assert!(a[13].starts_with("Ready"), "{text}");
-    assert!(a[14].starts_with("Ready"), "{text}");
+    fn dest_judge(
+        &self,
+        _: &str,
+        _: u32,
+        _: u32,
+        _: Option<busbar_contract::services::Later>,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
+    }
+    fn records_get(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: &str,
+        _: &[u8],
+        _: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
+    }
+    fn records_list(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: busbar_contract::services::RecordsList,
+        _: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
+    }
+    fn records_claim(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: &str,
+        _: &[u8],
+        _: u64,
+        _: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
+    }
+    fn sign(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: &[u8],
+    ) -> busbar_contract::services::Stored {
+        busbar_contract::services::Stored::refused("no")
+    }
+    fn trust_sight(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: &str,
+        _: &str,
+        _: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
+    }
+    fn trust_due(
+        &self,
+        _: &busbar_contract::services::Caller,
+    ) -> busbar_contract::services::Stored {
+        busbar_contract::services::Stored::refused("no")
+    }
+    fn trust_verify(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: &str,
+        _: &[u8],
+        _: &[u8],
+    ) -> busbar_contract::services::Stored {
+        busbar_contract::services::Stored::refused("no")
+    }
+    fn entitlement_check(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: Option<u64>,
+        _: &str,
+    ) -> busbar_contract::services::Stored {
+        busbar_contract::services::Stored::refused("no")
+    }
+    fn random_fill(&self, _: u64) -> busbar_contract::services::Stored {
+        busbar_contract::services::Stored::refused("no")
+    }
+    fn records_secret(
+        &self,
+        _: &str,
+        _: &str,
+        _: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
+    }
+    fn unit_nest(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: Option<u64>,
+        _: busbar_contract::services::NestAsk,
+        _: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
+    }
+    fn work_open(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: Option<u64>,
+        _: &str,
+        _: &[u8],
+        _: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
+    }
+    fn work_find(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: Option<u64>,
+        _: &[u8],
+        _: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
+    }
+    fn work_settle(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: u64,
+        _: &[u8],
+        _: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
+    }
+    fn work_resume(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: Option<u64>,
+        _: u64,
+        _: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
+    }
+    fn disk_append(
+        &self,
+        _: &busbar_contract::services::DiskDest,
+        _: Vec<u8>,
+        _: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
+    }
+    fn verify_lookup(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: &[u8],
+        _: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
+    }
+    fn verify_store(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: &[u8],
+        _: &[u8],
+        _: u64,
+    ) -> busbar_contract::services::Stored {
+        busbar_contract::services::Stored::refused("no")
+    }
+    fn content_scan(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: Option<u64>,
+        _: &[u8],
+        _: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
+    }
+    fn hook_call(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: Option<u64>,
+        _: busbar_contract::services::HookAsk,
+        _: busbar_contract::services::Later,
+    ) -> busbar_contract::services::Ran {
+        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
+    }
+    fn snapshot_read(
+        &self,
+        _: &busbar_contract::services::Caller,
+        _: u32,
+    ) -> busbar_contract::services::Snapshot {
+        busbar_contract::services::Snapshot::Refused("no")
+    }
+}
 
-    // RED ARM 1: the door asked for as another kind is refused, through either way in.
-    assert!(load_linked::<Secret>(&row(), bind(&d)).is_err());
-    assert!(load_dropped::<Secret>(&cdylib(), &stated, bind(&d)).is_err());
-
-    // RED ARM 2: a stated rendering one byte off the door's is refused before any slot is called.
-    let mut other = stated.clone();
-    *other.last_mut().expect("a rendering has bytes") ^= 1;
-    match load_dropped::<Auth>(&cdylib(), &other, bind(&d)) {
-        Ok(_) => panic!("a Statement that is not the door's must be refused"),
-        Err(e) => assert!(!e.to_string().is_empty()),
+/// RED: a directory that takes the connection and never answers (and so never wakes the ticket) is
+/// an OUTAGE once the login's `timeout_secs` pass — the op's own deadline resumes it; nothing blocks
+/// and nothing waits forever. Through the host's connector, both legs.
+#[test]
+fn red_a_directory_that_never_answers_is_an_outage_at_the_deadline() {
+    let at = silent_directory();
+    let settings = serde_json::json!({
+        "url": format!("ldap://{at}"),
+        "bind_dn_template": "cn={username},dc=example,dc=org",
+        "base_dn": "dc=example,dc=org",
+        "timeout_secs": 1,
+    })
+    .to_string();
+    let inputs = serde_json::json!({ "settings": serde_json::from_str::<serde_json::Value>(&settings).unwrap() })
+        .to_string();
+    let s = Subject::new(door, "busbar_auth_ldap_plugin", &inputs)
+        .with_host(conformance_host::host)
+        .with_anchors(conformance_host::anchors());
+    for leg in [Leg::Linked, Leg::Dropped] {
+        let d = Arc::new(Dispatcher::with_services(
+            DispatchConfig::default(),
+            Arc::new(ClockOnly),
+        ));
+        let p = conformance::load::<Auth>(&s, leg, s.bind(&d, "ldap-silent"))
+            .unwrap_or_else(|e| panic!("{leg:?}: the door loads: {e}"));
+        let opened = conformance::open(&p, settings.as_bytes());
+        assert_eq!(opened.outcome, Outcome::Ready, "{leg:?}: open");
+        let started = Instant::now();
+        let got = login(&p, &d, "conformance", USER_PW);
+        assert_eq!(got, format!("Ready verdict={LOGIN_OUTAGE}"), "{leg:?}");
+        let took = started.elapsed();
+        assert!(
+            took >= Duration::from_millis(900) && took < Duration::from_secs(15),
+            "{leg:?}: the outage comes at the deadline: {took:?}"
+        );
+        assert_eq!(
+            conformance::close(&p).outcome,
+            Outcome::Ready,
+            "{leg:?}: close"
+        );
     }
 }

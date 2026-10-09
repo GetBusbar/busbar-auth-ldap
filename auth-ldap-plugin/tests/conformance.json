@@ -1,0 +1,36 @@
+{
+  "settings": {
+    "url": "ldap://127.0.0.1:389",
+    "bind_dn_template": "cn={username},dc=example,dc=org",
+    "base_dn": "dc=example,dc=org",
+    "timeout_secs": 10
+  },
+  "dialing_steps": ["complete_login submitted", "complete_login rejected submitted"],
+  "auth": {
+    "bad_settings": [
+      "",
+      { "url": "ldap://127.0.0.1:389", "bind_dn_template": "cn=fixed,dc=example,dc=org", "base_dn": "dc=example,dc=org" },
+      { "url": "ldap://127.0.0.1:389", "bind_dn_template": "cn={username},dc=example,dc=org", "base_dn": "dc=example,dc=org", "timeout_secs": 0 },
+      { "url": "ldap://127.0.0.1:389", "bind_dn_template": "cn={username},dc=example,dc=org", "base_dn": "dc=example,dc=org", "ca_cert_pem": "-----BEGIN CERTIFICATE-----" },
+      { "url": "ldap://127.0.0.1:389", "bind_dn_template": "cn={username},dc=example,dc=org", "base_dn": "dc=example,dc=org", "bogus": 1 }
+    ],
+    "rotated_settings": {
+      "url": "ldap://127.0.0.1:389",
+        "bind_dn_template": "uid={username},ou=people,dc=example,dc=org",
+      "base_dn": "dc=example,dc=org"
+    },
+    "cases": [
+      { "credential": null, "verdict": "pass" },
+      { "credential": "an-opaque-bearer", "verdict": "pass" }
+    ],
+    "never_echoed": ["conformance-password", "wrong-password"],
+    "login": {
+      "begin": { "redirect_uri": "https://node.example/auth/login", "state": "conformance-state" },
+      "form": ["username:text:required", "password:password:required"],
+      "begin_crossings": 1,
+      "complete": { "submitted": { "username": "conformance", "password": "conformance-password" } },
+      "complete_verdict": "identity:ldap:cn=conformance,dc=example,dc=org",
+      "complete_rejected": { "submitted": { "username": "conformance", "password": "wrong-password" } }
+    }
+  }
+}
