@@ -876,7 +876,9 @@ fn red_the_statement_declares_one_operator_infrastructure_stream_and_never_block
     assert_eq!(need.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE);
     assert_eq!(need.transport, "tcp");
     assert!(need.target_from.is_empty());
-    assert_eq!(need.trust_from, "settings.ca_cert_pem");
+    // No trust_from: as in 1.5.5 the module refuses a `ca_cert_pem` setting, so the connector's own
+    // trust is the one used (a need naming an unset setting is never declared).
+    assert!(need.trust_from.is_empty(), "the connector's own trust");
     assert_eq!(read.secret_refs, vec!["bind_service_password".to_string()]);
     assert_eq!(read.marks & MARK_BLOCKS, 0, "no call blocks");
     let dropped = busbar_plugin_loader::dispatch::rendering_of_library(&cdylib())
