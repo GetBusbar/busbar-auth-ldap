@@ -12,13 +12,13 @@ license = "Apache-2.0"
 # The ONE busbar crate a plugin names (#40: contract only). Pinned by git rev to the busbar commit in
 # `.busbar-ref`; a busbar build that links this crate `[patch]`es the busbar git source to its own
 # tree, so ONE copy of the contract links.
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "934a016e20fc1a67c209b671d137c8cc28092767" }
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-tracing = "0.1"
+busbar-contract = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
 # No LDAP client crate and no socket or TLS stack: the module speaks LDAP through its own sans-IO
 # codec (src/ber.rs, src/filter.rs, src/codec.rs) over the host connector's stream (BUSBAR-1.6.0.md
 # THE DESIGN §5; R5/Q82).
 
 [dev-dependencies]
-serde_json = "1"
+serde_json = { workspace = true }
