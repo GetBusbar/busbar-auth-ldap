@@ -1,6 +1,7 @@
 {
   "settings": {
-    "url": "ldap://127.0.0.1:389",
+    "url": "ldap://localhost:41859",
+    "start_tls": true,
     "bind_dn_template": "cn={username},dc=example,dc=org",
     "base_dn": "dc=example,dc=org",
     "timeout_secs": 10
@@ -9,14 +10,15 @@
   "auth": {
     "bad_settings": [
       "",
-      { "url": "ldap://127.0.0.1:389", "bind_dn_template": "cn=fixed,dc=example,dc=org", "base_dn": "dc=example,dc=org" },
-      { "url": "ldap://127.0.0.1:389", "bind_dn_template": "cn={username},dc=example,dc=org", "base_dn": "dc=example,dc=org", "timeout_secs": 0 },
-      { "url": "ldap://127.0.0.1:389", "bind_dn_template": "cn={username},dc=example,dc=org", "base_dn": "dc=example,dc=org", "ca_cert_pem": "-----BEGIN CERTIFICATE-----" },
-      { "url": "ldap://127.0.0.1:389", "bind_dn_template": "cn={username},dc=example,dc=org", "base_dn": "dc=example,dc=org", "bogus": 1 }
+      { "url": "ldap://localhost:41859", "bind_dn_template": "cn=fixed,dc=example,dc=org", "base_dn": "dc=example,dc=org" },
+      { "url": "ldap://localhost:41859", "bind_dn_template": "cn={username},dc=example,dc=org", "base_dn": "dc=example,dc=org", "timeout_secs": 0 },
+      { "url": "ldap://localhost:41859", "bind_dn_template": "cn={username},dc=example,dc=org", "base_dn": "dc=example,dc=org", "ca_cert_pem": "-----BEGIN CERTIFICATE-----" },
+      { "url": "ldap://localhost:41859", "bind_dn_template": "cn={username},dc=example,dc=org", "base_dn": "dc=example,dc=org", "bogus": 1 }
     ],
     "rotated_settings": {
-      "url": "ldap://127.0.0.1:389",
-        "bind_dn_template": "uid={username},ou=people,dc=example,dc=org",
+      "url": "ldap://localhost:41859",
+      "start_tls": true,
+      "bind_dn_template": "uid={username},ou=people,dc=example,dc=org",
       "base_dn": "dc=example,dc=org"
     },
     "cases": [
