@@ -31,6 +31,11 @@ repository = "https://github.com/GetBusbar/busbar-auth-ldap"
 [workspace.dependencies]
 busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "39374ec00e50dd06caad7af948b867703f0e2fe1" }
 busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "39374ec00e50dd06caad7af948b867703f0e2fe1" }
+# THE SUITE'S HOST CONNECTOR (dev-only; auth-ldap-plugin/tests/support/conformance_host.rs,
+# rendered because the declares file states network needs): busbar's connector and its TLS
+# test kit at the pin, and the transport framers those needs name, at the revs busbar links.
+busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "39374ec00e50dd06caad7af948b867703f0e2fe1", features = ["test-support"] }
+busbar-transport-tcp = { git = "https://github.com/GetBusbar/busbar-transport-tcp", rev = "4af9e2ca8bc164d0066e6d107024ba416192a4ba" }
 # busbar's root [workspace.dependencies], third-party rows, at 39374ec00e50dd06caad7af948b867703f0e2fe1
 a2a-lf = "0.3.0"
 a2a-pb = "0.2.0"
@@ -119,3 +124,9 @@ redis = { version = "1", default-features = false, features = ["script"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 ulid = "1"
 
+# ONE busbar-contract (the suite's host connector): the transport framers above name
+# busbar-contract at their own revs of busbar; this repo's pin serves them all, as busbar
+# patches them to its own tree. The source is busbar spelled through www.github.com: Cargo
+# refuses a patch that names the source it patches.
+[patch."https://github.com/GetBusbar/busbar"]
+busbar-contract = { git = "https://www.github.com/GetBusbar/busbar", rev = "39374ec00e50dd06caad7af948b867703f0e2fe1" }
