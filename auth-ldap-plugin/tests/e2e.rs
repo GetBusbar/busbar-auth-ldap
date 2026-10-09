@@ -3,14 +3,14 @@
 
 //! Plugin-SIDE live end-to-end for the AD/LDAP login plugin — the mirror of `auth-oidc-plugin`'s
 //! `tests/e2e.rs`, testing THIS plugin's OWN token-exchange direction (the GET credential-FORM flow:
-//! chooser → form → POST creds → the plugin BINDs its own LDAP socket → key).
+//! chooser → form → POST creds → the plugin BINDs over the host connector's stream → key).
 //!
 //! LDAP is a `Credential` method: there is no held-token/redirect path, so the faithful test is a REAL
 //! busbar boot driving the real form POST, with the plugin binding against a READY-MADE OpenLDAP
 //! container (never a hand-rolled directory), provided by CI as a service container and addressed via
 //! `BUSBAR_TEST_LDAP_URL` (mirrors the store plugins' `BUSBAR_TEST_POSTGRES_URL`). The container
 //! auto-creates the base suffix + admin from its own env; this test seeds the test user/group over
-//! LDAP itself (`ldap3`, the same client the plugin uses) — the CI-service equivalent of feeding
+//! LDAP itself (`ldap3`, a dev-only client; the plugin speaks its own sans-IO codec) — the CI-service equivalent of feeding
 //! busbar/scripts/fixtures/auth-ldap/seed.ldif, kept in-test so the plugin's CI is self-contained.
 //!
 //! GATING: `BUSBAR_TEST_LDAP_URL` unset ⇒ SKIP loudly (local, no docker) — never a silent pass.
@@ -91,6 +91,7 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
             // land there: an inherited CARGO_TARGET_DIR (set for the outer `cargo test`) would
             // redirect it into the plugin's own target dir.
             .env_remove("CARGO_TARGET_DIR")
+            .env("BUSBAR_RELEASE_PUBKEY", E2E_RELEASE_PUBKEY)
             .status()
             .expect("run cargo build for busbar / busbar-plugin-pack");
         assert!(
@@ -103,6 +104,17 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         root.join("target/release/busbar-plugin-pack"),
     )
 }
+
+/// THE TEST-ONLY FIRST-PARTY KEYPAIR (ed25519, `busbar-plugin-pack keygen`), never the release key.
+/// busbar grants the `operator-infrastructure` egress class this module's `tcp` need declares to a
+/// FIRST-PARTY plugin only (`busbar_plugin_loader::sign::egress_grant`): the busbar built here
+/// embeds the public half (`BUSBAR_RELEASE_PUBKEY`, compile time, as busbar's signing gate builds
+/// it) and the tarball is signed with the private half, so the plugin under test is first-party.
+/// Fixed, so the cached busbar build is reused across runs (the same pair busbar-store-postgres's
+/// e2e uses).
+const E2E_RELEASE_PUBKEY: &str = "9209607c315f66473c8cca8bf9a7b8031115d01bb47341613cebf57f0e4f271c";
+const E2E_RELEASE_PRIVKEY: &str =
+    "290f2453f236650ab21b85a95d49b9dab088518e829e4d524b01e441636ab327";
 
 fn plugin_path() -> Option<std::path::PathBuf> {
     let candidate = (|| {
@@ -128,7 +140,12 @@ fn plugin_path() -> Option<std::path::PathBuf> {
     candidate
 }
 
-fn pack_ldap(pack_bin: &std::path::Path, so: &std::path::Path, out: &std::path::Path) {
+fn pack_ldap(
+    pack_bin: &std::path::Path,
+    version: &str,
+    so: &std::path::Path,
+    out: &std::path::Path,
+) {
     let status = std::process::Command::new(pack_bin)
         .args([
             "pack",
@@ -141,7 +158,7 @@ fn pack_ldap(pack_bin: &std::path::Path, so: &std::path::Path, out: &std::path::
             "--kind",
             "auth",
             "--version",
-            "0.0.0-e2e",
+            version,
             "--publisher",
             "busbar",
             "--description",
@@ -150,8 +167,8 @@ fn pack_ldap(pack_bin: &std::path::Path, so: &std::path::Path, out: &std::path::
             "Apache-2.0",
             "--out",
             out.to_str().unwrap(),
-            "--allow-unsigned",
         ])
+        .env("BUSBAR_SIGN_KEY", E2E_RELEASE_PRIVKEY)
         .status()
         .expect("run busbar-plugin-pack");
     assert!(status.success(), "packing the ldap plugin must succeed");
@@ -258,15 +275,50 @@ fn seed_directory(url: &str) {
     let _ = ldap.unbind();
 }
 
-/// Run one credential login on the library module directly (no busbar boot).
+/// THE TEST'S OWN STREAM to the live directory: a plaintext TCP socket in this test only (the
+/// shipped plugin opens none; its stream is the host connector's). Every call answers at once.
+struct TestStream(Option<std::net::TcpStream>);
+
+impl busbar_auth_ldap::conversation::Wire for TestStream {
+    fn establish(&mut self, target: &str) -> std::task::Poll<Result<(), String>> {
+        let s = std::net::TcpStream::connect(target).map_err(|e| e.to_string());
+        std::task::Poll::Ready(s.and_then(|s| {
+            s.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+                .map_err(|e| e.to_string())?;
+            self.0 = Some(s);
+            Ok(())
+        }))
+    }
+    fn secure(&mut self) -> std::task::Poll<Result<(), String>> {
+        std::task::Poll::Ready(Err("the test stream is plaintext".into()))
+    }
+    fn write(&mut self, bytes: &[u8]) -> std::task::Poll<Result<usize, String>> {
+        use std::io::Write as _;
+        let s = self.0.as_mut().expect("established");
+        std::task::Poll::Ready(s.write(bytes).map_err(|e| e.to_string()))
+    }
+    fn read(&mut self, buf: &mut [u8]) -> std::task::Poll<Result<usize, String>> {
+        use std::io::Read as _;
+        let s = self.0.as_mut().expect("established");
+        std::task::Poll::Ready(s.read(buf).map_err(|e| e.to_string()))
+    }
+}
+
+/// Run one credential login on the library module directly (no busbar boot): the module's codec
+/// over the test's own stream.
 fn live_login(settings: serde_json::Value, username: &str, password: &str) -> Login {
     let cfg: busbar_auth_ldap::LdapConfig =
         serde_json::from_value(settings).expect("live ldap settings parse");
     let module = busbar_auth_ldap::LdapModule::new(cfg).expect("live ldap settings are valid");
-    module.login(Some(username), Some(password))
+    let mut conv = busbar_auth_ldap::conversation::Conversation::new();
+    let mut stream = TestStream(None);
+    match module.login_over(&mut conv, &mut stream, Some(username), Some(password), None) {
+        std::task::Poll::Ready(login) => login,
+        std::task::Poll::Pending => panic!("the test stream never pends"),
+    }
 }
 
-/// The real `ldap3` backend against the live directory, in BOTH directory shapes: direct bind and
+/// The module's codec against the live directory, in BOTH directory shapes: direct bind and
 /// search-then-bind (service bind, Subtree user lookup under base_dn, re-bind as the found DN). Each
 /// must Identify alice with the canonical principal id and exactly the role her `seeAlso` group maps
 /// to (`admins`), and must Reject a wrong password.
@@ -343,10 +395,16 @@ fn login_cookie(resp: &reqwest::blocking::Response) -> String {
         .expect("begin sets the busbar_login cookie")
 }
 
-fn wait_for_health(client: &reqwest::blocking::Client, url: &str, child: &mut std::process::Child) {
+fn wait_for_health(
+    client: &reqwest::blocking::Client,
+    url: &str,
+    child: &mut std::process::Child,
+    log: &std::path::Path,
+) {
     for _ in 0..150 {
         if let Ok(Some(status)) = child.try_wait() {
-            panic!("busbar exited early during health poll: {status}");
+            let said = std::fs::read_to_string(log).unwrap_or_default();
+            panic!("busbar exited early during health poll: {status}\n{said}");
         }
         if client
             .get(url)
@@ -392,6 +450,10 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
     std::fs::create_dir_all(&plugins_dir).unwrap();
     pack_ldap(
         &pack_bin,
+        // The version the plugin states in its Statement (the logic crate's, which this crate
+        // shares): busbar-plugin-pack refuses any other. A fresh deployment holds no high-water mark
+        // for the name, so no first-party floor applies.
+        env!("CARGO_PKG_VERSION"),
         &so_path,
         &plugins_dir.join("busbar-auth-ldap.tar.gz"),
     );
@@ -423,6 +485,7 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
         format!(
             "listen: \"127.0.0.1:{data_port}\"\n\
              public_url: \"https://gate.busbar.e2e\"\n\
+             store:\n  module: memory\n\
              identity-providers:\n  admin-tokens: {{ module: admin-tokens, token: {{ env: BUSBAR_ADMIN_TOKEN }} }}\n\
              \x20 ldap:\n    module: ldap\n    browser_login: {{}}\n\
              \x20   settings:\n      url: \"{url}\"\n\
@@ -442,6 +505,7 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
     )
     .unwrap();
 
+    let stderr_log = work.join("busbar.stderr");
     let mut child = std::process::Command::new(&busbar_bin)
         .env("BUSBAR_CONFIG", &config)
         .env("BUSBAR_PROVIDERS", &providers)
@@ -449,11 +513,11 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
         .env("BUSBAR_ADMIN_TOKEN", "e2e-admin-token")
         .env("BUSBAR_STATE_FILE", "")
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&stderr_log).expect("busbar's stderr log"))
         .spawn()
         .expect("spawn busbar with identity-providers.ldap");
     let base = format!("http://127.0.0.1:{data_port}");
-    wait_for_health(&client, &format!("{base}/healthz"), &mut child);
+    wait_for_health(&client, &format!("{base}/healthz"), &mut child, &stderr_log);
 
     // begin: GET ?method=ldap → 200 credential form + cookie.
     let begin = client
