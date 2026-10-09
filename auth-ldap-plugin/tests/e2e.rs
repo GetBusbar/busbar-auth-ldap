@@ -91,6 +91,7 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
             // land there: an inherited CARGO_TARGET_DIR (set for the outer `cargo test`) would
             // redirect it into the plugin's own target dir.
             .env_remove("CARGO_TARGET_DIR")
+            .env("BUSBAR_RELEASE_PUBKEY", E2E_RELEASE_PUBKEY)
             .status()
             .expect("run cargo build for busbar / busbar-plugin-pack");
         assert!(
@@ -102,6 +103,34 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         root.join("target/release/busbar"),
         root.join("target/release/busbar-plugin-pack"),
     )
+}
+
+/// THE TEST-ONLY FIRST-PARTY KEYPAIR (ed25519, `busbar-plugin-pack keygen`), never the release key.
+/// busbar grants the `operator-infrastructure` egress class this module's `tcp` need declares to a
+/// FIRST-PARTY plugin only (`busbar_plugin_loader::sign::egress_grant`): the busbar built here
+/// embeds the public half (`BUSBAR_RELEASE_PUBKEY`, compile time, as busbar's signing gate builds
+/// it) and the tarball is signed with the private half, so the plugin under test is first-party.
+/// Fixed, so the cached busbar build is reused across runs (the same pair busbar-store-postgres's
+/// e2e uses).
+const E2E_RELEASE_PUBKEY: &str = "9209607c315f66473c8cca8bf9a7b8031115d01bb47341613cebf57f0e4f271c";
+const E2E_RELEASE_PRIVKEY: &str =
+    "290f2453f236650ab21b85a95d49b9dab088518e829e4d524b01e441636ab327";
+
+/// The built busbar's version (`busbar --version`): a first-party plugin below it is refused by
+/// the first-party anti-downgrade floor, so the tarball is packed at exactly this version.
+fn busbar_version(busbar_bin: &std::path::Path) -> String {
+    let out = std::process::Command::new(busbar_bin)
+        .arg("--version")
+        .output()
+        .expect("run busbar --version");
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.split_whitespace()
+        .find_map(|w| {
+            let v = w.trim_start_matches('v');
+            (v.split('.').count() == 3 && v.split('.').all(|p| p.parse::<u64>().is_ok()))
+                .then(|| v.to_owned())
+        })
+        .unwrap_or_else(|| panic!("busbar --version names no version: {text}"))
 }
 
 fn plugin_path() -> Option<std::path::PathBuf> {
@@ -128,7 +157,12 @@ fn plugin_path() -> Option<std::path::PathBuf> {
     candidate
 }
 
-fn pack_ldap(pack_bin: &std::path::Path, so: &std::path::Path, out: &std::path::Path) {
+fn pack_ldap(
+    pack_bin: &std::path::Path,
+    version: &str,
+    so: &std::path::Path,
+    out: &std::path::Path,
+) {
     let status = std::process::Command::new(pack_bin)
         .args([
             "pack",
@@ -141,7 +175,7 @@ fn pack_ldap(pack_bin: &std::path::Path, so: &std::path::Path, out: &std::path::
             "--kind",
             "auth",
             "--version",
-            "0.0.0-e2e",
+            version,
             "--publisher",
             "busbar",
             "--description",
@@ -150,8 +184,8 @@ fn pack_ldap(pack_bin: &std::path::Path, so: &std::path::Path, out: &std::path::
             "Apache-2.0",
             "--out",
             out.to_str().unwrap(),
-            "--allow-unsigned",
         ])
+        .env("BUSBAR_SIGN_KEY", E2E_RELEASE_PRIVKEY)
         .status()
         .expect("run busbar-plugin-pack");
     assert!(status.success(), "packing the ldap plugin must succeed");
@@ -433,6 +467,7 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
     std::fs::create_dir_all(&plugins_dir).unwrap();
     pack_ldap(
         &pack_bin,
+        &busbar_version(&busbar_bin),
         &so_path,
         &plugins_dir.join("busbar-auth-ldap.tar.gz"),
     );
