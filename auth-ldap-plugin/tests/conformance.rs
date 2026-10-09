@@ -11,18 +11,22 @@
 //! user's credential an identity, a wrong password refused), exact crossing counts, the two folds equal,
 //! its RED arms.
 //!
-//! THE HOST: the module's one `tcp` need is served by busbar's own connector, composed as the root
-//! composes it (`conformance_host`, rendered by the fleet template), dialling the live directory
-//! (plugin-ci's `openldap` service on loopback, plaintext as the operator-infrastructure class
-//! allows). So every login proves the module reaches its directory only through the host's
-//! connection, never a socket of its own.
+//! THE HOST (ARCHITECT Q-P4-9): the module's one `tcp` need is served by busbar's own connector,
+//! composed as the root composes it (`conformance_host`, rendered by the fleet template), and the
+//! module asks for STARTTLS (`start_tls`): it sends the StartTLS extended request in the clear, the
+//! suite's TLS front answers it ([`start_tls`]) and handshakes with a certificate that chains to the
+//! suite's test CA, the anchors only the HOST's TLS is handed (`tls:`); the module then asks the
+//! connector to secure the stream (`upgrade_secure`), and the front carries the secured connection
+//! to the live directory (plugin-ci's `openldap` service, `BUSBAR_TEST_LDAP_URL`). So every login
+//! proves the module's connection is secured by the host, verified against the anchors.
 //!
 //! THE RED ARMS of this repo's own, same file: the Statement declares its one need and secret
 //! reference and never blocks; a directory that takes the connection and never answers is an
 //! outage at the login's deadline; and THE BAN ([`net_ban`]): the shipped closure holds no socket
 //! crate and no TLS stack.
 
-use std::net::TcpListener;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -54,6 +58,7 @@ busbar_plugin_loader::conformance_suite! {
     cdylib: "busbar_auth_ldap_plugin",
     inputs: include_str!("conformance.json"),
     host: host,
+    tls: conformance_host::anchors(),
 }
 
 /// The live directory's address (`BUSBAR_TEST_LDAP_URL`'s authority; the service container's
@@ -69,6 +74,71 @@ fn upstream() -> &'static str {
             .unwrap_or("127.0.0.1:389")
             .to_owned()
     })
+}
+
+/// The StartTLS extended operation's name (RFC 4511 §4.14.1).
+const START_TLS_OID: &[u8] = b"1.3.6.1.4.1.1466.20037";
+
+/// One BER element off `tcp`: its tag and its content.
+fn element(tcp: &mut TcpStream) -> Option<(u8, Vec<u8>)> {
+    let mut head = [0_u8; 2];
+    tcp.read_exact(&mut head).ok()?;
+    let len = if head[1] & 0x80 == 0 {
+        usize::from(head[1])
+    } else {
+        let n = usize::from(head[1] & 0x7f);
+        if n == 0 || n > 4 {
+            return None;
+        }
+        let mut wide = [0_u8; 4];
+        tcp.read_exact(&mut wide[4 - n..]).ok()?;
+        u32::from_be_bytes(wide) as usize
+    };
+    if len > 64 * 1024 {
+        return None;
+    }
+    let mut content = vec![0_u8; len];
+    tcp.read_exact(&mut content).ok()?;
+    Some((head[0], content))
+}
+
+/// The first element inside `content`: its whole encoding and the rest.
+fn first(content: &[u8]) -> Option<(&[u8], &[u8])> {
+    let len = *content.get(1)?;
+    if len & 0x80 != 0 {
+        return None;
+    }
+    let end = 2 + usize::from(len);
+    (content.len() >= end).then(|| content.split_at(end))
+}
+
+/// LDAP's cleartext negotiation: the client's StartTLS extended request (an `LDAPMessage` whose
+/// protocol op is `[APPLICATION 23]` naming [`START_TLS_OID`]) answered with a successful
+/// `[APPLICATION 24]` extended response on the same message id; anything else is not a TLS client.
+fn start_tls(tcp: &mut TcpStream) -> bool {
+    let Some((0x30, message)) = element(tcp) else {
+        return false;
+    };
+    let Some((id, op)) = first(&message) else {
+        return false;
+    };
+    if id.first() != Some(&0x02) || op.first() != Some(&0x77) {
+        return false;
+    }
+    if !op.windows(START_TLS_OID.len()).any(|w| w == START_TLS_OID) {
+        return false;
+    }
+    // ExtendedResponse: resultCode success, matchedDN "", diagnosticMessage "", responseName.
+    let mut response = vec![0x0a, 0x01, 0x00, 0x04, 0x00, 0x04, 0x00, 0x8a];
+    response.push(START_TLS_OID.len() as u8);
+    response.extend_from_slice(START_TLS_OID);
+    let mut body = id.to_vec();
+    body.push(0x78);
+    body.push(response.len() as u8);
+    body.extend_from_slice(&response);
+    let mut out = vec![0x30, body.len() as u8];
+    out.extend_from_slice(&body);
+    tcp.write_all(&out).is_ok()
 }
 
 /// The live directory's administrator (the service container's own, from its env).
@@ -114,12 +184,14 @@ fn seed_user() {
     });
 }
 
-/// The host the suite binds the module over, with the suite's user in the live directory.
+/// The host the suite binds the module over, with the TLS front its settings name already
+/// listening and the suite's user in the directory behind it.
 fn host(
     wake: Arc<dyn Fn(u64) + Send + Sync>,
     anchors: Option<&str>,
 ) -> Arc<dyn busbar_contract::conn::DeclaredConns> {
     seed_user();
+    conformance_host::tls_front(start_tls, upstream());
     conformance_host::host(wake, anchors)
 }
 
