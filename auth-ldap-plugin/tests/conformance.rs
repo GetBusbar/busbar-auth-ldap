@@ -57,14 +57,15 @@ use busbar_contract::conn::{
 };
 use busbar_contract::ids::StreamId;
 use busbar_contract::services::{
-    Caller, HostServices, Later, Ran, Reading, RecordsList, Stored, UNSERVED,
+    Caller, DiskDest, HookAsk, HostServices, Later, NestAsk, Ran, Reading, RecordsList, Snapshot,
+    Stored, UNSERVED,
 };
 use busbar_contract::transport::ConnFacts;
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
 use busbar_plugin_loader::dispatch::kinds::secret::Secret;
 use busbar_plugin_loader::dispatch::{
-    in_head, load_dropped, load_linked, now_ns, out_head, Bind, Called, DispatchConfig, Dispatcher,
-    Frame, LinkedRow, NoSink, Plugin,
+    in_head, load_dropped, load_linked, now_ns, out_head, Bind, Called, ConnTable, DispatchConfig,
+    Dispatcher, Frame, LinkedRow, NoSink, Plugin,
 };
 
 #[path = "support/net_ban.rs"]
@@ -276,6 +277,7 @@ impl Conns for Directory {
         conn: ConnId,
         bytes: &[u8],
         _: bool,
+        _: bool,
     ) -> Result<usize, ConnError> {
         let mut streams = self.streams.lock().unwrap();
         let s = streams.get_mut(&conn.0).ok_or(ConnError::Closed)?;
@@ -352,11 +354,16 @@ impl DeclaredConns for Directory {
         _: NeedId,
         _: &ReadNeed,
         _: Option<&str>,
+        _: Option<&str>,
     ) -> Result<(), ConnError> {
         Ok(())
     }
     fn declared(&self, _: InstanceId, _: NeedId) -> Option<Result<(), ConnError>> {
         Some(Ok(()))
+    }
+    /// The directory is reached over a raw byte stream: the `tcp` carrier is the one scheme served.
+    fn serves_scheme(&self, transport: &str) -> bool {
+        transport == "tcp"
     }
 }
 
@@ -374,7 +381,7 @@ impl HostServices for Clock {
             mono_ns: now_ns(),
         }
     }
-    fn dest_judge(&self, _: &str, _: u32, _: bool, _: Option<Later>) -> Ran {
+    fn dest_judge(&self, _: &str, _: u32, _: u32, _: Option<Later>) -> Ran {
         Ran::Now(Stored::refused(UNSERVED))
     }
     fn records_get(&self, _: &Caller, _: &str, _: &[u8], _: Later) -> Ran {
@@ -400,6 +407,45 @@ impl HostServices for Clock {
     }
     fn random_fill(&self, _: u64) -> Stored {
         Stored::refused(UNSERVED)
+    }
+    fn trust_verify(&self, _: &Caller, _: &str, _: &[u8], _: &[u8]) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn records_secret(&self, _: &str, _: &str, _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn unit_nest(&self, _: &Caller, _: Option<u64>, _: NestAsk, _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn work_open(&self, _: &Caller, _: Option<u64>, _: &str, _: &[u8], _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn work_find(&self, _: &Caller, _: Option<u64>, _: &[u8], _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn work_settle(&self, _: &Caller, _: u64, _: &[u8], _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn work_resume(&self, _: &Caller, _: Option<u64>, _: u64, _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn disk_append(&self, _: &DiskDest, _: Vec<u8>, _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn verify_lookup(&self, _: &Caller, _: &[u8], _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn verify_store(&self, _: &Caller, _: &[u8], _: &[u8], _: u64) -> Stored {
+        Stored::refused(UNSERVED)
+    }
+    fn content_scan(&self, _: &Caller, _: Option<u64>, _: &[u8], _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn hook_call(&self, _: &Caller, _: Option<u64>, _: HookAsk, _: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
+    }
+    fn snapshot_read(&self, _: &Caller, _: u32) -> Snapshot {
+        Snapshot::Refused(UNSERVED)
     }
 }
 
@@ -435,7 +481,7 @@ impl Arm {
             max_inflight_cap: 64,
             sink: Arc::new(NoSink),
             dispatcher: dispatcher.adopter(),
-            conns: Some(conns),
+            conns: ConnTable::Host(conns),
         };
         let plugin = match self {
             Arm::Linked => load_linked::<Auth>(&row(), bind),
@@ -799,7 +845,9 @@ fn the_linked_and_the_dropped_in_ldap_door_are_one_module() {
         max_inflight_cap: 64,
         sink: Arc::new(NoSink),
         dispatcher: d.adopter(),
-        conns: None,
+        // A probe bind: nothing is opened, so a refusal below is the kind's or the Statement's,
+        // never a missing connection table.
+        conns: ConnTable::Probe,
     };
     let stated = row().statement;
     assert!(load_linked::<Secret>(&row(), plain()).is_err());
