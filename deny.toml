@@ -1,5 +1,5 @@
-# RENDERED by `busbar-release plugin sync` from GetBusbar/busbar-release template/ and busbar's
-# `.github/fleet/deps.toml` at 39374ec00e50dd06caad7af948b867703f0e2fe1; a hand edit is overwritten by the next sync. CI runs
+# RENDERED by `busbar-release plugin heal` from GetBusbar/busbar-release template/ and busbar's
+# `.github/fleet/deps.toml` at 7356bbfb6baeb0e9245a59dc74f8b4bfadb2c5a4; a hand edit is overwritten by the next sync. CI runs
 # `cargo deny check` on it (busbar's plugin-ci.yml at the pin). The license allowlist is busbar's own;
 # the one reviewed git source is busbar itself, at the pin.
 [graph]
@@ -138,6 +138,8 @@ deny = [
     { crate = "reqwest:>=0.13.0", reason = "busbar resolves reqwest to 0.12.28; a plugin may not pull a second version (OWNER 2026-10-02)" },
     { crate = "ring:<0.17.0", reason = "busbar resolves ring to 0.17.14; a plugin may not pull a second version (OWNER 2026-10-02)" },
     { crate = "ring:>=0.18.0", reason = "busbar resolves ring to 0.17.14; a plugin may not pull a second version (OWNER 2026-10-02)" },
+    { crate = "rmcp:<3.0.0", reason = "busbar resolves rmcp to 3.1.2; a plugin may not pull a second version (OWNER 2026-10-02)" },
+    { crate = "rmcp:>=4.0.0", reason = "busbar resolves rmcp to 3.1.2; a plugin may not pull a second version (OWNER 2026-10-02)" },
     { crate = "rustls:<0.23.0", reason = "busbar resolves rustls to 0.23.45; a plugin may not pull a second version (OWNER 2026-10-02)" },
     { crate = "rustls:>=0.24.0", reason = "busbar resolves rustls to 0.23.45; a plugin may not pull a second version (OWNER 2026-10-02)" },
     { crate = "rustls-pki-types:<1.0.0", reason = "busbar resolves rustls-pki-types to 1.15.1; a plugin may not pull a second version (OWNER 2026-10-02)" },
