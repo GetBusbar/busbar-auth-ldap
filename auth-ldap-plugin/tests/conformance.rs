@@ -235,8 +235,26 @@ fn silent_directory() -> String {
     at
 }
 
+/// THE MEMORY ONE `complete_login` LENDS THE PLUGIN: the submitted form fields and the host's
+/// identity buffer, lent whole to the op (THE DESIGN §2) so its pointers stay valid however the
+/// call ends.
+struct LoginLend {
+    _fields: [Vec<u8>; 2],
+    named: Vec<NamedValue>,
+    bytes: Vec<u8>,
+    groups: Vec<Span>,
+}
+
+// SAFETY: the raw pointers in `named` point into `_fields`, owned by the same `LoginLend` (their
+// heap buffers never move); nothing mutates it once its frame is built but the plugin's writes into
+// `bytes` and `groups`, which the host reads only after the op completes.
+unsafe impl Send for LoginLend {}
+// SAFETY: as above.
+unsafe impl Sync for LoginLend {}
+
 /// One credential login SUBMITTED on a ticket (as the host submits it) and awaited: the answer and
-/// the verdict it names.
+/// the verdict it names. Everything the frame names is in a [`LoginLend`] the op owns (the suite's
+/// lending submit, `conformance::on_ticket_frame`).
 fn login(
     p: &busbar_plugin_loader::dispatch::Plugin<Auth>,
     d: &Dispatcher,
@@ -249,32 +267,45 @@ fn login(
         fmt: BLOB_OCTETS,
         flags: BLOB_SECRET,
     };
-    let named = [
+    let fields = [username.as_bytes().to_vec(), password.as_bytes().to_vec()];
+    let named = vec![
         NamedValue {
             name: AbiStr::over(b"username"),
-            value: secret(username.as_bytes()),
+            value: secret(&fields[0]),
         },
         NamedValue {
             name: AbiStr::over(b"password"),
-            value: secret(password.as_bytes()),
+            value: secret(&fields[1]),
         },
     ];
-    let mut bytes = vec![0_u8; IDENTITY_BUF_BYTES];
-    let mut groups = vec![Span { offset: 0, len: 0 }; IDENTITY_GROUPS as usize];
+    let mut lend = Box::new(LoginLend {
+        _fields: fields,
+        named,
+        bytes: vec![0_u8; IDENTITY_BUF_BYTES],
+        groups: vec![Span { offset: 0, len: 0 }; IDENTITY_GROUPS as usize],
+    });
     let mut f: Frame<CompleteLoginIn, IdentifyOut> =
         Frame::new(conformance::input(), conformance::output());
-    f.input.submitted = named.as_ptr();
-    f.input.submitted_len = named.len();
+    f.input.submitted = lend.named.as_ptr();
+    f.input.submitted_len = lend.named.len();
     f.input.out_buf = IdentityBuf {
-        buf: bytes.as_mut_ptr(),
-        buf_cap: bytes.len(),
-        groups: groups.as_mut_ptr(),
-        groups_cap: groups.len() as u32,
+        buf: lend.bytes.as_mut_ptr(),
+        buf_cap: lend.bytes.len(),
+        groups: lend.groups.as_mut_ptr(),
+        groups_cap: lend.groups.len() as u32,
         _reserved: 0,
     };
+    let lend: Arc<LoginLend> = Arc::from(lend);
     let deadline = now_ns().saturating_add(Duration::from_secs(30).as_nanos() as u64);
-    let (called, frame) =
-        conformance::on_ticket_frame(p, d, slot::COMPLETE_LOGIN, f, DeadlineClass::Call, deadline);
+    let (called, frame) = conformance::on_ticket_frame(
+        p,
+        d,
+        slot::COMPLETE_LOGIN,
+        f,
+        DeadlineClass::Call,
+        deadline,
+        lend as busbar_plugin_loader::dispatch::Lent,
+    );
     let verdict = match frame {
         Some(f) if called.outcome == Outcome::Ready => f.out.verdict.to_string(),
         _ => "none".to_string(),
