@@ -37,6 +37,7 @@ jobs:
       needs_prompt: ""
       needs_user: ""
       declares_file: "auth-ldap/declares.json"
+      former_names: "busbar-auth-ldap-plugin"
     secrets: inherit
   consumer-verify:
     needs: release
