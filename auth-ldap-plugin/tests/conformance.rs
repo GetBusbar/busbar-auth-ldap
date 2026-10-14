@@ -235,8 +235,26 @@ fn silent_directory() -> String {
     at
 }
 
+/// THE MEMORY ONE `complete_login` LENDS THE PLUGIN: the submitted form fields and the host's
+/// identity buffer, lent whole to the op (THE DESIGN §2) so its pointers stay valid however the
+/// call ends.
+struct LoginLend {
+    _fields: [Vec<u8>; 2],
+    named: Vec<NamedValue>,
+    bytes: Vec<u8>,
+    groups: Vec<Span>,
+}
+
+// SAFETY: the raw pointers in `named` point into `_fields`, owned by the same `LoginLend` (their
+// heap buffers never move); nothing mutates it once its frame is built but the plugin's writes into
+// `bytes` and `groups`, which the host reads only after the op completes.
+unsafe impl Send for LoginLend {}
+// SAFETY: as above.
+unsafe impl Sync for LoginLend {}
+
 /// One credential login SUBMITTED on a ticket (as the host submits it) and awaited: the answer and
-/// the verdict it names.
+/// the verdict it names. Everything the frame names is in a [`LoginLend`] the op owns (the suite's
+/// lending submit, `conformance::on_ticket_frame`).
 fn login(
     p: &busbar_plugin_loader::dispatch::Plugin<Auth>,
     d: &Dispatcher,
@@ -249,32 +267,45 @@ fn login(
         fmt: BLOB_OCTETS,
         flags: BLOB_SECRET,
     };
-    let named = [
+    let fields = [username.as_bytes().to_vec(), password.as_bytes().to_vec()];
+    let named = vec![
         NamedValue {
             name: AbiStr::over(b"username"),
-            value: secret(username.as_bytes()),
+            value: secret(&fields[0]),
         },
         NamedValue {
             name: AbiStr::over(b"password"),
-            value: secret(password.as_bytes()),
+            value: secret(&fields[1]),
         },
     ];
-    let mut bytes = vec![0_u8; IDENTITY_BUF_BYTES];
-    let mut groups = vec![Span { offset: 0, len: 0 }; IDENTITY_GROUPS as usize];
+    let mut lend = Box::new(LoginLend {
+        _fields: fields,
+        named,
+        bytes: vec![0_u8; IDENTITY_BUF_BYTES],
+        groups: vec![Span { offset: 0, len: 0 }; IDENTITY_GROUPS as usize],
+    });
     let mut f: Frame<CompleteLoginIn, IdentifyOut> =
         Frame::new(conformance::input(), conformance::output());
-    f.input.submitted = named.as_ptr();
-    f.input.submitted_len = named.len();
+    f.input.submitted = lend.named.as_ptr();
+    f.input.submitted_len = lend.named.len();
     f.input.out_buf = IdentityBuf {
-        buf: bytes.as_mut_ptr(),
-        buf_cap: bytes.len(),
-        groups: groups.as_mut_ptr(),
-        groups_cap: groups.len() as u32,
+        buf: lend.bytes.as_mut_ptr(),
+        buf_cap: lend.bytes.len(),
+        groups: lend.groups.as_mut_ptr(),
+        groups_cap: lend.groups.len() as u32,
         _reserved: 0,
     };
+    let lend: Arc<LoginLend> = Arc::from(lend);
     let deadline = now_ns().saturating_add(Duration::from_secs(30).as_nanos() as u64);
-    let (called, frame) =
-        conformance::on_ticket_frame(p, d, slot::COMPLETE_LOGIN, f, DeadlineClass::Call, deadline);
+    let (called, frame) = conformance::on_ticket_frame(
+        p,
+        d,
+        slot::COMPLETE_LOGIN,
+        f,
+        DeadlineClass::Call,
+        deadline,
+        lend as busbar_plugin_loader::dispatch::Lent,
+    );
     let verdict = match frame {
         Some(f) if called.outcome == Outcome::Ready => f.out.verdict.to_string(),
         _ => "none".to_string(),
@@ -282,198 +313,17 @@ fn login(
     format!("{:?} verdict={verdict}", called.outcome)
 }
 
-/// Host services offering the clock alone (the dispatcher's own timebase), refusing the rest: the
-/// login arms its deadline off the host's clock, as the kernel serves it.
+/// Host services offering the clock alone (the dispatcher's own timebase), refusing the rest (busbar's
+/// shared test double answers every other service unserved): the login arms its deadline off the
+/// host's clock, as the kernel serves it.
 struct ClockOnly;
 
-impl busbar_contract::services::HostServices for ClockOnly {
+impl busbar_contract::services::double::ServicesDouble for ClockOnly {
     fn now(&self) -> busbar_contract::services::Reading {
         busbar_contract::services::Reading {
             wall_ns: 0,
             mono_ns: now_ns(),
         }
-    }
-    fn dest_judge(
-        &self,
-        _: &str,
-        _: u32,
-        _: u32,
-        _: Option<busbar_contract::services::Later>,
-    ) -> busbar_contract::services::Ran {
-        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
-    }
-    fn records_get(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: &str,
-        _: &[u8],
-        _: busbar_contract::services::Later,
-    ) -> busbar_contract::services::Ran {
-        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
-    }
-    fn records_list(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: busbar_contract::services::RecordsList,
-        _: busbar_contract::services::Later,
-    ) -> busbar_contract::services::Ran {
-        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
-    }
-    fn records_claim(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: &str,
-        _: &[u8],
-        _: u64,
-        _: busbar_contract::services::Later,
-    ) -> busbar_contract::services::Ran {
-        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
-    }
-    fn sign(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: &[u8],
-    ) -> busbar_contract::services::Stored {
-        busbar_contract::services::Stored::refused("no")
-    }
-    fn trust_sight(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: &str,
-        _: &str,
-        _: busbar_contract::services::Later,
-    ) -> busbar_contract::services::Ran {
-        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
-    }
-    fn trust_due(
-        &self,
-        _: &busbar_contract::services::Caller,
-    ) -> busbar_contract::services::Stored {
-        busbar_contract::services::Stored::refused("no")
-    }
-    fn trust_verify(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: &str,
-        _: &[u8],
-        _: &[u8],
-    ) -> busbar_contract::services::Stored {
-        busbar_contract::services::Stored::refused("no")
-    }
-    fn entitlement_check(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: Option<u64>,
-        _: &str,
-    ) -> busbar_contract::services::Stored {
-        busbar_contract::services::Stored::refused("no")
-    }
-    fn random_fill(&self, _: u64) -> busbar_contract::services::Stored {
-        busbar_contract::services::Stored::refused("no")
-    }
-    fn records_secret(
-        &self,
-        _: &str,
-        _: &str,
-        _: busbar_contract::services::Later,
-    ) -> busbar_contract::services::Ran {
-        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
-    }
-    fn unit_nest(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: Option<u64>,
-        _: busbar_contract::services::NestAsk,
-        _: busbar_contract::services::Later,
-    ) -> busbar_contract::services::Ran {
-        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
-    }
-    fn work_open(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: Option<u64>,
-        _: &str,
-        _: &[u8],
-        _: busbar_contract::services::Later,
-    ) -> busbar_contract::services::Ran {
-        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
-    }
-    fn work_find(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: Option<u64>,
-        _: &[u8],
-        _: busbar_contract::services::Later,
-    ) -> busbar_contract::services::Ran {
-        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
-    }
-    fn work_settle(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: u64,
-        _: &[u8],
-        _: busbar_contract::services::Later,
-    ) -> busbar_contract::services::Ran {
-        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
-    }
-    fn work_resume(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: Option<u64>,
-        _: u64,
-        _: busbar_contract::services::Later,
-    ) -> busbar_contract::services::Ran {
-        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
-    }
-    fn disk_append(
-        &self,
-        _: &busbar_contract::services::DiskDest,
-        _: Vec<u8>,
-        _: busbar_contract::services::Later,
-    ) -> busbar_contract::services::Ran {
-        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
-    }
-    fn verify_lookup(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: &[u8],
-        _: busbar_contract::services::Later,
-    ) -> busbar_contract::services::Ran {
-        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
-    }
-    fn verify_store(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: &[u8],
-        _: &[u8],
-        _: u64,
-    ) -> busbar_contract::services::Stored {
-        busbar_contract::services::Stored::refused("no")
-    }
-    fn content_scan(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: Option<u64>,
-        _: &[u8],
-        _: busbar_contract::services::Later,
-    ) -> busbar_contract::services::Ran {
-        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
-    }
-    fn hook_call(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: Option<u64>,
-        _: busbar_contract::services::HookAsk,
-        _: busbar_contract::services::Later,
-    ) -> busbar_contract::services::Ran {
-        busbar_contract::services::Ran::Now(busbar_contract::services::Stored::refused("no"))
-    }
-    fn snapshot_read(
-        &self,
-        _: &busbar_contract::services::Caller,
-        _: u32,
-    ) -> busbar_contract::services::Snapshot {
-        busbar_contract::services::Snapshot::Refused("no")
     }
 }
 
