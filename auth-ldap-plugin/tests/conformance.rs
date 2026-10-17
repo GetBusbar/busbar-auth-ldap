@@ -187,7 +187,7 @@ fn seed_user() {
 /// The host the suite binds the module over, with the TLS front its settings name already
 /// listening and the suite's user in the directory behind it.
 fn host(
-    wake: Arc<dyn Fn(u64) + Send + Sync>,
+    wake: busbar_contract::conn::ConnWake,
     anchors: Option<&str>,
 ) -> Arc<dyn busbar_contract::conn::DeclaredConns> {
     seed_user();
