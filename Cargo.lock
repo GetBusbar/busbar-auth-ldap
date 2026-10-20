@@ -228,7 +228,7 @@ dependencies = [
 [[package]]
 name = "busbar-contract"
 version = "1.6.0"
-source = "git+https://www.github.com/GetBusbar/busbar?rev=565f24f25e42370f3f8b5d8b2d91d56950eb4866#565f24f25e42370f3f8b5d8b2d91d56950eb4866"
+source = "git+https://www.github.com/GetBusbar/busbar?rev=7263f4e61b7af7fdadb9079394d139547e61d1c0#7263f4e61b7af7fdadb9079394d139547e61d1c0"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -251,7 +251,7 @@ dependencies = [
 [[package]]
 name = "busbar-core-connector"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=565f24f25e42370f3f8b5d8b2d91d56950eb4866#565f24f25e42370f3f8b5d8b2d91d56950eb4866"
+source = "git+https://github.com/GetBusbar/busbar?rev=7263f4e61b7af7fdadb9079394d139547e61d1c0#7263f4e61b7af7fdadb9079394d139547e61d1c0"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -279,7 +279,7 @@ dependencies = [
 [[package]]
 name = "busbar-kernel"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=565f24f25e42370f3f8b5d8b2d91d56950eb4866#565f24f25e42370f3f8b5d8b2d91d56950eb4866"
+source = "git+https://github.com/GetBusbar/busbar?rev=7263f4e61b7af7fdadb9079394d139547e61d1c0#7263f4e61b7af7fdadb9079394d139547e61d1c0"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -328,7 +328,7 @@ dependencies = [
 [[package]]
 name = "busbar-kernel-audit"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=565f24f25e42370f3f8b5d8b2d91d56950eb4866#565f24f25e42370f3f8b5d8b2d91d56950eb4866"
+source = "git+https://github.com/GetBusbar/busbar?rev=7263f4e61b7af7fdadb9079394d139547e61d1c0#7263f4e61b7af7fdadb9079394d139547e61d1c0"
 dependencies = [
  "busbar-contract",
  "ed25519-dalek",
@@ -339,7 +339,7 @@ dependencies = [
 [[package]]
 name = "busbar-kernel-breaker"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=565f24f25e42370f3f8b5d8b2d91d56950eb4866#565f24f25e42370f3f8b5d8b2d91d56950eb4866"
+source = "git+https://github.com/GetBusbar/busbar?rev=7263f4e61b7af7fdadb9079394d139547e61d1c0#7263f4e61b7af7fdadb9079394d139547e61d1c0"
 dependencies = [
  "busbar-contract",
  "httpdate",
@@ -348,7 +348,7 @@ dependencies = [
 [[package]]
 name = "busbar-kernel-egress"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=565f24f25e42370f3f8b5d8b2d91d56950eb4866#565f24f25e42370f3f8b5d8b2d91d56950eb4866"
+source = "git+https://github.com/GetBusbar/busbar?rev=7263f4e61b7af7fdadb9079394d139547e61d1c0#7263f4e61b7af7fdadb9079394d139547e61d1c0"
 dependencies = [
  "busbar-contract",
  "bytes",
@@ -358,7 +358,7 @@ dependencies = [
 [[package]]
 name = "busbar-kernel-identity"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=565f24f25e42370f3f8b5d8b2d91d56950eb4866#565f24f25e42370f3f8b5d8b2d91d56950eb4866"
+source = "git+https://github.com/GetBusbar/busbar?rev=7263f4e61b7af7fdadb9079394d139547e61d1c0#7263f4e61b7af7fdadb9079394d139547e61d1c0"
 dependencies = [
  "busbar-contract",
  "hex",
@@ -368,7 +368,7 @@ dependencies = [
 [[package]]
 name = "busbar-kernel-ledger"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=565f24f25e42370f3f8b5d8b2d91d56950eb4866#565f24f25e42370f3f8b5d8b2d91d56950eb4866"
+source = "git+https://github.com/GetBusbar/busbar?rev=7263f4e61b7af7fdadb9079394d139547e61d1c0#7263f4e61b7af7fdadb9079394d139547e61d1c0"
 dependencies = [
  "busbar-contract",
  "ring",
@@ -378,7 +378,7 @@ dependencies = [
 [[package]]
 name = "busbar-kernel-scope"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=565f24f25e42370f3f8b5d8b2d91d56950eb4866#565f24f25e42370f3f8b5d8b2d91d56950eb4866"
+source = "git+https://github.com/GetBusbar/busbar?rev=7263f4e61b7af7fdadb9079394d139547e61d1c0#7263f4e61b7af7fdadb9079394d139547e61d1c0"
 dependencies = [
  "busbar-contract",
 ]
@@ -386,7 +386,7 @@ dependencies = [
 [[package]]
 name = "busbar-kernel-wal"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=565f24f25e42370f3f8b5d8b2d91d56950eb4866#565f24f25e42370f3f8b5d8b2d91d56950eb4866"
+source = "git+https://github.com/GetBusbar/busbar?rev=7263f4e61b7af7fdadb9079394d139547e61d1c0#7263f4e61b7af7fdadb9079394d139547e61d1c0"
 dependencies = [
  "busbar-contract",
  "ring",
@@ -395,7 +395,7 @@ dependencies = [
 [[package]]
 name = "busbar-plugin-loader"
 version = "1.5.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=565f24f25e42370f3f8b5d8b2d91d56950eb4866#565f24f25e42370f3f8b5d8b2d91d56950eb4866"
+source = "git+https://github.com/GetBusbar/busbar?rev=7263f4e61b7af7fdadb9079394d139547e61d1c0#7263f4e61b7af7fdadb9079394d139547e61d1c0"
 dependencies = [
  "busbar-contract",
  "ed25519-dalek",
@@ -415,7 +415,7 @@ dependencies = [
 [[package]]
 name = "busbar-transport-tcp"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar-transport-tcp?rev=e5014aef4f1cff11901843ddf4cf7a2910585ac6#e5014aef4f1cff11901843ddf4cf7a2910585ac6"
+source = "git+https://github.com/GetBusbar/busbar-transport-tcp?rev=223ec3f02000de94089a1752635b9e206f7492e5#223ec3f02000de94089a1752635b9e206f7492e5"
 dependencies = [
  "busbar-contract",
 ]
