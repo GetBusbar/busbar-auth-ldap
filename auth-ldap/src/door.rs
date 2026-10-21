@@ -26,8 +26,6 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::marker::PhantomData;
-use std::mem::size_of;
-use std::ptr;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
 
@@ -41,8 +39,8 @@ use busbar_contract::abi::auth::{
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, Span, BLOB_ABSENT};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement, REWRITE_ALIAS};
+use busbar_contract::abi::mechanism::call::{AbiStr, Outcome, Span, BLOB_ABSENT};
+use busbar_contract::abi::mechanism::door::{Rewrite, Statement, REWRITE_ALIAS};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::with_tail;
 use busbar_contract::abi::sdk::conn::{Answer, Connector, Host};
@@ -62,10 +60,7 @@ pub const ALIAS: &str = "ldap";
 /// The most logins one instance holds in flight.
 const MAX_INFLIGHT: u32 = 64;
 
-const NONE: AbiStr = AbiStr {
-    ptr: ptr::null(),
-    len: 0,
-};
+const NONE: AbiStr = AbiStr::ABSENT;
 
 /// The other name config may call it by.
 const REWRITES: &[Rewrite] = &[Rewrite {
@@ -76,21 +71,14 @@ const REWRITES: &[Rewrite] = &[Rewrite {
 }];
 
 /// The auth tail: inbound (always PASS) and the credential login.
-const TAIL: AuthTail = AuthTail {
-    head: KindTailHead {
-        size: size_of::<AuthTail>() as u32,
-        _reserved: 0,
-    },
-    caps: CAP_INBOUND | CAP_LOGIN,
-    facts: FACT_CACHEABLE,
-    login_kind: LOGIN_KIND_CREDENTIAL,
+const TAIL: AuthTail = {
+    let mut t = AuthTail::EMPTY;
+    t.caps = CAP_INBOUND | CAP_LOGIN;
+    t.facts = FACT_CACHEABLE;
+    t.login_kind = LOGIN_KIND_CREDENTIAL;
     // `verify` judges no credential (always PASS): it needs only the head, once per request.
-    inbound_points: POINT_HEAD,
-    styles: ptr::null(),
-    styles_len: 0,
-    operator_principal: NONE,
-    credential_kinds: ptr::null(),
-    credential_kinds_len: 0,
+    t.inbound_points = POINT_HEAD;
+    t
 };
 
 /// The need every login's stream is established on.
@@ -104,27 +92,15 @@ pub const NEED: u32 = 0;
 /// refuses a `ca_cert_pem` setting, so the connector's own trust is the one used (a need whose
 /// `trust_from` names a setting the configuration leaves unset is not declared, so naming it would
 /// leave the module no stream at all). The timeout is the module's own, per login (`timeout_secs`).
-pub const NEEDS: &[Need] = &[Need {
-    direction: DIRECTION_OUTBOUND,
-    egress_class: EGRESS_OPERATOR_INFRASTRUCTURE,
-    transport: abi_str("tcp"),
-    auth: NONE,
-    target_from: NONE,
-    trust_from: NONE,
-    details: Blob {
-        ptr: ptr::null(),
-        len: 0,
-        fmt: BLOB_ABSENT,
-        flags: 0,
-    },
-    keep_response_headers: ptr::null(),
-    keep_response_headers_len: 0,
-    timeout_ms: 0,
+pub const NEEDS: &[Need] = &[{
+    let mut n = Need::EMPTY;
+    n.direction = DIRECTION_OUTBOUND;
+    n.egress_class = EGRESS_OPERATOR_INFRASTRUCTURE;
+    n.transport = abi_str("tcp");
+    n.timeout_ms = 0;
     // A raw stream has no response head: the named (empty) list.
-    keep_mode: KEEP_NAMED,
-    _reserved: 0,
-    deny_response_headers: ptr::null(),
-    deny_response_headers_len: 0,
+    n.keep_mode = KEEP_NAMED;
+    n
 }];
 
 /// The settings keys whose values are secret references, resolved in this order into
@@ -134,15 +110,10 @@ pub const SECRET_REFS: &[AbiStr] = &[abi_str("bind_service_password")];
 
 /// This plugin's Statement.
 pub const STATEMENT: Statement = with_tail(
-    Statement {
-        rewrites: REWRITES.as_ptr(),
-        rewrites_len: REWRITES.len(),
-        needs: NEEDS.as_ptr(),
-        needs_len: NEEDS.len(),
-        secret_refs: SECRET_REFS.as_ptr(),
-        secret_refs_len: SECRET_REFS.len(),
-        ..statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
-    },
+    statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
+        .with_rewrites(REWRITES)
+        .with_needs(NEEDS)
+        .with_secret_refs(SECRET_REFS),
     &TAIL,
 );
 
@@ -231,37 +202,12 @@ impl Slot for BeginLogin {
 }
 
 /// The submitted form fields `(name, value)`, lent for the call.
-///
-/// The safe SDK lends no accessor for `CompleteLoginIn::submitted`, so this reads the list the
-/// auth ABI states directly: the one `unsafe` in this crate.
-#[allow(unsafe_code)]
-fn submitted(input: &CompleteLoginIn) -> Vec<(&[u8], &[u8])> {
-    /// # Safety
-    /// NULL, or `len` readable bytes at `p` for the call.
-    unsafe fn bytes<'a>(p: *const u8, len: usize) -> &'a [u8] {
-        if p.is_null() || len == 0 {
-            return &[];
-        }
-        // SAFETY: the caller's contract.
-        unsafe { std::slice::from_raw_parts(p, len) }
-    }
-    if input.submitted.is_null() || input.submitted_len == 0 {
-        return Vec::new();
-    }
-    // SAFETY: `abi::auth::CompleteLoginIn`: `submitted` is `submitted_len` `NamedValue`s the host
-    // lends for the call, each name and value bytes it lends for the call; `input` is the
-    // trampoline's copy of that `in`, alive for the call, and nothing here outlives it.
-    unsafe {
-        std::slice::from_raw_parts(input.submitted, input.submitted_len)
-            .iter()
-            .map(|f| {
-                (
-                    bytes(f.name.ptr, f.name.len),
-                    bytes(f.value.ptr, f.value.len),
-                )
-            })
-            .collect()
-    }
+fn submitted(input: Lent<'_, CompleteLoginIn>) -> Vec<(&[u8], &[u8])> {
+    input
+        .submitted()
+        .iter()
+        .map(|f| (f.name().bytes(), f.value().bytes()))
+        .collect()
 }
 
 /// The submitted value of the field `name`, when it is text.
@@ -402,7 +348,7 @@ fn now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
 fn drive(
     h: &Held<Ldap>,
     instance: &Instance<'_, Held<Ldap>>,
-    input: &CompleteLoginIn,
+    input: Lent<'_, CompleteLoginIn>,
     out: &mut Out<'_, IdentifyOut>,
 ) -> Poll<Login> {
     let ticket = instance.ticket();
@@ -481,7 +427,7 @@ impl SafeSlot for CompleteLogin {
             .remove(&key);
         let login = match kept {
             Some(p) => Login::Identity(p),
-            None => match drive(h, &instance, input.get(), &mut out) {
+            None => match drive(h, &instance, input, &mut out) {
                 Poll::Ready(login) => login,
                 Poll::Pending => return Outcome::Pending,
             },
@@ -496,7 +442,7 @@ impl SafeSlot for CompleteLogin {
                 Outcome::Ready
             }
             Login::Identity(p) => {
-                let answer = write_identity(&p, input.field(|i| &i.out_buf), &mut out);
+                let answer = write_identity(&p, input.out_buf(), &mut out);
                 // `0` is never a minted generation: a ticket-less call gets no re-call.
                 if answer == Outcome::Failed && ticket.generation != 0 {
                     ldap.reached
@@ -544,7 +490,7 @@ mod table {
 }
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
-pub use table::door;
+pub use table::{door, MACRO_DOOR};
 
 #[cfg(test)]
 #[path = "tests/door_tests.rs"]
