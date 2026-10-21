@@ -108,12 +108,24 @@ pub const NEEDS: &[Need] = &[{
 /// by host)").
 pub const SECRET_REFS: &[AbiStr] = &[abi_str("bind_service_password")];
 
+busbar_contract::statement_extensions!(
+    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246).
+    EXTENSIONS: [(
+        busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
+        include_bytes!("../declares.json")
+    )]
+);
+
 /// This plugin's Statement.
 pub const STATEMENT: Statement = with_tail(
-    statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
-        .with_rewrites(REWRITES)
-        .with_needs(NEEDS)
-        .with_secret_refs(SECRET_REFS),
+    {
+        let mut s = statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
+            .with_rewrites(REWRITES)
+            .with_needs(NEEDS)
+            .with_secret_refs(SECRET_REFS);
+        s.extensions = EXTENSIONS;
+        s
+    },
     &TAIL,
 );
 

@@ -1,22 +1,22 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The **AD/LDAP auth module as a droppable busbar plugin**: the logic crate re-exported whole, and
-//! its door (`busbar_auth_ldap::door::door`, a `plugin_door!` over the auth kind's table) exported
+//! The **AD/LDAP auth module as a droppable busbar plugin**: the logic crate's one public item is
+//! its door (`busbar_auth_ldap::door`, a `plugin_door!` over the auth kind's table) exported
 //! as this image's ONE symbol, `busbar_plugin_door` (`export_door!`) behind the `dropped-in` feature. A build that
-//! links the module names `busbar_auth_ldap::door::door` from the logic crate, which exports
-//! nothing.
+//! links the module names `busbar_auth_ldap::door` from the logic crate, which exports
+//! no door symbol.
 //!
 //! This crate is `deny`, not `forbid`: the export macro's `#[unsafe(no_mangle)]` is the one
 //! reviewed exemption (a `forbid` cannot be lifted for it). No other `unsafe` exists here.
 #![deny(unsafe_code)]
 
-pub use busbar_auth_ldap::*;
+pub use busbar_auth_ldap::door;
 
 /// The exported door, behind `dropped-in` (the cdylib build only): the macro's `#[no_mangle]` symbol is
 /// the one exemption.
 #[cfg(feature = "dropped-in")]
 #[allow(unsafe_code)]
 mod exported {
-    busbar_contract::export_door!(busbar_auth_ldap::door::door);
+    busbar_contract::export_door!(busbar_auth_ldap::door);
 }

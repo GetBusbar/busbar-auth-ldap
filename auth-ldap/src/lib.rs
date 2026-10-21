@@ -40,17 +40,24 @@ use serde::Deserialize;
 use std::task::Poll;
 use std::time::Duration;
 
-pub mod ber;
-pub mod codec;
-pub mod conversation;
-pub mod door;
-pub mod filter;
-pub mod groups;
+mod ber;
+mod codec;
+mod conversation;
+mod door;
+mod filter;
+mod groups;
+
+/// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
+pub use door::door;
 
 use conversation::{Conversation, Over, Wire};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "tests/live_tests.rs"]
+mod live_tests;
 
 /// The maximum number of `memberOf` group values read off a user entry. A hostile or misconfigured
 /// directory could list an unbounded number of groups; collection is capped here to bound memory.
@@ -67,7 +74,7 @@ const MAX_GROUP_VALUES: usize = 4096;
 /// point.
 #[derive(Clone, Deserialize)]
 #[serde(transparent)]
-pub struct SecretString(String);
+struct SecretString(String);
 
 impl SecretString {
     /// Borrow the underlying secret. AUDIT POINT — the one place the plaintext escapes redaction.
@@ -85,7 +92,7 @@ impl fmt::Debug for SecretString {
 /// How a group DN read from the directory becomes a [`Principal`] role string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum RoleFrom {
+enum RoleFrom {
     /// Use the first `CN=` RDN value of the group DN (e.g. `CN=engineers,OU=...` → `engineers`).
     /// The natural, human-facing form to key `role_bindings` on.
     #[default]
@@ -100,7 +107,7 @@ pub enum RoleFrom {
 /// to understand any of these fields.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LdapConfig {
+struct LdapConfig {
     /// The directory URL: `ldaps://ad.corp.example:636` (LDAPS) or `ldap://ad.corp.example:389`
     /// (plaintext, or STARTTLS when `start_tls` is set).
     pub url: String,
@@ -184,7 +191,7 @@ impl LdapConfig {
 
 /// The LDAP auth module: a login-only method (it authenticates a form POST, it does not verify
 /// opaque bearer tokens on the data plane); the work is [`LdapModule::login`].
-pub struct LdapModule {
+struct LdapModule {
     cfg: LdapConfig,
 }
 
@@ -359,7 +366,7 @@ pub(crate) const PASSWORD: (&str, &str) = ("password", "Password");
 
 /// What one credential submission came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Login {
+enum Login {
     /// The directory bound the user: who.
     Identity(Principal),
     /// No usable credential, or the directory refused it.

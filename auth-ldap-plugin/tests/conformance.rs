@@ -30,7 +30,6 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use busbar_auth_ldap::door::MACRO_DOOR;
 use busbar_contract::abi::auth::{
     slot, CompleteLoginIn, IdentifyOut, IdentityBuf, NamedValue, IDENTITY_BUF_BYTES,
     IDENTITY_GROUPS, LOGIN_OUTAGE,
@@ -45,7 +44,9 @@ use busbar_contract::abi::mechanism::door::MARK_BLOCKS;
 use busbar_contract::abi::mechanism::rendering;
 use busbar_plugin_loader::conformance::{self, Leg, Subject};
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
-use busbar_plugin_loader::dispatch::{now_ns, DispatchConfig, Dispatcher, Frame, LinkedRow};
+use busbar_plugin_loader::dispatch::{
+    now_ns, DispatchConfig, Dispatcher, Frame, LinkedRow, LoadedDoor,
+};
 
 #[path = "support/conformance_host.rs"]
 mod conformance_host;
@@ -53,8 +54,16 @@ mod conformance_host;
 #[path = "support/net_ban.rs"]
 mod net_ban;
 
+/// This crate's own bare `door`, as the loader takes a door it did not read from a library.
+#[allow(unused_unsafe)]
+fn loaded() -> LoadedDoor {
+    // SAFETY: `door` is this crate's own `plugin_door!` entry: it answers the `'static`, fully
+    // initialised door the SDK laid out.
+    unsafe { LoadedDoor::from_raw(busbar_auth_ldap::door) }
+}
+
 busbar_plugin_loader::conformance_suite! {
-    door: busbar_auth_ldap::door::MACRO_DOOR,
+    loaded: loaded(),
     cdylib: "busbar_auth_ldap_plugin",
     inputs: include_str!("conformance.json"),
     host: host,
@@ -201,7 +210,7 @@ fn host(
 /// states the same Statement.
 #[test]
 fn red_the_statement_declares_one_operator_infrastructure_stream_and_never_blocks() {
-    let stated = LinkedRow::of_macro(MACRO_DOOR)
+    let stated = LinkedRow::of_loaded(loaded())
         .expect("the linked door renders")
         .statement;
     let read = rendering::read(&stated).expect("the rendering reads");
@@ -217,7 +226,7 @@ fn red_the_statement_declares_one_operator_infrastructure_stream_and_never_block
     );
     assert_eq!(read.secret_refs, vec!["bind_service_password".to_string()]);
     assert_eq!(read.marks & MARK_BLOCKS, 0, "no call blocks");
-    let subject = Subject::of_macro(MACRO_DOOR, "busbar_auth_ldap_plugin", "{}");
+    let subject = Subject::of_loaded(loaded(), "busbar_auth_ldap_plugin", "{}");
     assert_eq!(subject.stated(), stated);
 }
 
@@ -340,7 +349,7 @@ fn red_a_directory_that_never_answers_is_an_outage_at_the_deadline() {
     .to_string();
     let inputs = serde_json::json!({ "settings": serde_json::from_str::<serde_json::Value>(&settings).unwrap() })
         .to_string();
-    let s = Subject::of_macro(MACRO_DOOR, "busbar_auth_ldap_plugin", &inputs)
+    let s = Subject::of_loaded(loaded(), "busbar_auth_ldap_plugin", &inputs)
         .with_host(conformance_host::host)
         .with_anchors(conformance_host::anchors());
     for leg in [Leg::Linked, Leg::Dropped] {
@@ -366,4 +375,15 @@ fn red_a_directory_that_never_answers_is_an_outage_at_the_deadline() {
             "{leg:?}: close"
         );
     }
+}
+
+/// The door's Statement carries the whole `declares` document under `EXT_DECLARES`.
+#[test]
+fn the_statement_carries_the_declares_document() {
+    let row = LinkedRow::of_loaded(loaded()).unwrap();
+    let read = rendering::read(&row.statement).unwrap();
+    assert_eq!(
+        busbar_contract::abi::mechanism::extensions::declares(&read.extensions.bytes),
+        Some(&include_bytes!("../../auth-ldap/declares.json")[..]),
+    );
 }

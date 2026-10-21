@@ -203,6 +203,7 @@ name = "busbar-auth-ldap"
 version = "0.1.0"
 dependencies = [
  "busbar-contract",
+ "ldap3",
  "serde",
  "serde_json",
  "tracing",
