@@ -22,3 +22,6 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 serde_json = { workspace = true }
+# TESTS ONLY: the live-directory test's seeder (src/tests/live_tests.rs; deps.toml `ldap3`, plaintext, no
+# TLS feature). Never in the shipped closure.
+ldap3 = { workspace = true }
