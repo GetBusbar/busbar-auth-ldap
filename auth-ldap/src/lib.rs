@@ -38,6 +38,7 @@ use busbar_contract::auth::Principal;
 use core::fmt;
 use serde::Deserialize;
 use std::task::Poll;
+#[cfg(test)]
 use std::time::Duration;
 
 mod ber;
@@ -182,6 +183,7 @@ fn default_timeout_secs() -> u64 {
     10
 }
 
+#[cfg(test)]
 impl LdapConfig {
     /// The connect/op timeout as a [`Duration`].
     pub fn timeout(&self) -> Duration {
