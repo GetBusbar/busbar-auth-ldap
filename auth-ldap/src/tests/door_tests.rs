@@ -86,12 +86,12 @@ fn a_field_is_found_by_its_declared_name_and_must_be_text() {
 }
 
 fn text(s: AbiStr) -> &'static str {
-    if s.ptr.is_null() {
+    if s.is_absent() {
         return "";
     }
     // SAFETY: every string in the Statement is `'static` UTF-8 (`abi_str`).
-    #[allow(unsafe_code)]
-    let bytes = unsafe { std::slice::from_raw_parts(s.ptr, s.len) };
+    #[allow(unsafe_code, unused_unsafe)]
+    let bytes = unsafe { s.bytes() };
     std::str::from_utf8(bytes).expect("UTF-8")
 }
 
@@ -104,11 +104,14 @@ fn the_statement_states_a_non_blocking_credential_login_over_one_need() {
     assert_eq!(TAIL.caps & CAP_OUTBOUND, 0);
     assert_eq!(TAIL.login_kind, LOGIN_KIND_CREDENTIAL);
     assert_eq!(STATEMENT.marks & MARK_BLOCKS, 0, "no call blocks");
-    assert_eq!(STATEMENT.rewrites_len, 1);
+    assert_eq!(STATEMENT.rewrites_len(), 1);
     assert_eq!((NAME, ALIAS), ("busbar-auth-ldap", "ldap"));
     assert_eq!(FORM.len(), 2);
 
-    assert_eq!((STATEMENT.needs, STATEMENT.needs_len), (NEEDS.as_ptr(), 1));
+    assert_eq!(
+        (STATEMENT.needs_ptr(), STATEMENT.needs_len()),
+        (NEEDS.as_ptr(), 1)
+    );
     let need = &NEEDS[NEED as usize];
     assert_eq!(need.direction, DIRECTION_OUTBOUND);
     assert_eq!(need.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE);
@@ -119,7 +122,7 @@ fn the_statement_states_a_non_blocking_credential_login_over_one_need() {
         "the connector's own trust"
     );
 
-    assert_eq!(STATEMENT.secret_refs_len, 1);
+    assert_eq!(STATEMENT.secret_refs_len(), 1);
     assert_eq!(text(SECRET_REFS[0]), "bind_service_password");
 }
 
