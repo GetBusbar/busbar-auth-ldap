@@ -33,7 +33,7 @@ jobs:
     with:
       service: openldap
       busbar_checkout: true
-      macos_test: "cargo test --workspace --locked --lib --test conformance -- --skip the_linked_and_the_dropped_in_door_are_one_plugin --skip red_a_moved_crossing_count_is_refused"
+      macos_test: "env -u CI cargo test --workspace --locked --lib --test conformance -- --skip the_linked_and_the_dropped_in_door_are_one_plugin --skip red_a_moved_crossing_count_is_refused"
       extra_test: ""
       plugin_crate: busbar-auth-ldap-plugin
       plugin_kind: auth
