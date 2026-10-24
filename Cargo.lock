@@ -200,7 +200,7 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "busbar-auth-ldap"
-version = "0.1.0"
+version = "1.6.0"
 dependencies = [
  "busbar-contract",
  "serde",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "busbar-auth-ldap-plugin"
-version = "0.1.0"
+version = "1.6.0"
 dependencies = [
  "base64 0.22.1",
  "busbar-auth-ldap",
