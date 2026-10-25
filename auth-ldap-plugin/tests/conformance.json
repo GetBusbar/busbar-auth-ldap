@@ -6,6 +6,7 @@
     "base_dn": "dc=example,dc=org",
     "timeout_secs": 10
   },
+  "credentials": ["conformance-password", "wrong-password"],
   "dialing_steps": ["complete_login submitted", "complete_login rejected submitted"],
   "auth": {
     "bad_settings": [

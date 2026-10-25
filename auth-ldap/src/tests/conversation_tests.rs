@@ -101,6 +101,13 @@ impl Wire for Directory {
         Poll::Ready(Ok(n))
     }
 
+    fn write_sealed(
+        &mut self,
+        w: &mut busbar_contract::abi::sdk::cred::SealedWrite,
+    ) -> Poll<Result<(), String>> {
+        busbar_contract::abi::sdk::test_support::chip::drive_sealed(w, |b| self.write(b))
+    }
+
     fn read(&mut self, buf: &mut [u8]) -> Poll<Result<usize, String>> {
         if self.wait() {
             return Poll::Pending;
@@ -196,7 +203,7 @@ fn login(m: &LdapModule, dir: &mut Directory, password: &str) -> (Login, u32) {
 
 fn direct_bytes(group_attr: &str) -> Vec<u8> {
     [
-        codec::bind(1, ALICE, "pw").to_vec(),
+        chip_bind(1, ALICE, "pw").to_vec(),
         codec::search(
             2,
             ALICE,
@@ -299,7 +306,7 @@ fn start_tls_sends_the_extended_request_then_secures() {
     );
     let want = [
         codec::start_tls(1),
-        codec::bind(2, ALICE, "pw").to_vec(),
+        chip_bind(2, ALICE, "pw").to_vec(),
         codec::search(
             3,
             ALICE,
@@ -376,7 +383,7 @@ fn search_then_bind_speaks_in_1_5_5s_order() {
     };
     assert_eq!(p.roles, vec!["admins".to_string()]);
     let want = [
-        codec::bind(1, "cn=svc,dc=corp,dc=example", "svc-pw").to_vec(),
+        chip_bind(1, "cn=svc,dc=corp,dc=example", "svc-pw").to_vec(),
         codec::search(
             2,
             "dc=corp,dc=example",
@@ -385,7 +392,7 @@ fn search_then_bind_speaks_in_1_5_5s_order() {
             &["dn"],
         )
         .unwrap(),
-        codec::bind(3, ALICE, "pw").to_vec(),
+        chip_bind(3, ALICE, "pw").to_vec(),
         codec::search(
             4,
             ALICE,
@@ -417,7 +424,11 @@ fn a_search_keeps_at_most_two_entries() {
     let mut conv = Conversation::new();
     let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, None, 10);
     over.connect().expect("connects");
-    over.simple_bind("cn=svc,dc=x", "pw").expect("binds");
+    over.simple_bind(
+        "cn=svc,dc=x",
+        &busbar_contract::abi::sdk::test_support::chip::cred("pw"),
+    )
+    .expect("binds");
     let got = over
         .search("dc=x", SearchScope::Subtree, "(uid=alice)", &["dn"])
         .expect("searches");
@@ -578,6 +589,13 @@ fn a_directory_that_never_answers_is_an_outage_after_the_timeout() {
         fn write(&mut self, b: &[u8]) -> Poll<Result<usize, String>> {
             Poll::Ready(Ok(b.len()))
         }
+
+        fn write_sealed(
+            &mut self,
+            w: &mut busbar_contract::abi::sdk::cred::SealedWrite,
+        ) -> std::task::Poll<Result<(), String>> {
+            busbar_contract::abi::sdk::test_support::chip::drive_sealed(w, |b| self.write(b))
+        }
         fn read(&mut self, _: &mut [u8]) -> Poll<Result<usize, String>> {
             Poll::Pending
         }
@@ -638,6 +656,13 @@ impl Wire for Slow {
     }
     fn write(&mut self, bytes: &[u8]) -> Poll<Result<usize, String>> {
         self.dir.write(bytes)
+    }
+
+    fn write_sealed(
+        &mut self,
+        w: &mut busbar_contract::abi::sdk::cred::SealedWrite,
+    ) -> Poll<Result<(), String>> {
+        busbar_contract::abi::sdk::test_support::chip::drive_sealed(w, |b| self.write(b))
     }
     fn read(&mut self, buf: &mut [u8]) -> Poll<Result<usize, String>> {
         self.owed = !self.owed;
@@ -720,6 +745,13 @@ impl Wire for Mute {
     fn write(&mut self, b: &[u8]) -> Poll<Result<usize, String>> {
         Poll::Ready(Ok(b.len()))
     }
+
+    fn write_sealed(
+        &mut self,
+        w: &mut busbar_contract::abi::sdk::cred::SealedWrite,
+    ) -> std::task::Poll<Result<(), String>> {
+        busbar_contract::abi::sdk::test_support::chip::drive_sealed(w, |b| self.write(b))
+    }
     fn read(&mut self, _: &mut [u8]) -> Poll<Result<usize, String>> {
         Poll::Pending
     }
@@ -768,6 +800,13 @@ fn a_timeout_reads_in_1_5_5s_words() {
         }
         fn write(&mut self, _: &[u8]) -> Poll<Result<usize, String>> {
             Poll::Pending
+        }
+
+        fn write_sealed(
+            &mut self,
+            w: &mut busbar_contract::abi::sdk::cred::SealedWrite,
+        ) -> std::task::Poll<Result<(), String>> {
+            busbar_contract::abi::sdk::test_support::chip::drive_sealed(w, |b| self.write(b))
         }
         fn read(&mut self, _: &mut [u8]) -> Poll<Result<usize, String>> {
             Poll::Pending
@@ -832,14 +871,14 @@ fn the_resolved_service_secret_reaches_only_the_bind() {
         }
         assert_eq!(
             dir.written,
-            codec::bind(1, "cn=svc,dc=x", SECRET).to_vec(),
+            chip_bind(1, "cn=svc,dc=x", SECRET).to_vec(),
             "the bind sends it"
         );
     }
 }
 
-/// The BIND request in flight holds the cleartext password: a `Debug` of the conversation (it is
-/// `pub`) must never print it.
+/// The BIND request in flight is the chip's sealed message: a `Debug` of the conversation (it is
+/// `pub`) must never print the password.
 #[test]
 fn a_conversation_in_flight_never_debug_prints_the_password() {
     const PW: &str = "hunter2-s3cret";
@@ -849,10 +888,7 @@ fn a_conversation_in_flight_never_debug_prints_the_password() {
     let mut held = false;
     for _ in 0..200 {
         let answer = m.login_over(&mut conv, &mut dir, Some("alice"), Some(PW), Some(0));
-        held |= conv
-            .doing
-            .as_ref()
-            .is_some_and(|d| d.out.windows(PW.len()).any(|w| w == PW.as_bytes()));
+        held |= conv.doing.as_ref().is_some_and(|d| d.sealed.is_some());
         let shown = format!("{conv:?}");
         assert!(!shown.contains(PW), "the password is in: {shown}");
         // `Debug` of a byte slice prints its bytes as decimals: the password's, too, is a leak.
@@ -972,4 +1008,10 @@ fn the_request_in_flight_is_wiped_on_drop() {
         }
     }
     assert!(held, "a request was held in flight");
+}
+
+/// The chip's BIND message for `dn` with `password`, as the wire carries it (dev-only test support).
+fn chip_bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
+    use busbar_contract::abi::sdk::test_support::chip::{cred, sealed_bytes};
+    sealed_bytes(&cred(password).ldap_simple_bind(id, dn))
 }

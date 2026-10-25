@@ -143,10 +143,10 @@ fn the_resolved_service_secret_wins_over_the_literal() {
         "bind_service_password": "literal"
     }"#;
     let pw = |m: &LdapModule| {
-        m.cfg
-            .bind_service_password
-            .as_ref()
-            .map(|p| p.expose().to_owned())
+        m.cfg.bind_service_password.as_ref().map(|p| {
+            String::from_utf8(busbar_contract::abi::sdk::test_support::chip::cred_bytes(p))
+                .expect("text")
+        })
     };
     let m = LdapModule::from_settings_with(blob, &[b"resolved".as_slice()]).expect("opens");
     assert_eq!(pw(&m).as_deref(), Some("resolved"));

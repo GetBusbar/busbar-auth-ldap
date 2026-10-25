@@ -46,6 +46,7 @@ use busbar_contract::abi::mechanism::door::{Rewrite, Statement, REWRITE_ALIAS};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::with_tail;
 use busbar_contract::abi::sdk::conn::{Answer, Connector, Host};
+use busbar_contract::abi::sdk::cred::SealedWrite;
 use busbar_contract::abi::sdk::door::{abi_str, statement, AbiIn, AbiOut, Slot};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
@@ -332,6 +333,10 @@ impl Wire for HostWire<'_> {
 
     fn read(&mut self, buf: &mut [u8]) -> Poll<Result<usize, String>> {
         self.serve(|c, s| c.read(s, buf))
+    }
+
+    fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>> {
+        self.serve(|c, s| w.poll(c, s))
     }
 }
 

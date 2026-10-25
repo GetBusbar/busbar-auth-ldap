@@ -37,6 +37,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 #![cfg_attr(test, deny(unsafe_code))]
 
+use busbar_contract::abi::sdk::cred::Cred;
 use busbar_contract::auth::Principal;
 use core::fmt;
 use serde::Deserialize;
@@ -61,33 +62,6 @@ mod tests;
 /// 4096 is far above any real-world group membership; the module logs when it truncates.
 const MAX_GROUP_VALUES: usize = 4096;
 
-/// A secret string that NEVER reveals itself through `Debug`/`Display`.
-///
-/// The end-user password rides `Redacted` across the wire, but the service-account bind password
-/// lives on the `#[derive(Debug)]` [`LdapConfig`], where a bare `String` could leak into a log line,
-/// a `tracing` field, or a panic/`{:?}` dump. This wrapper makes the redaction STRUCTURAL.
-/// It deserializes from a plain JSON string (moved, not copied, into its buffer), the buffer is
-/// wiped on drop ([`Zeroizing`]), and the plaintext is reachable only through the explicit
-/// [`SecretString::expose`] audit point. It is never serialized.
-#[derive(Clone, Deserialize)]
-#[serde(from = "String")]
-pub struct SecretString(Zeroizing<String>);
-
-impl From<String> for SecretString {
-    fn from(s: String) -> Self {
-        Self(Zeroizing::new(s))
-    }
-}
-
-impl zeroize::ZeroizeOnDrop for SecretString {}
-
-impl SecretString {
-    /// Borrow the underlying secret. AUDIT POINT — the one place the plaintext escapes redaction.
-    pub(crate) fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
 /// `url` with any userinfo cut to `***`, safe for a refusal, a log line or `Debug`
 /// (CREDENTIAL-LOCKDOWN H5). The authority ends where the dialer ends it (`/`, `?` or `#`) and its
 /// userinfo is everything up to its LAST `@`, as [`conversation::Endpoint::parse`] reads it. A URL
@@ -104,12 +78,6 @@ pub(crate) fn shown_url(url: &str) -> String {
     match scheme {
         Some(scheme) => format!("{scheme}://***{}", &rest[at..]),
         None => format!("***{}", &rest[at..]),
-    }
-}
-
-impl fmt::Debug for SecretString {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("[REDACTED]")
     }
 }
 
@@ -173,7 +141,7 @@ pub struct LdapConfig {
     /// resolves it into `OpenIn.secrets[0]`, which wins over this value
     /// ([`LdapModule::from_settings_with`]); a 1.5.5 literal here is still accepted.
     #[serde(default)]
-    pub bind_service_password: Option<SecretString>,
+    pub bind_service_password: Option<Cred>,
 
     /// PEM CA bundle to trust for LDAPS/STARTTLS (private AD CA). The need states no
     /// `trust_from`, and as in 1.5.5 [`LdapModule::new`] refuses a config that sets it at boot
@@ -217,7 +185,10 @@ impl fmt::Debug for LdapConfig {
             .field("role_from", &self.role_from)
             .field("user_search_filter", &self.user_search_filter)
             .field("bind_service_dn", &self.bind_service_dn)
-            .field("bind_service_password", &self.bind_service_password)
+            .field(
+                "bind_service_password",
+                &self.bind_service_password.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("ca_cert_pem", &self.ca_cert_pem.is_some())
             .field("start_tls", &self.start_tls)
             .field("allow_insecure_transport", &self.allow_insecure_transport)
@@ -339,7 +310,7 @@ fn check_settings(cfg: &LdapConfig) -> Result<(), String> {
         if cfg
             .bind_service_password
             .as_ref()
-            .is_some_and(|pw| pw.expose().is_empty())
+            .is_some_and(Cred::is_empty)
         {
             return Err(
                 "ldap bind_service_password must not be empty (an empty password becomes \
@@ -454,9 +425,10 @@ impl LdapModule {
     pub fn from_settings_with(settings: &[u8], secrets: &[&[u8]]) -> Result<Self, String> {
         let mut cfg = parse_settings(settings)?;
         if let Some(secret) = secrets.first().filter(|s| !s.is_empty()) {
-            let secret = std::str::from_utf8(secret)
-                .map_err(|_| "ldap bind_service_password secret is not UTF-8".to_string())?;
-            cfg.bind_service_password = Some(SecretString(Zeroizing::new(secret.to_owned())));
+            if std::str::from_utf8(secret).is_err() {
+                return Err("ldap bind_service_password secret is not UTF-8".to_string());
+            }
+            cfg.bind_service_password = Some(Cred::captured(Zeroizing::new(secret.to_vec())));
         }
         Self::new(cfg)
     }
@@ -663,7 +635,7 @@ pub(crate) trait LdapBackend {
     /// Bind with the given DN + password. `Ok(rc)` is the LDAP result code (0 = success, e.g. 49 =
     /// invalidCredentials); `Err` is an operational/transport failure (connect/TLS/timeout), NOT a
     /// statement about the credential's validity, or a pending stream.
-    fn simple_bind(&mut self, dn: &str, password: &str) -> Result<u32, Io>;
+    fn simple_bind(&mut self, dn: &str, password: &Cred) -> Result<u32, Io>;
 
     /// Run a search and return the matched entries. `Err` is an operational failure (which includes a
     /// non-success result code), or a pending stream.
@@ -714,6 +686,8 @@ impl LdapModule {
         username: &str,
         password: &str,
     ) -> Result<Principal, BindError> {
+        // The presented password is held by the chip from here; every bind is its message.
+        let password = &Cred::captured(Zeroizing::new(password.as_bytes().to_vec()));
         // Resolve the DN to bind as: either search-then-bind, or the direct template.
         let user_dn = if let Some(filter_tpl) = &self.cfg.user_search_filter {
             // The direct-template path runs the username through `validate_username` (which rejects
@@ -729,11 +703,10 @@ impl LdapModule {
             let svc_pw = self
                 .cfg
                 .bind_service_password
-                .as_ref()
-                .map(SecretString::expose)
-                .unwrap_or("");
+                .clone()
+                .unwrap_or_else(Cred::empty);
             let rc = ldap
-                .simple_bind(svc_dn, svc_pw)
+                .simple_bind(svc_dn, &svc_pw)
                 .map_err(at("service bind"))?;
             if rc != 0 {
                 return Err(BindError::Directory(format!(

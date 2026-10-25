@@ -20,6 +20,7 @@
 use std::fmt;
 use std::task::Poll;
 
+use busbar_contract::abi::sdk::cred::{Cred, SealedWrite};
 use zeroize::Zeroizing;
 
 use crate::codec::{self, Message, Reply};
@@ -37,6 +38,8 @@ pub trait Wire {
     fn write(&mut self, bytes: &[u8]) -> Poll<Result<usize, String>>;
     /// Read into `buf`: how many bytes arrived; `0` = the far end closed.
     fn read(&mut self, buf: &mut [u8]) -> Poll<Result<usize, String>>;
+    /// Write the chip's whole message `w` (a BIND); `Ready(Ok(()))` once all of it is taken.
+    fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>>;
 }
 
 /// How the connection is secured.
@@ -152,6 +155,8 @@ enum Stage {
 struct Doing {
     stage: Stage,
     out: Zeroizing<Vec<u8>>,
+    /// A BIND's request: the chip's whole message, sent without the plugin reading it.
+    sealed: Option<SealedWrite>,
     sent: usize,
     id: i32,
     entries: Vec<DirEntry>,
@@ -163,6 +168,7 @@ impl fmt::Debug for Doing {
         f.debug_struct("Doing")
             .field("stage", &self.stage)
             .field("out_len", &self.out.len())
+            .field("sealed_len", &self.sealed.as_ref().map(SealedWrite::len))
             .field("sent", &self.sent)
             .field("id", &self.id)
             .field("entries", &self.entries)
@@ -325,6 +331,13 @@ impl<'a, W: Wire> Over<'a, W> {
             let Some(d) = self.conv.doing.as_mut() else {
                 return Ok(());
             };
+            if let Some(w) = d.sealed.as_mut() {
+                return match self.wire.write_sealed(w) {
+                    Poll::Pending => Err(Io::Pending),
+                    Poll::Ready(Err(e)) => self.fail(e),
+                    Poll::Ready(Ok(())) => Ok(()),
+                };
+            }
             if d.sent >= d.out.len() {
                 return Ok(());
             }
@@ -394,6 +407,7 @@ impl<'a, W: Wire> Over<'a, W> {
             Doing {
                 stage: Stage::Send,
                 out: build(id),
+                sealed: None,
                 sent: 0,
                 id,
                 entries: Vec::new(),
@@ -422,6 +436,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
         self.doing(|_| Doing {
             stage: Stage::Establish,
             out: Zeroizing::default(),
+            sealed: None,
             sent: 0,
             id: 0,
             entries: Vec::new(),
@@ -476,11 +491,21 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
         Ok(())
     }
 
-    fn simple_bind(&mut self, dn: &str, password: &str) -> Result<u32, Io> {
+    fn simple_bind(&mut self, dn: &str, password: &Cred) -> Result<u32, Io> {
         if let Some(Kept::Bound(rc)) = self.kept() {
             return Ok(rc);
         }
-        self.request(|id| codec::bind(id, dn, password))?;
+        self.doing(|c| {
+            let id = c.next_id();
+            Doing {
+                stage: Stage::Send,
+                out: Zeroizing::new(Vec::new()),
+                sealed: Some(SealedWrite::message(password.ldap_simple_bind(id, dn))),
+                sent: 0,
+                id,
+                entries: Vec::new(),
+            }
+        })?;
         if self.stage() == Stage::Send {
             self.send()?;
             self.set_stage(Stage::Read);

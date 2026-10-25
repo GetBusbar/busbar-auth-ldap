@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use super::{
-    bind, decode, frame, search, start_tls, unbind, Entry, LdapResult, Message, Reply, SCOPE_BASE,
+    decode, frame, search, start_tls, unbind, Entry, LdapResult, Message, Reply, SCOPE_BASE,
     SCOPE_SUBTREE,
 };
 use crate::ber::{self, BerError};
@@ -22,7 +22,7 @@ fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
 #[test]
 fn an_anonymous_bind_is_the_textbook_bytes() {
     assert_eq!(
-        bind(1, "", "")[..],
+        chip_bind(1, "", "")[..],
         [0x30, 0x0c, 0x02, 0x01, 0x01, 0x60, 0x07, 0x02, 0x01, 0x03, 0x04, 0x00, 0x80, 0x00]
     );
 }
@@ -36,7 +36,7 @@ fn a_simple_bind_carries_version_3_the_dn_and_the_password() {
     ]
     .concat();
     let want = tlv(0x30, &[tlv(0x02, &[2]), tlv(0x60, &op)].concat());
-    assert_eq!(bind(2, "cn=a,dc=x", "s3cret")[..], want[..]);
+    assert_eq!(chip_bind(2, "cn=a,dc=x", "s3cret")[..], want[..]);
 }
 
 #[test]
@@ -316,4 +316,10 @@ fn a_reply_past_the_cap_is_refused_from_its_header() {
     let len = (ber::INBOUND_CAP as u32).to_be_bytes();
     let head = [&[0x30, 0x84][..], &len[..]].concat();
     assert!(matches!(frame(&head), Err(BerError::TooLarge(_))));
+}
+
+/// The chip's BIND message for `dn` with `password`, as the wire carries it (dev-only test support).
+fn chip_bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
+    use busbar_contract::abi::sdk::test_support::chip::{cred, sealed_bytes};
+    sealed_bytes(&cred(password).ldap_simple_bind(id, dn))
 }

@@ -11,6 +11,7 @@ use crate::{
     principal_id, BindError, DirEntry, Io, LdapBackend, LdapConfig, LdapModule, Login, RoleFrom,
     SearchScope,
 };
+use busbar_contract::abi::sdk::cred::Cred;
 use std::collections::HashMap;
 
 fn base_cfg() -> LdapConfig {
@@ -471,6 +472,13 @@ impl crate::conversation::Wire for Untouched {
     fn write(&mut self, _: &[u8]) -> std::task::Poll<Result<usize, String>> {
         panic!("a refused credential never reaches the wire")
     }
+
+    fn write_sealed(
+        &mut self,
+        w: &mut busbar_contract::abi::sdk::cred::SealedWrite,
+    ) -> std::task::Poll<Result<(), String>> {
+        busbar_contract::abi::sdk::test_support::chip::drive_sealed(w, |b| self.write(b))
+    }
     fn read(&mut self, _: &mut [u8]) -> std::task::Poll<Result<usize, String>> {
         panic!("a refused credential never reaches the wire")
     }
@@ -558,7 +566,12 @@ struct FakeLdap {
 }
 
 impl LdapBackend for FakeLdap {
-    fn simple_bind(&mut self, dn: &str, password: &str) -> Result<u32, Io> {
+    fn simple_bind(&mut self, dn: &str, password: &Cred) -> Result<u32, Io> {
+        let password = String::from_utf8(
+            busbar_contract::abi::sdk::test_support::chip::cred_bytes(password),
+        )
+        .expect("a test password is text");
+        let password = password.as_str();
         self.binds.push(dn.to_string());
         self.bind_pairs.push((dn.to_string(), password.to_string()));
         if self.bind_err_on.as_deref() == Some(dn) {
@@ -1158,7 +1171,7 @@ impl LdapBackend for Unreachable {
     fn connect(&mut self) -> Result<(), Io> {
         Err(Io::Failed("connection refused".to_string()))
     }
-    fn simple_bind(&mut self, _: &str, _: &str) -> Result<u32, Io> {
+    fn simple_bind(&mut self, _: &str, _: &Cred) -> Result<u32, Io> {
         unreachable!("no bind without a connection")
     }
     fn search(
@@ -1351,18 +1364,20 @@ mod logging {
 }
 
 /// Every credential holder wipes on drop.
-fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
 
 #[test]
-fn the_service_password_and_the_bind_request_are_wiped_on_drop() {
+fn the_bind_request_is_the_chips_and_deterministic() {
     let m = LdapModule::new(search_cfg()).unwrap();
-    let pw = m.cfg.bind_service_password.as_ref().expect("set");
-    wipes(pw);
-    let req = crate::codec::bind(1, "cn=svc,dc=x", "s3cret");
-    wipes(&req);
+    assert!(m.cfg.bind_service_password.is_some(), "set");
     assert_eq!(
-        &req[..],
-        &crate::codec::bind(1, "cn=svc,dc=x", "s3cret")[..],
+        chip_bind(1, "cn=svc,dc=x", "s3cret"),
+        chip_bind(1, "cn=svc,dc=x", "s3cret"),
         "deterministic"
     );
+}
+
+/// The chip's BIND message for `dn` with `password`, as the wire carries it (dev-only test support).
+fn chip_bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
+    use busbar_contract::abi::sdk::test_support::chip::{cred, sealed_bytes};
+    sealed_bytes(&cred(password).ldap_simple_bind(id, dn))
 }
