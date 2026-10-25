@@ -91,7 +91,7 @@ pub const NEED: u32 = 0;
 /// carrier's target is `host:port`, never an `ldap://` URL. No `trust_from`: as in 1.5.5 the module
 /// refuses a `ca_cert_pem` setting, so the connector's own trust is the one used (a need whose
 /// `trust_from` names a setting the configuration leaves unset is not declared, so naming it would
-/// leave the module no stream at all). The timeout is the module's own, per login (`timeout_secs`).
+/// leave the module no stream at all). The timeout is the module's own, per operation (`timeout_secs`).
 pub const NEEDS: &[Need] = &[{
     let mut n = Need::EMPTY;
     n.direction = DIRECTION_OUTBOUND;
@@ -138,6 +138,19 @@ const FORM: &[LoginField] = &[
 pub struct Ldap {
     module: RwLock<Arc<LdapModule>>,
     reached: Mutex<HashMap<(u32, u32), Principal>>,
+}
+
+/// The identity a short answer kept for `key`'s re-call, taken. Nothing else is left behind for
+/// that ticket SLOT: an op on the slot under another generation proves the earlier op is over. A
+/// call on no ticket (generation `0`, never minted) proves nothing and drops nothing.
+fn take_reached(
+    reached: &mut HashMap<(u32, u32), Principal>,
+    key: (u32, u32),
+) -> Option<Principal> {
+    if key.1 != 0 {
+        reached.retain(|&(slot, generation), _| slot != key.0 || generation == key.1);
+    }
+    reached.remove(&key)
 }
 
 impl Ldap {
@@ -202,7 +215,7 @@ impl Slot for BeginLogin {
 }
 
 /// The submitted form fields `(name, value)`, lent for the call.
-fn submitted(input: Lent<'_, CompleteLoginIn>) -> Vec<(&[u8], &[u8])> {
+fn submitted<'a>(input: Lent<'a, CompleteLoginIn>) -> Vec<(&'a [u8], &'a [u8])> {
     input
         .submitted()
         .iter()
@@ -343,7 +356,7 @@ fn now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
 }
 
 /// Run (or resume) the login on this call's ticket: PENDING while a stream service pends (the
-/// run parked, the op's timer set to the login's deadline), else what it came to, the stream
+/// run parked, the op's timer set to the operation's deadline), else what it came to, the stream
 /// closed.
 fn drive(
     h: &Held<Ldap>,
@@ -420,11 +433,10 @@ impl SafeSlot for CompleteLogin {
         let ldap = h.life();
         let ticket = instance.ticket();
         let key = (ticket.slot, ticket.generation);
-        let kept = ldap
-            .reached
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&key);
+        let kept = take_reached(
+            &mut ldap.reached.lock().unwrap_or_else(PoisonError::into_inner),
+            key,
+        );
         let login = match kept {
             Some(p) => Login::Identity(p),
             None => match drive(h, &instance, input, &mut out) {
