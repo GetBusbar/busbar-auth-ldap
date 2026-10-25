@@ -169,6 +169,16 @@ pub struct Ldap {
     reached: Mutex<HashMap<(u32, u32), Principal>>,
 }
 
+/// The identity a short answer kept for `key`'s re-call, taken. Nothing else is left behind for
+/// that ticket SLOT: an op on the slot under another generation proves the earlier op is over.
+fn take_reached(
+    reached: &mut HashMap<(u32, u32), Principal>,
+    key: (u32, u32),
+) -> Option<Principal> {
+    reached.retain(|&(slot, generation), _| slot != key.0 || generation == key.1);
+    reached.remove(&key)
+}
+
 impl Ldap {
     fn module(&self) -> Arc<LdapModule> {
         self.module
@@ -449,11 +459,10 @@ impl SafeSlot for CompleteLogin {
         let ldap = h.life();
         let ticket = instance.ticket();
         let key = (ticket.slot, ticket.generation);
-        let kept = ldap
-            .reached
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&key);
+        let kept = take_reached(
+            &mut ldap.reached.lock().unwrap_or_else(PoisonError::into_inner),
+            key,
+        );
         let login = match kept {
             Some(p) => Login::Identity(p),
             None => match drive(h, &instance, input, &mut out) {
