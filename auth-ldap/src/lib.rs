@@ -32,7 +32,9 @@
 //! - LDAP is a `Credential` method, so it has NO confidential-client `client_secret` — `LdapConfig`
 //!   structurally has no such field and `deny_unknown_fields` rejects one if configured.
 
-#![deny(unsafe_code)]
+// The test build keeps `deny` only for door_tests' reader of the Statement's 'static strings.
+#![cfg_attr(not(test), forbid(unsafe_code))]
+#![cfg_attr(test, deny(unsafe_code))]
 
 use busbar_contract::auth::Principal;
 use core::fmt;
