@@ -6,7 +6,8 @@
 //!
 //! THE PUBLISHED SUITE (busbar-plugin-loader's `conformance` feature, at the pin): the linked door
 //! and the built cdylib, each through the one loader, driven by the auth kind's script over the
-//! inputs `conformance.json` names: `verify` (always PASS: LDAP judges no bearer credential), the
+//! inputs `conformance.json` names: the tail states the login family alone (`CAP_LOGIN`: LDAP
+//! judges no bearer credential, so `verify` is an undeclared op that must answer REFUSED), the
 //! credential login (`begin_login`'s form; `complete_login` SUBMITTED on a ticket, the suite's
 //! user's credential an identity, a wrong password refused), exact crossing counts, the two folds equal,
 //! its RED arms.

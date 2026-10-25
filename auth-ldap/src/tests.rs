@@ -645,25 +645,68 @@ fn bind_wrong_password_is_invalid_credentials() {
     assert!(matches!(r, Err(BindError::InvalidCredentials)));
 }
 
-/// A user-bind result code other than 49 (e.g. 51 busy, 52 unavailable) is a directory failure, not
-/// a wrong password: it takes the logged `Directory` arm (still a Reject), and carries no credential.
+/// OWNER RULING (non-49 user bind): a user-bind result code is an OUTAGE only when it names a
+/// server or session condition that fails for every user (51 busy, 52 unavailable, ...: the logged
+/// `Directory` arm, carrying no credential). Every other non-zero code (48, 53, 32, ... and a code
+/// RFC 4511 does not name) is a refusal of THIS bind: `Rejected` with its code, which `login_over`
+/// answers as a bad credential. This test asserted the old ruling (every non-49 code a `Directory`
+/// failure); 51 and 52 still assert the outage.
 #[test]
-fn a_non_49_user_bind_rc_is_a_directory_failure() {
+fn a_non_49_user_bind_rc_is_an_outage_only_for_a_server_condition() {
     let m = LdapModule::new(base_cfg()).unwrap();
-    for rc in [51, 52] {
+    let bind = |rc: u32| {
         let mut fake = FakeLdap {
             reject_password: Some("pw-secret".to_string()),
             reject_rc: Some(rc),
             group_attr: "memberOf".to_string(),
             ..Default::default()
         };
-        match m.bind_and_identify_on(&mut fake, "alice", "pw-secret") {
+        m.bind_and_identify_on(&mut fake, "alice", "pw-secret")
+    };
+    for rc in [51, 52] {
+        match bind(rc) {
             Err(BindError::Directory(e)) => {
                 assert!(e.contains(&format!("rc={rc}")), "got {e:?}");
                 assert!(!e.contains("pw-secret"), "the password leaked: {e:?}");
             }
             r => panic!("rc {rc} should be a Directory failure, got {r:?}"),
         }
+    }
+    for rc in [48, 50, 53, 32, 19, 34, 999] {
+        match bind(rc) {
+            Err(BindError::Rejected { rc: got }) => assert_eq!(got, rc),
+            r => panic!("rc {rc} should be a Rejected bind, got {r:?}"),
+        }
+    }
+}
+
+/// The outage set is an explicit list of server/session conditions; anything else is not one.
+#[test]
+fn the_outage_codes_are_the_server_conditions() {
+    for rc in [1, 2, 3, 7, 8, 10, 11, 12, 13, 14, 51, 52, 54, 71, 80] {
+        assert!(crate::is_outage(rc), "rc {rc} is a server condition");
+    }
+    for rc in [
+        0,
+        4,
+        5,
+        6,
+        16,
+        19,
+        32,
+        34,
+        48,
+        49,
+        50,
+        53,
+        64,
+        68,
+        88,
+        122,
+        999,
+        u32::MAX,
+    ] {
+        assert!(!crate::is_outage(rc), "rc {rc} is not an outage");
     }
 }
 
@@ -1055,4 +1098,138 @@ fn the_user_search_filter_is_escaped_as_applied_not_just_in_isolation() {
             "expected the {esc} escape in the applied filter: {sent}"
         );
     }
+}
+
+// ── every refusal is explained; nothing is silent ───────────────────────────────────────────────
+
+mod logging {
+    use super::*;
+    use busbar_contract::testkit::WarnCapture;
+
+    /// Run `f` under an INFO-and-above capture: what it answered, and the capture.
+    fn captured<T>(f: impl FnOnce() -> T) -> (T, WarnCapture) {
+        let cap = WarnCapture::capturing_debug();
+        let got = tracing::subscriber::with_default(cap.clone(), f);
+        (got, cap)
+    }
+
+    fn entry(dn: &str) -> DirEntry {
+        DirEntry {
+            dn: dn.to_string(),
+            attrs: HashMap::new(),
+        }
+    }
+
+    /// A search that matches nothing is a refused credential, and says so (never the password).
+    #[test]
+    fn no_search_match_is_logged() {
+        let m = LdapModule::new(search_cfg()).unwrap();
+        let mut fake = FakeLdap::default();
+        let (r, cap) = captured(|| m.bind_and_identify_on(&mut fake, "ghost", "pw-s3cret"));
+        assert!(matches!(r, Err(BindError::InvalidCredentials)), "{r:?}");
+        assert!(cap.contains("no search match"), "{:?}", cap.messages());
+        assert!(cap.contains("module=ldap"), "{:?}", cap.messages());
+        assert!(!cap.contains("pw-s3cret"), "{:?}", cap.messages());
+        assert!(!cap.contains("ghost"), "{:?}", cap.messages());
+    }
+
+    /// A search that resolves to an empty DN is refused before any bind, and says so.
+    #[test]
+    fn an_empty_dn_is_logged() {
+        let m = LdapModule::new(search_cfg()).unwrap();
+        let mut fake = FakeLdap {
+            search_entries: vec![entry("")],
+            ..Default::default()
+        };
+        let (r, cap) = captured(|| m.bind_and_identify_on(&mut fake, "alice", "pw-s3cret"));
+        assert!(matches!(r, Err(BindError::InvalidCredentials)), "{r:?}");
+        assert!(cap.contains("empty DN"), "{:?}", cap.messages());
+        assert!(!cap.contains("pw-s3cret"), "{:?}", cap.messages());
+    }
+
+    /// An empty username on the search path, and a username the DN template refuses, are each
+    /// explained (and the username itself is not logged).
+    #[test]
+    fn a_refused_username_is_logged() {
+        let m = LdapModule::new(search_cfg()).unwrap();
+        let (r, cap) = captured(|| m.bind_and_identify_on(&mut FakeLdap::default(), "", "pw"));
+        assert!(matches!(r, Err(BindError::InvalidCredentials)), "{r:?}");
+        assert!(cap.contains("empty username"), "{:?}", cap.messages());
+
+        let m = LdapModule::new(base_cfg()).unwrap();
+        let (r, cap) =
+            captured(|| m.bind_and_identify_on(&mut FakeLdap::default(), "admin,dc=evil", "pw"));
+        assert!(matches!(r, Err(BindError::InvalidCredentials)), "{r:?}");
+        assert!(
+            cap.contains("not allowed in a bind DN"),
+            "{:?}",
+            cap.messages()
+        );
+        assert!(!cap.contains("admin,dc=evil"), "{:?}", cap.messages());
+    }
+
+    /// A missing field and an empty password are refused before the wire, each explained.
+    #[test]
+    fn a_missing_or_empty_credential_is_logged() {
+        let m = LdapModule::new(base_cfg()).unwrap();
+        let login = |u: Option<&str>, p: Option<&str>| {
+            let mut conv = crate::conversation::Conversation::new();
+            m.login_over(&mut conv, &mut Untouched, u, p, Some(0))
+        };
+        let (r, cap) = captured(|| login(Some("alice"), None));
+        assert_eq!(r, std::task::Poll::Ready(Login::BadCredential));
+        assert!(cap.contains("not submitted"), "{:?}", cap.messages());
+        let (r, cap) = captured(|| login(Some("alice"), Some("")));
+        assert_eq!(r, std::task::Poll::Ready(Login::BadCredential));
+        assert!(cap.contains("empty password"), "{:?}", cap.messages());
+    }
+
+    /// A wrong password (rc 49) is an end-user decline, explained at info.
+    #[test]
+    fn a_wrong_password_is_logged() {
+        let m = LdapModule::new(base_cfg()).unwrap();
+        let mut fake = FakeLdap {
+            reject_password: Some("wr0ng-pw".to_string()),
+            ..Default::default()
+        };
+        let (r, cap) = captured(|| m.bind_and_identify_on(&mut fake, "alice", "wr0ng-pw"));
+        assert!(matches!(r, Err(BindError::InvalidCredentials)), "{r:?}");
+        assert!(cap.contains("invalidCredentials"), "{:?}", cap.messages());
+        assert!(!cap.contains("wr0ng-pw"), "{:?}", cap.messages());
+    }
+
+    /// No host clock: the login refuses an untimed directory call (an outage, explained at warn)
+    /// rather than bind with no deadline; nothing reaches the wire.
+    #[test]
+    fn no_host_clock_is_an_outage() {
+        let m = LdapModule::new(base_cfg()).unwrap();
+        let cap = WarnCapture::default();
+        let got = tracing::subscriber::with_default(cap.clone(), || {
+            let mut conv = crate::conversation::Conversation::new();
+            m.login_over(&mut conv, &mut Untouched, Some("alice"), Some("pw"), None)
+        });
+        assert_eq!(got, std::task::Poll::Ready(Login::Outage));
+        assert!(
+            cap.contains("no host clock: refusing an untimed directory call"),
+            "{:?}",
+            cap.messages()
+        );
+    }
+}
+
+/// Every credential holder wipes on drop.
+fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+
+#[test]
+fn the_service_password_and_the_bind_request_are_wiped_on_drop() {
+    let m = LdapModule::new(search_cfg()).unwrap();
+    let pw = m.cfg.bind_service_password.as_ref().expect("set");
+    wipes(pw);
+    let req = crate::codec::bind(1, "cn=svc,dc=x", "s3cret");
+    wipes(&req);
+    assert_eq!(
+        &req[..],
+        &crate::codec::bind(1, "cn=svc,dc=x", "s3cret")[..],
+        "deterministic"
+    );
 }
