@@ -428,7 +428,13 @@ impl LdapModule {
             if std::str::from_utf8(secret).is_err() {
                 return Err("ldap bind_service_password secret is not UTF-8".to_string());
             }
-            cfg.bind_service_password = Some(Cred::captured(Zeroizing::new(secret.to_vec())));
+            // The bind goes only to `url`: `ldaps://`, or STARTTLS, requires a secured connection.
+            let password = Cred::captured(Zeroizing::new(secret.to_vec())).secure_for(&cfg.url);
+            cfg.bind_service_password = Some(if cfg.start_tls {
+                password.require_secure()
+            } else {
+                password
+            });
         }
         Self::new(cfg)
     }
@@ -687,7 +693,14 @@ impl LdapModule {
         password: &str,
     ) -> Result<Principal, BindError> {
         // The presented password is held by the chip from here; every bind is its message.
-        let password = &Cred::captured(Zeroizing::new(password.as_bytes().to_vec()));
+        // It goes only to `url`: `ldaps://`, or STARTTLS, requires a secured connection.
+        let password =
+            Cred::captured(Zeroizing::new(password.as_bytes().to_vec())).secure_for(&self.cfg.url);
+        let password = &if self.cfg.start_tls {
+            password.require_secure()
+        } else {
+            password
+        };
         // Resolve the DN to bind as: either search-then-bind, or the direct template.
         let user_dn = if let Some(filter_tpl) = &self.cfg.user_search_filter {
             // The direct-template path runs the username through `validate_username` (which rejects
