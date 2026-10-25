@@ -690,3 +690,21 @@ fn a_conversation_in_flight_never_debug_prints_the_password() {
     }
     assert!(held, "the bind request was never held in flight");
 }
+
+/// A SearchResultEntry and its SearchResultDone arrive in ONE read (the normal wire shape): the
+/// second message must survive the first's decode, and the stream holds open after it so a lost
+/// message pends instead of reading as EOF.
+#[test]
+fn two_messages_in_one_read_are_both_read() {
+    let m = module("ldap://127.0.0.1", serde_json::json!({}));
+    let both = [
+        entry(2, ALICE, "memberOf", &["cn=Engineers,ou=g,dc=corp"]),
+        done(2, 0),
+    ]
+    .concat();
+    let mut dir = Directory::new(vec![bind_response(1, 0), both]).held();
+    let Login::Identity(p) = login(&m, &mut dir, "pw").0 else {
+        panic!("alice binds");
+    };
+    assert_eq!(p.roles, vec!["Engineers".to_string()]);
+}
