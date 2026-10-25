@@ -13,6 +13,8 @@
 
 use std::collections::HashMap;
 
+use zeroize::Zeroizing;
+
 use crate::ber::{self, BerError, Tlv};
 use crate::filter;
 
@@ -42,14 +44,24 @@ fn message(id: i32, op: &[u8]) -> Vec<u8> {
     ber::element(ber::SEQUENCE, &content)
 }
 
-/// A simple BIND of `dn` with `password`, version 3.
+/// A simple BIND of `dn` with `password`, version 3: the request carries the cleartext password,
+/// so it is answered in a buffer wiped on drop. Each intermediate buffer that holds the password is
+/// wiped too, and every one is allocated at its final size up front so no growth leaves an
+/// unwiped copy behind.
 #[must_use]
-pub fn bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
-    let mut op = Vec::new();
+pub fn bind(id: i32, dn: &str, password: &str) -> Zeroizing<Vec<u8>> {
+    // Room for the content and a header (a tag and at most 9 length octets) at every nesting.
+    const HEAD: usize = 10;
+    let mut op = Zeroizing::new(Vec::with_capacity(3 * HEAD + 1 + dn.len() + password.len()));
     ber::int(&mut op, ber::INTEGER, 3);
     ber::tlv(&mut op, ber::OCTET_STRING, dn.as_bytes());
     ber::tlv(&mut op, 0x80, password.as_bytes());
-    message(id, &ber::element(BIND_REQUEST, &op))
+    let mut content = Zeroizing::new(Vec::with_capacity(2 * HEAD + op.len()));
+    ber::int(&mut content, ber::INTEGER, i64::from(id));
+    ber::tlv(&mut content, BIND_REQUEST, &op);
+    let mut out = Zeroizing::new(Vec::with_capacity(HEAD + content.len()));
+    ber::tlv(&mut out, ber::SEQUENCE, &content);
+    out
 }
 
 /// A SEARCH under `base` at `scope` (`SCOPE_*`) for `filter`, asking for `attrs`.

@@ -28,7 +28,8 @@
 //! - `begin_login` answers the declarative form (`username` text + `password` password).
 //! - `complete_login` reads the submitted values back by the field `name` it declared, BINDs over
 //!   the host's stream, reads groups ([`LdapModule::login_over`]), and answers the identity.
-//! - `verify` answers PASS: LDAP judges no bearer credential on the data plane.
+//! - `verify` is not served: LDAP judges no bearer credential on the data plane, so the tail states
+//!   the login family alone (`CAP_LOGIN`) and the host never calls it.
 //! - LDAP is a `Credential` method, so it has NO confidential-client `client_secret` — `LdapConfig`
 //!   structurally has no such field and `deny_unknown_fields` rejects one if configured.
 
@@ -41,6 +42,7 @@ use core::fmt;
 use serde::Deserialize;
 use std::task::Poll;
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 pub mod ber;
 pub mod codec;
@@ -64,24 +66,25 @@ const MAX_GROUP_VALUES: usize = 4096;
 /// The end-user password rides `Redacted` across the wire, but the service-account bind password
 /// lives on the `#[derive(Debug)]` [`LdapConfig`], where a bare `String` could leak into a log line,
 /// a `tracing` field, or a panic/`{:?}` dump. This wrapper makes the redaction STRUCTURAL.
-/// `#[serde(transparent)]` keeps deserialization identical (a plain JSON
-/// string), and the plaintext is reachable only through the explicit [`SecretString::expose`] audit
-/// point.
+/// It deserializes from a plain JSON string (moved, not copied, into its buffer), the buffer is
+/// wiped on drop ([`Zeroizing`]), and the plaintext is reachable only through the explicit
+/// [`SecretString::expose`] audit point. It is never serialized.
 #[derive(Clone, Deserialize)]
-#[serde(transparent)]
-pub struct SecretString(String);
+#[serde(from = "String")]
+pub struct SecretString(Zeroizing<String>);
+
+impl From<String> for SecretString {
+    fn from(s: String) -> Self {
+        Self(Zeroizing::new(s))
+    }
+}
+
+impl zeroize::ZeroizeOnDrop for SecretString {}
 
 impl SecretString {
     /// Borrow the underlying secret. AUDIT POINT — the one place the plaintext escapes redaction.
     pub(crate) fn expose(&self) -> &str {
         &self.0
-    }
-}
-
-// The plaintext is wiped when the config holding it is dropped (a refresh, a close).
-impl Drop for SecretString {
-    fn drop(&mut self) {
-        zeroize::Zeroize::zeroize(&mut self.0);
     }
 }
 
@@ -240,89 +243,17 @@ impl LdapModule {
     /// Build the module from parsed config. Validates the DN template references `{username}` so a
     /// misconfiguration fails at boot, not on the first login.
     pub fn new(cfg: LdapConfig) -> Result<Self, String> {
-        // Fail CLOSED on an unsupported CA bundle: `ca_cert_pem` is documented as "a CA bundle to
-        // trust" but the custom-CA TLS path is not wired. Accepting-and-ignoring it would silently
-        // fall back to the system trust roots while the operator believes their private CA is in use.
-        if cfg.ca_cert_pem.is_some() {
+        check_settings(&cfg)?;
+        // A service DN with NO password would perform `simple_bind(dn, "")`, an UNAUTHENTICATED
+        // bind on most directories, so search-then-bind requires one. The password is normally a
+        // secret reference the kernel resolves at `open`, so this rule is `open`'s (here), never
+        // `validate`'s ([`check_settings`]): `validate` is handed no secrets.
+        if cfg.user_search_filter.is_some() && cfg.bind_service_password.is_none() {
             return Err(
-                "ldap ca_cert_pem is not yet supported; omit it or use a system-trusted cert"
+                "ldap user_search_filter requires bind_service_password for search-then-bind \
+                 (a missing password becomes an unauthenticated bind)"
                     .to_string(),
             );
-        }
-        if !cfg.bind_dn_template.contains("{username}") {
-            return Err(
-                "ldap bind_dn_template must contain the `{username}` placeholder".to_string(),
-            );
-        }
-        // In direct-bind mode the expanded template is also the Base DN of the group read, so it
-        // must be a DN. A template with no `=` (an AD UPN such as `{username}@corp.example`) can
-        // never become one (`validate_username` refuses `=`), so every login would bind and then
-        // fail the group read. AD UPN logins go through search-then-bind instead.
-        if cfg.user_search_filter.is_none() && !cfg.bind_dn_template.contains('=') {
-            return Err(format!(
-                "ldap bind_dn_template {:?} is not a DN: in direct-bind mode the expanded template \
-                 is the entry the groups are read from, so it must be a DN such as \
-                 `uid={{username}},ou=people,dc=corp,dc=example`; for an AD UPN login set \
-                 user_search_filter (e.g. `(userPrincipalName={{username}}@corp.example)`) with \
-                 bind_service_dn and bind_service_password",
-                cfg.bind_dn_template
-            ));
-        }
-        // A zero timeout expires every connect and operation at once, so every login would fail.
-        if cfg.timeout_secs == 0 {
-            return Err("ldap timeout_secs must be at least 1".to_string());
-        }
-        // A blank group attribute is requested and read back as nothing, so every login would
-        // silently bind no roles.
-        if cfg.group_attr.trim().is_empty() {
-            return Err("ldap group_attr must not be empty".to_string());
-        }
-        if let Some(f) = &cfg.user_search_filter {
-            if !f.contains("{username}") {
-                return Err(
-                    "ldap user_search_filter must contain the `{username}` placeholder".to_string(),
-                );
-            }
-            if cfg.bind_service_dn.is_none() {
-                return Err(
-                    "ldap user_search_filter requires bind_service_dn for search-then-bind"
-                        .to_string(),
-                );
-            }
-            // A service DN with NO password — or a present-but-EMPTY one — would perform
-            // `simple_bind(dn, "")`, an UNAUTHENTICATED bind on most directories. Require a
-            // NON-EMPTY password so search-then-bind is always authenticated.
-            match cfg.bind_service_password.as_ref() {
-                None => {
-                    return Err(
-                        "ldap user_search_filter requires bind_service_password for \
-                         search-then-bind (a missing password becomes an unauthenticated bind)"
-                            .to_string(),
-                    );
-                }
-                Some(pw) if pw.expose().is_empty() => {
-                    return Err(
-                        "ldap bind_service_password must not be empty (an empty password becomes \
-                         an unauthenticated bind for search-then-bind)"
-                            .to_string(),
-                    );
-                }
-                Some(_) => {}
-            }
-        }
-        // Fail CLOSED on a plaintext transport that would expose credentials on the network: a
-        // `ldap://` URL (not `ldaps://`) with no STARTTLS, to a non-loopback host, sends the
-        // service-account AND every end-user password in cleartext. Reject unless the operator
-        // explicitly opts out. `ldaps://`, STARTTLS, or a loopback host are already secure/local.
-        if is_insecure_transport(&cfg.url, cfg.start_tls) && !cfg.allow_insecure_transport {
-            // The URL is quoted with any userinfo cut: the words are 1.5.5's otherwise (H5).
-            return Err(format!(
-                "ldap url {:?} uses plaintext ldap:// to a non-loopback host with no STARTTLS, \
-                 which sends the service and end-user credentials in cleartext; use an ldaps:// \
-                 URL, set start_tls = true, or (to knowingly override) set \
-                 allow_insecure_transport = true",
-                shown_url(&cfg.url)
-            ));
         }
         // The opt-out is honoured, but never SILENTLY. An operator who copies a lab config into
         // production otherwise sends every end-user password in cleartext for the life of the
@@ -350,6 +281,88 @@ impl LdapModule {
         let safe = groups::validate_username(username)?;
         Ok(self.cfg.bind_dn_template.replace("{username}", safe))
     }
+}
+
+/// The SETTINGS-ONLY checks: every refusal a settings blob earns on its own, with no secret in
+/// hand. `validate` runs exactly these ([`LdapModule::validate_settings`]); `open` runs them and
+/// then the rules that need the resolved secrets ([`LdapModule::new`]).
+fn check_settings(cfg: &LdapConfig) -> Result<(), String> {
+    // Fail CLOSED on an unsupported CA bundle: `ca_cert_pem` is documented as "a CA bundle to
+    // trust" but the custom-CA TLS path is not wired. Accepting-and-ignoring it would silently
+    // fall back to the system trust roots while the operator believes their private CA is in use.
+    if cfg.ca_cert_pem.is_some() {
+        return Err(
+            "ldap ca_cert_pem is not yet supported; omit it or use a system-trusted cert"
+                .to_string(),
+        );
+    }
+    if !cfg.bind_dn_template.contains("{username}") {
+        return Err("ldap bind_dn_template must contain the `{username}` placeholder".to_string());
+    }
+    // In direct-bind mode the expanded template is also the Base DN of the group read, so it
+    // must be a DN. A template with no `=` (an AD UPN such as `{username}@corp.example`) can
+    // never become one (`validate_username` refuses `=`), so every login would bind and then
+    // fail the group read. AD UPN logins go through search-then-bind instead.
+    if cfg.user_search_filter.is_none() && !cfg.bind_dn_template.contains('=') {
+        return Err(format!(
+            "ldap bind_dn_template {:?} is not a DN: in direct-bind mode the expanded template \
+             is the entry the groups are read from, so it must be a DN such as \
+             `uid={{username}},ou=people,dc=corp,dc=example`; for an AD UPN login set \
+             user_search_filter (e.g. `(userPrincipalName={{username}}@corp.example)`) with \
+             bind_service_dn and bind_service_password",
+            cfg.bind_dn_template
+        ));
+    }
+    // A zero timeout expires every connect and operation at once, so every login would fail.
+    if cfg.timeout_secs == 0 {
+        return Err("ldap timeout_secs must be at least 1".to_string());
+    }
+    // A blank group attribute is requested and read back as nothing, so every login would
+    // silently bind no roles.
+    if cfg.group_attr.trim().is_empty() {
+        return Err("ldap group_attr must not be empty".to_string());
+    }
+    if let Some(f) = &cfg.user_search_filter {
+        if !f.contains("{username}") {
+            return Err(
+                "ldap user_search_filter must contain the `{username}` placeholder".to_string(),
+            );
+        }
+        if cfg.bind_service_dn.is_none() {
+            return Err(
+                "ldap user_search_filter requires bind_service_dn for search-then-bind".to_string(),
+            );
+        }
+        // A present-but-EMPTY service password would perform `simple_bind(dn, "")`, an
+        // UNAUTHENTICATED bind on most directories. An ABSENT one is `open`'s to refuse
+        // ([`LdapModule::new`]): it is normally a secret reference, resolved only there.
+        if cfg
+            .bind_service_password
+            .as_ref()
+            .is_some_and(|pw| pw.expose().is_empty())
+        {
+            return Err(
+                "ldap bind_service_password must not be empty (an empty password becomes \
+                 an unauthenticated bind for search-then-bind)"
+                    .to_string(),
+            );
+        }
+    }
+    // Fail CLOSED on a plaintext transport that would expose credentials on the network: a
+    // `ldap://` URL (not `ldaps://`) with no STARTTLS, to a non-loopback host, sends the
+    // service-account AND every end-user password in cleartext. Reject unless the operator
+    // explicitly opts out. `ldaps://`, STARTTLS, or a loopback host are already secure/local.
+    if is_insecure_transport(&cfg.url, cfg.start_tls) && !cfg.allow_insecure_transport {
+        // The URL is quoted with any userinfo cut: the words are 1.5.5's otherwise (H5).
+        return Err(format!(
+            "ldap url {:?} uses plaintext ldap:// to a non-loopback host with no STARTTLS, \
+             which sends the service and end-user credentials in cleartext; use an ldaps:// \
+             URL, set start_tls = true, or (to knowingly override) set \
+             allow_insecure_transport = true",
+            shown_url(&cfg.url)
+        ));
+    }
+    Ok(())
 }
 
 /// Would binding over this URL send credentials in CLEARTEXT on the network? True only for a
@@ -414,8 +427,8 @@ pub enum Login {
     Identity(Principal),
     /// No usable credential, or the directory refused it.
     BadCredential,
-    /// The directory could not answer (connect, TLS, timeout, a non-49 result code). Logged here,
-    /// never the credential.
+    /// The directory could not answer (connect, TLS, timeout, no host clock, or a user-bind result
+    /// code naming a server/session condition: [`is_outage`]). Logged here, never the credential.
     Outage,
 }
 
@@ -427,22 +440,23 @@ impl LdapModule {
         Self::from_settings_with(settings, &[])
     }
 
+    /// `validate`'s check of a settings blob: everything the blob earns on its own, with no secret
+    /// in hand. A search-then-bind service password is normally a secret reference the kernel
+    /// resolves only at `open`, so its PRESENCE is `open`'s rule ([`LdapModule::new`]), not this
+    /// one's; an explicit empty literal is still refused here.
+    pub fn validate_settings(settings: &[u8]) -> Result<(), String> {
+        check_settings(&parse_settings(settings)?)
+    }
+
     /// [`LdapModule::from_settings`], with the secrets the kernel resolved for the Statement's
     /// `secret_refs` (`bind_service_password`): a non-empty first secret is the service-account
     /// password, over any literal in the settings.
     pub fn from_settings_with(settings: &[u8], secrets: &[&[u8]]) -> Result<Self, String> {
-        if settings.trim_ascii().is_empty() {
-            return Err(
-                "ldap plugin requires config (url, bind_dn_template, base_dn); none provided"
-                    .to_string(),
-            );
-        }
-        let mut cfg: LdapConfig = serde_json::from_slice(settings)
-            .map_err(|e| format!("invalid ldap plugin config: {e}"))?;
+        let mut cfg = parse_settings(settings)?;
         if let Some(secret) = secrets.first().filter(|s| !s.is_empty()) {
             let secret = std::str::from_utf8(secret)
                 .map_err(|_| "ldap bind_service_password secret is not UTF-8".to_string())?;
-            cfg.bind_service_password = Some(SecretString(secret.to_string()));
+            cfg.bind_service_password = Some(SecretString(Zeroizing::new(secret.to_owned())));
         }
         Self::new(cfg)
     }
@@ -464,10 +478,28 @@ impl LdapModule {
         now_ns: Option<u64>,
     ) -> Poll<Login> {
         let (Some(username), Some(password)) = (username, password) else {
+            tracing::info!(
+                module = "ldap",
+                "ldap login refused: the username or password field was not submitted"
+            );
             return Poll::Ready(Login::BadCredential);
         };
         if password.is_empty() {
+            tracing::info!(
+                module = "ldap",
+                "ldap login refused: empty password (an anonymous bind is never attempted)"
+            );
             return Poll::Ready(Login::BadCredential);
+        }
+        // Every directory operation is bounded by `timeout_secs` on the host's clock. With no
+        // clock there is no deadline, and a directory that takes the connection and never answers
+        // would hold the login forever: refuse rather than run untimed.
+        if now_ns.is_none() {
+            tracing::warn!(
+                module = "ldap",
+                "no host clock: refusing an untimed directory call"
+            );
+            return Poll::Ready(Login::Outage);
         }
         let mut over = Over::new(
             conv,
@@ -481,6 +513,16 @@ impl LdapModule {
             Ok(principal) => Poll::Ready(Login::Identity(principal)),
             Err(BindError::Pending) => Poll::Pending,
             Err(BindError::InvalidCredentials) => Poll::Ready(Login::BadCredential),
+            Err(BindError::Rejected { rc }) => {
+                tracing::warn!(
+                    module = "ldap",
+                    rc,
+                    result = codec::rc_name(rc),
+                    "ldap user bind refused by the directory (not invalidCredentials); \
+                     answered as a bad credential"
+                );
+                Poll::Ready(Login::BadCredential)
+            }
             Err(BindError::Directory(e)) => {
                 tracing::warn!(module = "ldap", error = %e, "ldap bind/search failed (not a credential rejection)");
                 Poll::Ready(Login::Outage)
@@ -489,14 +531,83 @@ impl LdapModule {
     }
 }
 
+/// The settings blob as an [`LdapConfig`]: an empty blob is refused, and a decode failure is
+/// explained without the decoder's own text where that text could quote a value ([`json_err`]).
+fn parse_settings(settings: &[u8]) -> Result<LdapConfig, String> {
+    if settings.trim_ascii().is_empty() {
+        return Err(
+            "ldap plugin requires config (url, bind_dn_template, base_dn); none provided"
+                .to_string(),
+        );
+    }
+    serde_json::from_slice(settings).map_err(json_err("invalid ldap plugin config"))
+}
+
+/// The `map_err` for the settings decode, whose INPUT may carry a secret (a service password, or
+/// one pasted into the wrong key). `serde_json::Error`'s own `Display` is withheld: a data error
+/// quotes the offending value (`invalid type: string "<the value>"`), and this text reaches
+/// `--validate` output and logs. What survives is WHAT failed, the CLASS of failure and WHERE. The
+/// decoder texts kept verbatim are the ones that name a KEY, never a value: a missing field
+/// (spelled from the type's own schema) and an unknown field (busbar-auth-oauth's `json_err`).
+fn json_err(what: &'static str) -> impl FnOnce(serde_json::Error) -> String {
+    move |e: serde_json::Error| {
+        let text = e.to_string();
+        if e.is_data()
+            && (text.starts_with("missing field `") || text.starts_with("unknown field `"))
+        {
+            return format!("{what}: {text}");
+        }
+        let class = match e.classify() {
+            serde_json::error::Category::Io => "the input could not be read",
+            serde_json::error::Category::Syntax => "it is not well-formed JSON",
+            serde_json::error::Category::Data => "a field is missing or has the wrong type",
+            serde_json::error::Category::Eof => "it ends before the JSON does",
+        };
+        let (line, column) = (e.line(), e.column());
+        format!("{what}: {class} (line {line}, column {column}; the decoder's text is withheld)")
+    }
+}
+
 /// LDAP result code 49, invalidCredentials (RFC 4511 §4.1.9).
 const LDAP_INVALID_CREDENTIALS: u32 = 49;
+
+/// OWNER RULING (non-49 user bind): is a user-bind result code a SERVER or SESSION condition, one
+/// that fails the bind for every user alike (an outage), rather than a refusal of this one bind?
+/// An explicit list (RFC 4511 §4.1.9 names); every code not on it (48 inappropriateAuthentication,
+/// 50 insufficientAccessRights, 53 unwillingToPerform, 32 noSuchObject, 19 constraintViolation,
+/// 34 invalidDNSyntax, a code RFC 4511 does not name, ...) refuses the credential.
+pub(crate) const fn is_outage(rc: u32) -> bool {
+    matches!(
+        rc,
+        1 // operationsError
+            | 2 // protocolError
+            | 3 // timeLimitExceeded
+            | 7 // authMethodNotSupported
+            | 8 // strongerAuthRequired
+            | 10 // referral
+            | 11 // adminLimitExceeded
+            | 12 // unavailableCriticalExtension
+            | 13 // confidentialityRequired
+            | 14 // saslBindInProgress
+            | 51 // busy
+            | 52 // unavailable
+            | 54 // loopDetect
+            | 71 // affectsMultipleDSAs
+            | 80 // other
+    )
+}
 
 /// Why a bind attempt did not yield an identity.
 #[derive(Debug)]
 enum BindError {
     /// The directory rejected the username/password (LDAP result 49 or a failed search).
     InvalidCredentials,
+    /// The user bind answered a non-zero result code other than 49 that is not a server/session
+    /// condition ([`is_outage`]): the credential is refused, and the code is logged.
+    Rejected {
+        /// The bind's LDAP result code.
+        rc: u32,
+    },
     /// An operational failure talking to the directory (connect/TLS/timeout/protocol) — NOT a
     /// statement about the credential's validity.
     Directory(String),
@@ -609,6 +720,7 @@ impl LdapModule {
             // an empty username); the search path must guard it too — an empty username has no
             // identity to resolve. Fail as invalid credentials, never reach the socket.
             if username.is_empty() {
+                tracing::info!(module = "ldap", "ldap login refused: empty username");
                 return Err(BindError::InvalidCredentials);
             }
             // Search-then-bind: bind as the service account, find the user entry, take its DN.
@@ -642,33 +754,56 @@ impl LdapModule {
                 );
                 return Err(BindError::InvalidCredentials);
             }
-            let entry = entries
-                .into_iter()
-                .next()
-                .ok_or(BindError::InvalidCredentials)?;
+            let Some(entry) = entries.into_iter().next() else {
+                tracing::info!(
+                    module = "ldap",
+                    "ldap login refused: no search match for the username"
+                );
+                return Err(BindError::InvalidCredentials);
+            };
             // Guard an empty resolved DN before binding: `simple_bind("", password)` is an anonymous
             // bind on many directories and would "succeed" without authenticating anyone.
             if entry.dn.is_empty() {
+                tracing::info!(
+                    module = "ldap",
+                    "ldap login refused: the search matched an entry with an empty DN"
+                );
                 return Err(BindError::InvalidCredentials);
             }
             entry.dn
         } else {
-            self.bind_dn_for(username)
-                .map_err(|_| BindError::InvalidCredentials)?
+            self.bind_dn_for(username).map_err(|reason| {
+                // `validate_username`'s reasons name no part of the username.
+                tracing::info!(module = "ldap", %reason, "ldap login refused: the DN template refused the username");
+                BindError::InvalidCredentials
+            })?
         };
 
         // The credential check: BIND as the user with the presented password. Result code 49
-        // (invalidCredentials) is a credential rejection. Any other non-zero code (e.g. 51 busy,
-        // 52 unavailable) is a directory-side failure: still refused, but logged by
-        // `login_over` so an outage is not mistaken for a wrong password.
+        // (invalidCredentials) is a credential rejection. OWNER RULING (non-49): a code naming a
+        // server/session condition that fails every user alike (51 busy, 52 unavailable, ...:
+        // [`is_outage`]) is a directory-side failure, an outage logged by `login_over`; every other
+        // non-zero code (48, 50, 53, ...) refuses this credential, the same bad credential as a
+        // wrong password, its real result logged at warn by `login_over` (never the password or
+        // the DN).
         let rc = ldap.simple_bind(&user_dn, password).map_err(at("bind"))?;
         if rc == LDAP_INVALID_CREDENTIALS {
+            tracing::info!(
+                module = "ldap",
+                rc,
+                result = codec::rc_name(rc),
+                "ldap login refused: the directory rejected the credential"
+            );
             return Err(BindError::InvalidCredentials);
         }
-        if rc != 0 {
+        if rc != 0 && is_outage(rc) {
             return Err(BindError::Directory(format!(
-                "user bind rejected (rc={rc})"
+                "user bind rejected (rc={rc} {})",
+                codec::rc_name(rc)
             )));
+        }
+        if rc != 0 {
+            return Err(BindError::Rejected { rc });
         }
 
         // Read the group-membership attribute off the (now bound) user entry.

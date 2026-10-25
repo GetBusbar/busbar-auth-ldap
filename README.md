@@ -29,7 +29,8 @@ It is a `cdylib` exporting one busbar 1.6.0 plugin door
 [`busbar-contract`](https://github.com/GetBusbar/busbar/tree/main/crates/busbar-contract)),
 loaded in-process by busbar — `dlopen`'d, not spawned as a separate
 process — or linked into a busbar build as a compiled-in row through the
-same door. It declares `contract_abi` 3 (`auth-ldap/declares.json`).
+same door, on the auth kind's table (`abi::auth` v3). Its declares file
+(`auth-ldap/declares.json`) states only its network need (`tcp`).
 
 It is a **separate plugin from `busbar-auth-oidc`**, and takes a
 different shape: OIDC is a redirect flow where the core executes the
@@ -62,11 +63,15 @@ and does no TLS.
    `ldap:<the full lowercased bind DN>` and groups set from the mapped
    group names. A wrong credential answers a bad-credential verdict; a
    directory that cannot answer (connect, TLS, timeout) answers an
-   outage.
+   outage. Every directory operation is bounded by `timeout_secs` on the
+   host's clock; a login the host lends no clock answers an outage
+   ("no host clock: refusing an untimed directory call") rather than
+   bind with no deadline.
 
 Because LDAP is a login method rather than a data-plane bearer verifier,
-`verify` answers `Pass` — "not my credential shape" — and the auth chain
-continues.
+its tail states the login family alone (`CAP_LOGIN`, as
+`busbar-auth-github`'s): the host never calls `verify`, which answers
+REFUSED.
 
 There is no `client_secret`: a credential method is not a confidential
 OAuth client, so `LdapConfig` has no such field and
@@ -175,7 +180,15 @@ and for a loopback host.
   resolves it into `OpenIn.secrets`, which wins; a 1.5.5 literal in the
   settings is still accepted. Either way the plugin holds it in a
   redacting newtype (`Debug` prints `[REDACTED]`; there is no `Display`;
-  plaintext reachable only through an explicit `expose()`).
+  plaintext reachable only through an explicit `expose()`) whose buffer is
+  wiped on drop. The submitted end-user password and the encoded BIND
+  request are held in wiped buffers too. Because the password is resolved
+  only at `open`, `validate` runs the settings-only checks: a
+  search-then-bind config with no literal password validates, and `open`
+  refuses it if no password resolves (an explicit empty literal is
+  refused by both). A settings value of the wrong type is refused without
+  quoting it (it may be a secret in the wrong key); a missing or unknown
+  key is named.
 - **Fail-closed differences from 1.5.5 (owner-signed, 2026-09-28).** A
   malformed reply or a URL that names no host is an outage instead of a
   panic; a nested BER length that overruns its parent fails at once
@@ -183,7 +196,17 @@ and for a loopback host.
   16 MiB is refused from its header.
 - **A directory outage answers its own verdict** (`LOGIN_OUTAGE`,
   distinct from a bad credential), and the plugin logs the operational
-  detail (never the credential) at `warn`.
+  detail (never the credential) at `warn`. A user-bind result code is an
+  outage only when it names a server or session condition that fails
+  every user alike (1, 2, 3, 7, 8, 10, 11, 12, 13, 14, 51 busy,
+  52 unavailable, 54, 71, 80), or the transport failed. Result 49
+  (invalidCredentials) is a bad credential, logged at `info`; every other
+  non-zero code (48, 50, 53 unwillingToPerform, 32, 19, an unnamed code,
+  ...) is the same bad credential, logged at `warn` with the directory's
+  real result code and name (never the password, never the DN). Every
+  other refusal (a missing field, an empty password, no search match, an
+  empty DN, a username the DN template refuses) is logged at `info` with
+  its reason.
 - **Group DNs are normalized by the plugin, not the engine.** LDAP and
   AD groups are DNs (`CN=engineers,OU=Groups,DC=corp,DC=example`), which
   make hostile `role_bindings` keys: commas and `=` are awkward in YAML,
@@ -253,8 +276,8 @@ bind-DN templating and LDAP-injection rejection, RFC 4515 filter
 escaping, group-DN → role mapping (CN and DN forms, dedup, escaped
 commas), and the login guards for a missing or empty field. The door
 (`auth-ldap/src/door.rs`) is driven through busbar's real loader, linked
-and dropped in, by `auth-ldap-plugin/tests/conformance.rs`: `verify`'s
-pass, the `begin_login` form, the `complete_login` verdicts, and the
+and dropped in, by `auth-ldap-plugin/tests/conformance.rs`: `verify`
+refused (an undeclared op), the `begin_login` form, the `complete_login` verdicts, and the
 lifecycle's refusal texts.
 
 The live-bind happy path is integration-only: `auth-ldap-plugin/tests/e2e.rs`
