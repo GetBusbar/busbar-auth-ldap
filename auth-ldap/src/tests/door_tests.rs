@@ -5,7 +5,9 @@
 //! lookup, and the Statement's facts. The table itself is driven through the real loader in the
 //! plugin crate's `tests/conformance.rs` (linked and dropped in).
 
-use super::{field, Ldap, ALIAS, FORM, NAME, NEED, NEEDS, SECRET_REFS, STATEMENT, TAIL};
+use super::{
+    field, take_reached, Ldap, ALIAS, FORM, NAME, NEED, NEEDS, SECRET_REFS, STATEMENT, TAIL,
+};
 use crate::LdapModule;
 use busbar_contract::abi::auth::{CAP_INBOUND, CAP_LOGIN, CAP_OUTBOUND, LOGIN_KIND_CREDENTIAL};
 use busbar_contract::abi::host::conn::connector::{
@@ -151,4 +153,37 @@ fn the_resolved_service_secret_wins_over_the_literal() {
         .err()
         .expect("refused");
     assert!(e.contains("not UTF-8"), "{e}");
+}
+
+fn who(id: &str) -> busbar_contract::auth::Principal {
+    busbar_contract::auth::Principal::from_id(id)
+}
+
+/// An abandoned ticket's kept identity goes with the next op on its slot; other slots stay, and the
+/// call's own key answers its identity.
+#[test]
+fn a_later_generation_on_the_slot_drops_the_abandoned_identity() {
+    let mut reached = std::collections::HashMap::new();
+    reached.insert((3, 1), who("abandoned"));
+    reached.insert((4, 1), who("other-slot"));
+    reached.insert((3, 2), who("mine"));
+    let got = take_reached(&mut reached, (3, 2));
+    assert_eq!(got.map(|p| p.id), Some("mine".to_string()));
+    assert!(!reached.contains_key(&(3, 1)), "the abandoned entry stays");
+    assert!(!reached.contains_key(&(3, 2)), "the call's own key stays");
+    assert!(reached.contains_key(&(4, 1)), "another slot's entry went");
+    assert_eq!(reached.len(), 1);
+}
+
+/// A call on no ticket (generation 0, never minted) proves nothing about slot 0: a kept identity on
+/// that slot stays for its own re-call.
+#[test]
+fn a_ticketless_call_leaves_slot_zeros_kept_identity() {
+    let mut reached = std::collections::HashMap::new();
+    reached.insert((0, 5), who("kept"));
+    assert!(take_reached(&mut reached, (0, 0)).is_none());
+    assert!(
+        reached.contains_key(&(0, 5)),
+        "a ticketless call dropped slot 0's identity"
+    );
 }
