@@ -31,7 +31,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use busbar_auth_ldap::door::door;
+use busbar_auth_ldap::door::MACRO_DOOR;
 use busbar_contract::abi::auth::{
     slot, CompleteLoginIn, IdentifyOut, IdentityBuf, NamedValue, IDENTITY_BUF_BYTES,
     IDENTITY_GROUPS, LOGIN_OUTAGE,
@@ -55,7 +55,7 @@ mod conformance_host;
 mod net_ban;
 
 busbar_plugin_loader::conformance_suite! {
-    door: busbar_auth_ldap::door::door,
+    door: busbar_auth_ldap::door::MACRO_DOOR,
     cdylib: "busbar_auth_ldap_plugin",
     inputs: include_str!("conformance.json"),
     host: host,
@@ -202,7 +202,7 @@ fn host(
 /// states the same Statement.
 #[test]
 fn red_the_statement_declares_one_operator_infrastructure_stream_and_never_blocks() {
-    let stated = LinkedRow::of(door)
+    let stated = LinkedRow::of_macro(MACRO_DOOR)
         .expect("the linked door renders")
         .statement;
     let read = rendering::read(&stated).expect("the rendering reads");
@@ -218,7 +218,7 @@ fn red_the_statement_declares_one_operator_infrastructure_stream_and_never_block
     );
     assert_eq!(read.secret_refs, vec!["bind_service_password".to_string()]);
     assert_eq!(read.marks & MARK_BLOCKS, 0, "no call blocks");
-    let subject = Subject::new(door, "busbar_auth_ldap_plugin", "{}");
+    let subject = Subject::of_macro(MACRO_DOOR, "busbar_auth_ldap_plugin", "{}");
     assert_eq!(subject.stated(), stated);
 }
 
@@ -262,20 +262,18 @@ fn login(
     username: &str,
     password: &str,
 ) -> String {
-    let secret = |b: &[u8]| Blob {
-        ptr: b.as_ptr(),
-        len: b.len(),
-        fmt: BLOB_OCTETS,
-        flags: BLOB_SECRET,
-    };
+    // SAFETY: the `fields` Vec<u8>s live in `LoginLend` for the call.
+    #[allow(unused_unsafe)]
+    let secret =
+        |b: &[u8]| unsafe { Blob::from_raw_parts(b.as_ptr(), b.len(), BLOB_OCTETS, BLOB_SECRET) };
     let fields = [username.as_bytes().to_vec(), password.as_bytes().to_vec()];
     let named = vec![
         NamedValue {
-            name: AbiStr::over(b"username"),
+            name: AbiStr::of_bytes(b"username"),
             value: secret(&fields[0]),
         },
         NamedValue {
-            name: AbiStr::over(b"password"),
+            name: AbiStr::of_bytes(b"password"),
             value: secret(&fields[1]),
         },
     ];
@@ -343,7 +341,7 @@ fn red_a_directory_that_never_answers_is_an_outage_at_the_deadline() {
     .to_string();
     let inputs = serde_json::json!({ "settings": serde_json::from_str::<serde_json::Value>(&settings).unwrap() })
         .to_string();
-    let s = Subject::new(door, "busbar_auth_ldap_plugin", &inputs)
+    let s = Subject::of_macro(MACRO_DOOR, "busbar_auth_ldap_plugin", &inputs)
         .with_host(conformance_host::host)
         .with_anchors(conformance_host::anchors());
     for leg in [Leg::Linked, Leg::Dropped] {
