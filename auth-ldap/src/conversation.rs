@@ -154,7 +154,7 @@ struct Doing {
     entries: Vec<DirEntry>,
 }
 
-/// What a login that passed its deadline answers, after its operation's prefix (`bind: `, ...):
+/// What an operation that passed its deadline answers, after its operation's prefix (`bind: `, ...):
 /// 1.5.5's words for an ldap3 operation timeout (`LdapError::Timeout`, whose `Elapsed` reads
 /// "deadline has elapsed").
 pub const TIMEOUT: &str = "timeout: deadline has elapsed";
@@ -203,18 +203,10 @@ impl Conversation {
         self.opened
     }
 
-    /// The instant (the caller's monotonic clock) the conversation gives up, once it is set.
+    /// The instant (the caller's monotonic clock) the operation in progress gives up, once set.
     #[must_use]
     pub const fn deadline_ns(&self) -> Option<u64> {
         self.deadline_ns
-    }
-
-    /// Start the clock on the first entry: the conversation gives up `timeout_secs` after `now`.
-    pub(crate) fn arm(&mut self, now_ns: Option<u64>, timeout_secs: u64) {
-        if self.deadline_ns.is_none() {
-            self.deadline_ns =
-                now_ns.map(|n| n.saturating_add(timeout_secs.saturating_mul(1_000_000_000)));
-        }
     }
 
     fn next_id(&mut self) -> i32 {
@@ -234,25 +226,28 @@ pub(crate) struct Over<'a, W: Wire> {
     wire: &'a mut W,
     endpoint: Result<Endpoint, String>,
     op: usize,
-    expired: bool,
+    now_ns: Option<u64>,
+    timeout_secs: u64,
 }
 
 impl<'a, W: Wire> Over<'a, W> {
-    /// The backend for one entry: `url`/`start_tls` name the directory; `expired` = the
-    /// conversation's deadline has passed.
+    /// The backend for one entry: `url`/`start_tls` name the directory; `now_ns` is the caller's
+    /// clock (`None` = none) and each operation may wait `timeout_secs` from its own start.
     pub(crate) fn new(
         conv: &'a mut Conversation,
         wire: &'a mut W,
         url: &str,
         start_tls: bool,
-        expired: bool,
+        now_ns: Option<u64>,
+        timeout_secs: u64,
     ) -> Self {
         Self {
             conv,
             wire,
             endpoint: Endpoint::parse(url, start_tls),
             op: 0,
-            expired,
+            now_ns,
+            timeout_secs,
         }
     }
 
@@ -276,12 +271,20 @@ impl<'a, W: Wire> Over<'a, W> {
 
     /// The operation in progress, begun as `start` when none is.
     fn doing(&mut self, start: impl FnOnce(&mut Conversation) -> Doing) -> Result<(), Io> {
-        if self.expired {
-            return self.fail(TIMEOUT);
-        }
+        let wait = self.timeout_secs.saturating_mul(1_000_000_000);
         if self.conv.doing.is_none() {
             let d = start(&mut *self.conv);
             self.conv.doing = Some(d);
+            self.conv.deadline_ns = self.now_ns.map(|n| n.saturating_add(wait));
+        } else if let Some(now) = self.now_ns {
+            // An operation begun on an entry with no clock is timed from the first entry with one.
+            let deadline = *self
+                .conv
+                .deadline_ns
+                .get_or_insert_with(|| now.saturating_add(wait));
+            if now >= deadline {
+                return self.fail(TIMEOUT);
+            }
         }
         Ok(())
     }
