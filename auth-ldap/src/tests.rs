@@ -1100,6 +1100,139 @@ fn the_user_search_filter_is_escaped_as_applied_not_just_in_isolation() {
     }
 }
 
+// ── Credential-echo canaries (CREDENTIAL-LOCKDOWN H5) ────────────────────────────────────────────
+
+const CANARY: &str = "CANARYa6d215";
+
+/// A config whose URL carries a userinfo password.
+fn userinfo_cfg(url: &str, allow_insecure: bool) -> LdapConfig {
+    serde_json::from_value(serde_json::json!({
+        "url": url,
+        "bind_dn_template": "uid={username},ou=people,dc=corp,dc=example",
+        "base_dn": "dc=corp,dc=example",
+        "allow_insecure_transport": allow_insecure
+    }))
+    .expect("valid config parses")
+}
+
+/// Every message and field logged while `f` runs.
+fn logged_text(f: impl FnOnce()) -> String {
+    use std::sync::{Arc, Mutex};
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::{Event, Metadata, Subscriber};
+    struct Capture(Arc<Mutex<String>>);
+    struct Text(String);
+    impl Visit for Text {
+        fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+            self.0.push_str(&format!(" {}={value:?}", field.name()));
+        }
+    }
+    impl Subscriber for Capture {
+        fn enabled(&self, _: &Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
+        }
+        fn record(&self, _: &Id, _: &Record<'_>) {}
+        fn record_follows_from(&self, _: &Id, _: &Id) {}
+        fn event(&self, event: &Event<'_>) {
+            let mut t = Text(String::new());
+            event.record(&mut t);
+            self.0.lock().unwrap().push_str(&format!("{}\n", t.0));
+        }
+        fn enter(&self, _: &Id) {}
+        fn exit(&self, _: &Id) {}
+    }
+    let text = Arc::new(Mutex::new(String::new()));
+    tracing::subscriber::with_default(Capture(Arc::clone(&text)), f);
+    let t = text.lock().unwrap().clone();
+    t
+}
+
+/// A directory that cannot be reached: `connect` fails, nothing else is ever asked.
+struct Unreachable;
+
+impl LdapBackend for Unreachable {
+    fn connect(&mut self) -> Result<(), Io> {
+        Err(Io::Failed("connection refused".to_string()))
+    }
+    fn simple_bind(&mut self, _: &str, _: &str) -> Result<u32, Io> {
+        unreachable!("no bind without a connection")
+    }
+    fn search(
+        &mut self,
+        _: &str,
+        _: SearchScope,
+        _: &str,
+        _: &[&str],
+    ) -> Result<Vec<DirEntry>, Io> {
+        unreachable!("no search without a connection")
+    }
+    fn unbind(&mut self) -> Result<(), Io> {
+        Ok(())
+    }
+}
+
+/// H5: the plaintext-transport refusal quoted the URL with its userinfo (`{:?}` of it).
+#[test]
+fn the_plaintext_refusal_never_quotes_the_url_password() {
+    let url = format!("ldap://svc:{CANARY}@ad.corp.example:389");
+    let Err(e) = LdapModule::new(userinfo_cfg(&url, false)) else {
+        panic!("plaintext is refused");
+    };
+    assert!(!e.contains(CANARY), "the refusal carried the password: {e}");
+    assert!(e.contains("ad.corp.example:389"), "the host is kept: {e}");
+}
+
+/// H5: `allow_insecure_transport` logged `url = %cfg.url` with its userinfo, on every boot.
+#[test]
+fn the_insecure_transport_warning_never_logs_the_url_password() {
+    let url = format!("ldap://svc:{CANARY}@ad.corp.example:389");
+    let text = logged_text(|| {
+        assert!(
+            LdapModule::new(userinfo_cfg(&url, true)).is_ok(),
+            "opted out"
+        );
+    });
+    assert!(
+        text.contains("allow_insecure_transport"),
+        "the warning is logged: {text}"
+    );
+    assert!(
+        !text.contains(CANARY),
+        "the warning carried the password: {text}"
+    );
+}
+
+/// H5: a failed connect said `connect {url}` with the userinfo, into the logged directory failure.
+#[test]
+fn a_connect_failure_never_carries_the_url_password() {
+    let url = format!("ldaps://svc:{CANARY}@ad.corp.example:636");
+    let Ok(m) = LdapModule::new(userinfo_cfg(&url, false)) else {
+        panic!("ldaps opens");
+    };
+    match m.bind_and_identify(&mut Unreachable, "alice", "pw") {
+        Err(BindError::Directory(e)) => {
+            assert!(!e.contains(CANARY), "the failure carried the password: {e}");
+            assert!(e.starts_with("connect "), "1.5.5's prefix is kept: {e}");
+        }
+        r => panic!("a failed connect is a directory failure, got {r:?}"),
+    }
+}
+
+/// A.3: `LdapConfig` derives `Debug`, and printed the URL with its userinfo.
+#[test]
+fn debug_of_the_config_never_prints_the_url_password() {
+    let url = format!("ldaps://svc:{CANARY}@ad.corp.example:636");
+    let cfg = userinfo_cfg(&url, false);
+    for text in [format!("{cfg:?}"), format!("{cfg:#?}")] {
+        assert!(!text.contains(CANARY), "Debug carried the password: {text}");
+        assert!(text.contains("ad.corp.example"), "{text}");
+    }
+}
+
 // ── every refusal is explained; nothing is silent ───────────────────────────────────────────────
 
 mod logging {
