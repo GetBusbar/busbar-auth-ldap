@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 [package]
 name = "busbar-auth-ldap"
-version = "0.1.0"
+version = "1.6.0"
 publish = false
 edition = "2021"
 rust-version = "1.97"

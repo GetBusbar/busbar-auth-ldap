@@ -29,11 +29,11 @@ permissions:
 
 jobs:
   ci:
-    uses: GetBusbar/busbar/.github/workflows/plugin-ci.yml@317744d1a03a455e324c93f3789a9baf8b817a6a
+    uses: GetBusbar/busbar/.github/workflows/plugin-ci.yml@71b70e487bebe5ae2feb1fabf32d8906edf4ccad
     with:
       service: openldap
       busbar_checkout: true
-      macos_test: "cargo test --workspace --locked --lib --test conformance -- --skip the_linked_and_the_dropped_in_door_are_one_plugin --skip red_a_moved_crossing_count_is_refused"
+      macos_test: "env -u CI cargo test --workspace --locked --lib --test conformance -- --skip the_linked_and_the_dropped_in_door_are_one_plugin --skip red_a_moved_crossing_count_is_refused"
       extra_test: ""
       plugin_crate: busbar-auth-ldap-plugin
       plugin_kind: auth

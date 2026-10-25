@@ -395,6 +395,16 @@ fn login_cookie(resp: &reqwest::blocking::Response) -> String {
         .expect("begin sets the busbar_login cookie")
 }
 
+/// The spawned busbar, killed and reaped when this drops: a failing assertion leaks no process.
+struct Busbar(std::process::Child);
+
+impl Drop for Busbar {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 fn wait_for_health(
     client: &reqwest::blocking::Client,
     url: &str,
@@ -506,18 +516,25 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
     .unwrap();
 
     let stderr_log = work.join("busbar.stderr");
-    let mut child = std::process::Command::new(&busbar_bin)
-        .env("BUSBAR_CONFIG", &config)
-        .env("BUSBAR_PROVIDERS", &providers)
-        .env("MOCK_KEY", "unused")
-        .env("BUSBAR_ADMIN_TOKEN", "e2e-admin-token")
-        .env("BUSBAR_STATE_FILE", "")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::fs::File::create(&stderr_log).expect("busbar's stderr log"))
-        .spawn()
-        .expect("spawn busbar with identity-providers.ldap");
+    let mut child = Busbar(
+        std::process::Command::new(&busbar_bin)
+            .env("BUSBAR_CONFIG", &config)
+            .env("BUSBAR_PROVIDERS", &providers)
+            .env("MOCK_KEY", "unused")
+            .env("BUSBAR_ADMIN_TOKEN", "e2e-admin-token")
+            .env("BUSBAR_STATE_FILE", "")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(&stderr_log).expect("busbar's stderr log"))
+            .spawn()
+            .expect("spawn busbar with identity-providers.ldap"),
+    );
     let base = format!("http://127.0.0.1:{data_port}");
-    wait_for_health(&client, &format!("{base}/healthz"), &mut child, &stderr_log);
+    wait_for_health(
+        &client,
+        &format!("{base}/healthz"),
+        &mut child.0,
+        &stderr_log,
+    );
 
     // begin: GET ?method=ldap → 200 credential form + cookie.
     let begin = client
@@ -603,7 +620,6 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
         "a wrong password must be rejected 401 (bind gates)"
     );
 
-    let _ = child.kill();
-    let _ = child.wait();
+    drop(child);
     let _ = std::fs::remove_dir_all(&work);
 }
