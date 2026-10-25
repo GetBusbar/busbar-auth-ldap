@@ -32,6 +32,8 @@ struct Directory {
     owed: bool,
     write_chunk: Option<usize>,
     refuse_establish: Option<String>,
+    hold: bool,
+    secure_error: Option<String>,
 }
 
 impl Directory {
@@ -40,6 +42,13 @@ impl Directory {
             replies: replies.into(),
             ..Self::default()
         }
+    }
+
+    /// Once the replies run out the stream stays open and a read pends (no EOF), so only a
+    /// fail-closed path can answer.
+    fn held(mut self) -> Self {
+        self.hold = true;
+        self
     }
 
     fn pending(mut self) -> Self {
@@ -76,6 +85,9 @@ impl Wire for Directory {
         if self.wait() {
             return Poll::Pending;
         }
+        if let Some(e) = self.secure_error.clone() {
+            return Poll::Ready(Err(e));
+        }
         self.seen.push(Seen::Secure);
         Poll::Ready(Ok(()))
     }
@@ -94,6 +106,9 @@ impl Wire for Directory {
             return Poll::Pending;
         }
         let Some(mut next) = self.replies.pop_front() else {
+            if self.hold {
+                return Poll::Pending;
+            }
             return Poll::Ready(Ok(0));
         };
         let n = next.len().min(buf.len());
@@ -299,6 +314,28 @@ fn start_tls_sends_the_extended_request_then_secures() {
     assert_eq!(dir.written, want);
 }
 
+/// A MITM appends forged bind replies to the plaintext StartTLS success: whatever arrived before
+/// the upgrade is never honoured after it (CVE-2011-0411's class), so the login is an outage and
+/// no bind is ever sent.
+#[test]
+fn data_sent_with_the_start_tls_response_is_never_honoured() {
+    let m = module(
+        "ldap://ad.corp.example",
+        serde_json::json!({"start_tls": true}),
+    );
+    let forged = [
+        extended(1, 0),
+        bind_response(2, 0),
+        entry(3, ALICE, "memberOf", &["cn=admins,dc=corp"]),
+        done(3, 0),
+    ]
+    .concat();
+    let mut dir = Directory::new(vec![forged]);
+    assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
+    assert_eq!(dir.written, codec::start_tls(1), "no bind request is sent");
+    assert!(!dir.seen.contains(&Seen::Secure), "never secured");
+}
+
 #[test]
 fn a_refused_start_tls_never_secures_and_never_binds() {
     let m = module(
@@ -363,6 +400,41 @@ fn search_then_bind_speaks_in_1_5_5s_order() {
     assert_eq!(dir.written, want);
 }
 
+/// A search keeps at most two entries (the module needs only whether a second exists); the rest
+/// are read and dropped, and a user search matching several is still ambiguous: a bad credential.
+#[test]
+fn a_search_keeps_at_most_two_entries() {
+    use crate::{LdapBackend, SearchScope};
+    let many = |n: i64| -> Vec<Vec<u8>> {
+        let mut r = vec![bind_response(1, 0)];
+        for i in 0..n {
+            r.push(entry(2, &format!("uid=u{i},dc=x"), "dn", &[]));
+        }
+        r.push(done(2, 0));
+        r
+    };
+    let mut dir = Directory::new(many(5));
+    let mut conv = Conversation::new();
+    let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, None, 10);
+    over.connect().expect("connects");
+    over.simple_bind("cn=svc,dc=x", "pw").expect("binds");
+    let got = over
+        .search("dc=x", SearchScope::Subtree, "(uid=alice)", &["dn"])
+        .expect("searches");
+    assert_eq!(got.len(), 2, "kept only two of five");
+
+    let m = module(
+        "ldap://127.0.0.1",
+        serde_json::json!({
+            "user_search_filter": "(uid={username})",
+            "bind_service_dn": "cn=svc,dc=x",
+            "bind_service_password": "svc-pw",
+        }),
+    );
+    let mut dir = Directory::new(many(5));
+    assert_eq!(login(&m, &mut dir, "pw").0, Login::BadCredential);
+}
+
 /// 1.5.5 panicked reading a referral as an entry; it is an outage now.
 #[test]
 fn a_search_reference_fails_closed() {
@@ -378,7 +450,7 @@ fn a_search_reference_fails_closed() {
         2,
         ber::element(0x73, &ber::element(0x04, b"ldap://elsewhere/")),
     );
-    let mut dir = Directory::new(vec![bind_response(1, 0), reference]);
+    let mut dir = Directory::new(vec![bind_response(1, 0), reference]).held();
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
 }
 
@@ -391,14 +463,14 @@ fn the_signed_differences_fail_closed_as_an_outage() {
     let overrun = message(1, vec![0x61, 0x7f, 0x0a, 0x01, 0x00]);
     let past_cap = [&[0x30, 0x84][..], &(16_u32 * 1024 * 1024).to_be_bytes()[..]].concat();
     for reply in [malformed, overrun, past_cap] {
-        let mut dir = Directory::new(vec![reply.clone()]);
+        let mut dir = Directory::new(vec![reply.clone()]).held();
         assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage, "{reply:02x?}");
     }
     // A directory that closes the stream before answering is an outage too.
     let mut dir = Directory::new(Vec::new());
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
     // So is a notice of disconnection (message id 0).
-    let mut dir = Directory::new(vec![extended(0, 52)]);
+    let mut dir = Directory::new(vec![extended(0, 52)]).held();
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
 }
 
@@ -489,7 +561,7 @@ fn an_endpoint_reads_its_target_and_security() {
     assert!(Endpoint::parse("h:389", false).is_err());
 }
 
-/// The login gives up `timeout_secs` after its first entry: a directory that never answers is an
+/// An operation gives up `timeout_secs` after it begins: a directory that never answers is an
 /// outage once the clock passes the deadline, and the conversation states that deadline.
 #[test]
 fn a_directory_that_never_answers_is_an_outage_after_the_timeout() {
@@ -546,6 +618,74 @@ fn a_directory_that_never_answers_is_an_outage_after_the_timeout() {
     );
 }
 
+/// A directory on a clock: the first service of each directory operation (the dial, then each
+/// reply) pends, and the caller's clock moves `step_ns` on that wake.
+struct Slow {
+    dir: Directory,
+    owed: bool,
+}
+
+impl Wire for Slow {
+    fn establish(&mut self, target: &str) -> Poll<Result<(), String>> {
+        self.owed = !self.owed;
+        if self.owed {
+            return Poll::Pending;
+        }
+        self.dir.establish(target)
+    }
+    fn secure(&mut self) -> Poll<Result<(), String>> {
+        self.dir.secure()
+    }
+    fn write(&mut self, bytes: &[u8]) -> Poll<Result<usize, String>> {
+        self.dir.write(bytes)
+    }
+    fn read(&mut self, buf: &mut [u8]) -> Poll<Result<usize, String>> {
+        self.owed = !self.owed;
+        if self.owed {
+            return Poll::Pending;
+        }
+        self.dir.read(buf)
+    }
+}
+
+/// `timeout_secs` bounds each directory operation, as 1.5.5 did (the connect, and each bind and
+/// search): a login whose operations each take 0.6 of it completes, though together they take more.
+#[test]
+fn the_timeout_bounds_each_operation_not_the_whole_login() {
+    let m = module("ldap://127.0.0.1", serde_json::json!({"timeout_secs": 10}));
+    let mut slow = Slow {
+        dir: Directory::new(vec![
+            bind_response(1, 0),
+            [
+                entry(2, ALICE, "memberOf", &["cn=admins,dc=corp"]),
+                done(2, 0),
+            ]
+            .concat(),
+        ]),
+        owed: false,
+    };
+    let mut conv = Conversation::new();
+    let mut now = 1_000_000_000_u64;
+    let mut got = None;
+    for _ in 0..20 {
+        match m.login_over(&mut conv, &mut slow, Some("alice"), Some("pw"), Some(now)) {
+            Poll::Ready(l) => {
+                got = Some(l);
+                break;
+            }
+            Poll::Pending => now += 6_000_000_000,
+        }
+    }
+    let Some(Login::Identity(p)) = got else {
+        panic!("every operation was inside its own timeout: {got:?}");
+    };
+    assert_eq!(p.roles, vec!["admins".to_string()]);
+    assert!(
+        now >= 1_000_000_000 + 3 * 6_000_000_000,
+        "three operations waited"
+    );
+}
+
 /// The order 1.5.5 had (seam 6): the connection is opened before the DN template refuses a
 /// username, so a refused username is still a bad credential, after the dial.
 #[test]
@@ -590,21 +730,71 @@ impl Wire for Mute {
 #[test]
 fn a_timeout_reads_in_1_5_5s_words() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
+    let (t0, late) = (1_000_000_000_u64, 1_000_000_000_u64 + 10_000_000_000);
     let mut mute = Mute;
     let mut conv = Conversation::new();
-    let mut over = super::Over::new(&mut conv, &mut mute, "ldap://127.0.0.1", false, false);
+    let mut over = super::Over::new(
+        &mut conv,
+        &mut mute,
+        "ldap://127.0.0.1",
+        false,
+        Some(t0),
+        10,
+    );
     assert!(matches!(
         m.bind_and_identify(&mut over, "alice", "pw"),
         Err(crate::BindError::Pending)
     ));
-    let mut over = super::Over::new(&mut conv, &mut mute, "ldap://127.0.0.1", false, true);
+    let mut over = super::Over::new(
+        &mut conv,
+        &mut mute,
+        "ldap://127.0.0.1",
+        false,
+        Some(late),
+        10,
+    );
     match m.bind_and_identify(&mut over, "alice", "pw") {
         Err(crate::BindError::Directory(e)) => assert_eq!(e, "bind: timeout: deadline has elapsed"),
         other => panic!("{other:?}"),
     }
-    // Expired before the stream opened: the connect's prefix, as 1.5.5's connect timeout.
+    // A connect that pends past its deadline: the connect's prefix, as 1.5.5's connect timeout.
+    struct Dialing;
+    impl Wire for Dialing {
+        fn establish(&mut self, _: &str) -> Poll<Result<(), String>> {
+            Poll::Pending
+        }
+        fn secure(&mut self) -> Poll<Result<(), String>> {
+            Poll::Pending
+        }
+        fn write(&mut self, _: &[u8]) -> Poll<Result<usize, String>> {
+            Poll::Pending
+        }
+        fn read(&mut self, _: &mut [u8]) -> Poll<Result<usize, String>> {
+            Poll::Pending
+        }
+    }
+    let mut dialing = Dialing;
     let mut conv = Conversation::new();
-    let mut over = super::Over::new(&mut conv, &mut mute, "ldap://127.0.0.1", false, true);
+    let mut over = super::Over::new(
+        &mut conv,
+        &mut dialing,
+        "ldap://127.0.0.1",
+        false,
+        Some(t0),
+        10,
+    );
+    assert!(matches!(
+        m.bind_and_identify(&mut over, "alice", "pw"),
+        Err(crate::BindError::Pending)
+    ));
+    let mut over = super::Over::new(
+        &mut conv,
+        &mut dialing,
+        "ldap://127.0.0.1",
+        false,
+        Some(late),
+        10,
+    );
     match m.bind_and_identify(&mut over, "alice", "pw") {
         Err(crate::BindError::Directory(e)) => {
             assert_eq!(e, "connect ldap://127.0.0.1: timeout: deadline has elapsed");
@@ -635,7 +825,7 @@ fn the_resolved_service_secret_reaches_only_the_bind() {
     for replies in [vec![bind_response(1, 52)], vec![malformed], Vec::new()] {
         let mut dir = Directory::new(replies);
         let mut conv = Conversation::new();
-        let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, false);
+        let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, None, 10);
         match m.bind_and_identify(&mut over, "alice", "pw") {
             Err(crate::BindError::Directory(e)) => assert!(!e.contains(SECRET), "{e}"),
             other => panic!("{other:?}"),
@@ -646,4 +836,77 @@ fn the_resolved_service_secret_reaches_only_the_bind() {
             "the bind sends it"
         );
     }
+}
+
+/// The BIND request in flight holds the cleartext password: a `Debug` of the conversation (it is
+/// `pub`) must never print it.
+#[test]
+fn a_conversation_in_flight_never_debug_prints_the_password() {
+    const PW: &str = "hunter2-s3cret";
+    let m = module("ldap://127.0.0.1", serde_json::json!({}));
+    let mut dir = Directory::new(vec![bind_response(1, 0), done(2, 0)]).pending();
+    let mut conv = Conversation::new();
+    let mut held = false;
+    for _ in 0..200 {
+        let answer = m.login_over(&mut conv, &mut dir, Some("alice"), Some(PW), Some(0));
+        held |= conv
+            .doing
+            .as_ref()
+            .is_some_and(|d| d.out.windows(PW.len()).any(|w| w == PW.as_bytes()));
+        let shown = format!("{conv:?}");
+        assert!(!shown.contains(PW), "the password is in: {shown}");
+        // `Debug` of a byte slice prints its bytes as decimals: the password's, too, is a leak.
+        let digits = format!("{:?}", PW.as_bytes());
+        let digits = digits.trim_matches(['[', ']']);
+        assert!(
+            !shown.contains(digits),
+            "the password's bytes are in: {shown}"
+        );
+        if answer.is_ready() {
+            break;
+        }
+    }
+    assert!(held, "the bind request was never held in flight");
+}
+
+/// A SearchResultEntry and its SearchResultDone arrive in ONE read (the normal wire shape): the
+/// second message must survive the first's decode, and the stream holds open after it so a lost
+/// message pends instead of reading as EOF.
+#[test]
+fn two_messages_in_one_read_are_both_read() {
+    let m = module("ldap://127.0.0.1", serde_json::json!({}));
+    let both = [
+        entry(2, ALICE, "memberOf", &["cn=Engineers,ou=g,dc=corp"]),
+        done(2, 0),
+    ]
+    .concat();
+    let mut dir = Directory::new(vec![bind_response(1, 0), both]).held();
+    let Login::Identity(p) = login(&m, &mut dir, "pw").0 else {
+        panic!("alice binds");
+    };
+    assert_eq!(p.roles, vec!["Engineers".to_string()]);
+}
+
+/// A TLS handshake the connector fails (`ldaps://`, or StartTLS after the directory agreed) is an
+/// outage that never puts the BIND on the wire.
+#[test]
+fn a_failed_secure_is_an_outage_and_never_binds() {
+    let m = module("ldaps://ad.corp.example", serde_json::json!({}));
+    let mut dir = Directory::new(vec![bind_response(1, 0), done(2, 0)]).held();
+    dir.secure_error = Some("tls handshake failed".to_string());
+    assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
+    assert!(dir.written.is_empty(), "wrote: {:02x?}", dir.written);
+
+    let m = module(
+        "ldap://ad.corp.example",
+        serde_json::json!({"start_tls": true}),
+    );
+    let mut dir = Directory::new(vec![extended(1, 0), bind_response(2, 0), done(3, 0)]).held();
+    dir.secure_error = Some("tls handshake failed".to_string());
+    assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
+    assert_eq!(
+        dir.written,
+        codec::start_tls(1),
+        "only the StartTLS request"
+    );
 }

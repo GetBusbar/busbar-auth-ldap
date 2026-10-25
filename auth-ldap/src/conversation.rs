@@ -17,6 +17,7 @@
 //! in the clear, reads its answer, then asks the connector to secure the stream
 //! (`upgrade_secure`, the connector's ONE generic mid-stream service).
 
+use std::fmt;
 use std::task::Poll;
 
 use crate::codec::{self, Message, Reply};
@@ -145,7 +146,6 @@ enum Stage {
 
 /// The operation in progress: its stage, its request bytes and how many went, its message id,
 /// and the entries a search has read so far.
-#[derive(Debug)]
 struct Doing {
     stage: Stage,
     out: Box<[u8]>,
@@ -154,10 +154,27 @@ struct Doing {
     entries: Vec<DirEntry>,
 }
 
-/// What a login that passed its deadline answers, after its operation's prefix (`bind: `, ...):
+// By hand: `out` is the encoded request, a BIND's cleartext password with it; only its length shows.
+impl fmt::Debug for Doing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Doing")
+            .field("stage", &self.stage)
+            .field("out_len", &self.out.len())
+            .field("sent", &self.sent)
+            .field("id", &self.id)
+            .field("entries", &self.entries)
+            .finish()
+    }
+}
+
+/// What an operation that passed its deadline answers, after its operation's prefix (`bind: `, ...):
 /// 1.5.5's words for an ldap3 operation timeout (`LdapError::Timeout`, whose `Elapsed` reads
 /// "deadline has elapsed").
 pub const TIMEOUT: &str = "timeout: deadline has elapsed";
+
+/// How many entries of one search are kept: the module reads the first entry and needs to know
+/// only whether a second exists. Later entries are read and dropped.
+const MAX_ENTRIES_KEPT: usize = 2;
 
 /// How much one read asks for.
 const READ_CHUNK: usize = 16 * 1024;
@@ -203,18 +220,10 @@ impl Conversation {
         self.opened
     }
 
-    /// The instant (the caller's monotonic clock) the conversation gives up, once it is set.
+    /// The instant (the caller's monotonic clock) the operation in progress gives up, once set.
     #[must_use]
     pub const fn deadline_ns(&self) -> Option<u64> {
         self.deadline_ns
-    }
-
-    /// Start the clock on the first entry: the conversation gives up `timeout_secs` after `now`.
-    pub(crate) fn arm(&mut self, now_ns: Option<u64>, timeout_secs: u64) {
-        if self.deadline_ns.is_none() {
-            self.deadline_ns =
-                now_ns.map(|n| n.saturating_add(timeout_secs.saturating_mul(1_000_000_000)));
-        }
     }
 
     fn next_id(&mut self) -> i32 {
@@ -234,25 +243,28 @@ pub(crate) struct Over<'a, W: Wire> {
     wire: &'a mut W,
     endpoint: Result<Endpoint, String>,
     op: usize,
-    expired: bool,
+    now_ns: Option<u64>,
+    timeout_secs: u64,
 }
 
 impl<'a, W: Wire> Over<'a, W> {
-    /// The backend for one entry: `url`/`start_tls` name the directory; `expired` = the
-    /// conversation's deadline has passed.
+    /// The backend for one entry: `url`/`start_tls` name the directory; `now_ns` is the caller's
+    /// clock (`None` = none) and each operation may wait `timeout_secs` from its own start.
     pub(crate) fn new(
         conv: &'a mut Conversation,
         wire: &'a mut W,
         url: &str,
         start_tls: bool,
-        expired: bool,
+        now_ns: Option<u64>,
+        timeout_secs: u64,
     ) -> Self {
         Self {
             conv,
             wire,
             endpoint: Endpoint::parse(url, start_tls),
             op: 0,
-            expired,
+            now_ns,
+            timeout_secs,
         }
     }
 
@@ -276,12 +288,20 @@ impl<'a, W: Wire> Over<'a, W> {
 
     /// The operation in progress, begun as `start` when none is.
     fn doing(&mut self, start: impl FnOnce(&mut Conversation) -> Doing) -> Result<(), Io> {
-        if self.expired {
-            return self.fail(TIMEOUT);
-        }
+        let wait = self.timeout_secs.saturating_mul(1_000_000_000);
         if self.conv.doing.is_none() {
             let d = start(&mut *self.conv);
             self.conv.doing = Some(d);
+            self.conv.deadline_ns = self.now_ns.map(|n| n.saturating_add(wait));
+        } else if let Some(now) = self.now_ns {
+            // An operation begun on an entry with no clock is timed from the first entry with one.
+            let deadline = *self
+                .conv
+                .deadline_ns
+                .get_or_insert_with(|| now.saturating_add(wait));
+            if now >= deadline {
+                return self.fail(TIMEOUT);
+            }
         }
         Ok(())
     }
@@ -429,7 +449,15 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                     self.set_stage(Stage::ReadStartTls);
                 }
                 Stage::ReadStartTls => match self.reply()? {
-                    Reply::Extended(r, _) if r.rc == 0 => self.set_stage(Stage::Secure),
+                    // Bytes read before the upgrade are never honoured after it (RFC 4513 s3.1.1).
+                    Reply::Extended(r, _) if r.rc == 0 => {
+                        if !self.conv.inbound.is_empty() {
+                            return self.fail(
+                                "the directory sent data after the StartTLS response, before TLS",
+                            );
+                        }
+                        self.set_stage(Stage::Secure);
+                    }
                     Reply::Extended(r, _) => return self.fail(r.to_string()),
                     _ => return self.fail("malformed reply: not an extended response"),
                 },
@@ -490,7 +518,9 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
             match self.reply()? {
                 Reply::Entry(e) => {
                     if let Some(d) = self.conv.doing.as_mut() {
-                        d.entries.push(e);
+                        if d.entries.len() < MAX_ENTRIES_KEPT {
+                            d.entries.push(e);
+                        }
                     }
                 }
                 Reply::Done(r) if r.rc == 0 => {
