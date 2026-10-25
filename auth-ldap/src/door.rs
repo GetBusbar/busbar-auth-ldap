@@ -170,12 +170,15 @@ pub struct Ldap {
 }
 
 /// The identity a short answer kept for `key`'s re-call, taken. Nothing else is left behind for
-/// that ticket SLOT: an op on the slot under another generation proves the earlier op is over.
+/// that ticket SLOT: an op on the slot under another generation proves the earlier op is over. A
+/// call on no ticket (generation `0`, never minted) proves nothing and drops nothing.
 fn take_reached(
     reached: &mut HashMap<(u32, u32), Principal>,
     key: (u32, u32),
 ) -> Option<Principal> {
-    reached.retain(|&(slot, generation), _| slot != key.0 || generation == key.1);
+    if key.1 != 0 {
+        reached.retain(|&(slot, generation), _| slot != key.0 || generation == key.1);
+    }
     reached.remove(&key)
 }
 
