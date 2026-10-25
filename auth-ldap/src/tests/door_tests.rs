@@ -174,3 +174,16 @@ fn a_later_generation_on_the_slot_drops_the_abandoned_identity() {
     assert!(reached.contains_key(&(4, 1)), "another slot's entry went");
     assert_eq!(reached.len(), 1);
 }
+
+/// A call on no ticket (generation 0, never minted) proves nothing about slot 0: a kept identity on
+/// that slot stays for its own re-call.
+#[test]
+fn a_ticketless_call_leaves_slot_zeros_kept_identity() {
+    let mut reached = std::collections::HashMap::new();
+    reached.insert((0, 5), who("kept"));
+    assert!(take_reached(&mut reached, (0, 0)).is_none());
+    assert!(
+        reached.contains_key(&(0, 5)),
+        "a ticketless call dropped slot 0's identity"
+    );
+}
