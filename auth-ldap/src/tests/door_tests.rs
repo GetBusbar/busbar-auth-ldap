@@ -5,7 +5,9 @@
 //! lookup, and the Statement's facts. The table itself is driven through the real loader in the
 //! plugin crate's `tests/conformance.rs` (linked and dropped in).
 
-use super::{field, take_reached, Ldap, ALIAS, FORM, NAME, NEED, NEEDS, SECRET_REFS, STATEMENT, TAIL};
+use super::{
+    field, take_reached, Ldap, ALIAS, FORM, NAME, NEED, NEEDS, SECRET_REFS, STATEMENT, TAIL,
+};
 use crate::LdapModule;
 use busbar_contract::abi::auth::{CAP_INBOUND, CAP_LOGIN, CAP_OUTBOUND, LOGIN_KIND_CREDENTIAL};
 use busbar_contract::abi::host::conn::connector::{
