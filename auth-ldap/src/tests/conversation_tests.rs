@@ -647,3 +647,31 @@ fn the_resolved_service_secret_reaches_only_the_bind() {
         );
     }
 }
+
+/// The BIND request in flight holds the cleartext password: a `Debug` of the conversation (it is
+/// `pub`) must never print it.
+#[test]
+fn a_conversation_in_flight_never_debug_prints_the_password() {
+    const PW: &str = "hunter2-s3cret";
+    let m = module("ldap://127.0.0.1", serde_json::json!({}));
+    let mut dir = Directory::new(vec![bind_response(1, 0), done(2, 0)]).pending();
+    let mut conv = Conversation::new();
+    let mut held = false;
+    for _ in 0..200 {
+        let answer = m.login_over(&mut conv, &mut dir, Some("alice"), Some(PW), Some(0));
+        held |= conv
+            .doing
+            .as_ref()
+            .is_some_and(|d| d.out.windows(PW.len()).any(|w| w == PW.as_bytes()));
+        let shown = format!("{conv:?}");
+        assert!(!shown.contains(PW), "the password is in: {shown}");
+        // `Debug` of a byte slice prints its bytes as decimals: the password's, too, is a leak.
+        let digits = format!("{:?}", PW.as_bytes());
+        let digits = digits.trim_matches(['[', ']']);
+        assert!(!shown.contains(digits), "the password's bytes are in: {shown}");
+        if answer.is_ready() {
+            break;
+        }
+    }
+    assert!(held, "the bind request was never held in flight");
+}
