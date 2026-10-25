@@ -78,6 +78,32 @@ impl SecretString {
     }
 }
 
+// The plaintext is wiped when the config holding it is dropped (a refresh, a close).
+impl Drop for SecretString {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.0);
+    }
+}
+
+/// `url` with any userinfo cut to `***`, safe for a refusal, a log line or `Debug`
+/// (CREDENTIAL-LOCKDOWN H5). The authority ends where the dialer ends it (`/`, `?` or `#`) and its
+/// userinfo is everything up to its LAST `@`, as [`conversation::Endpoint::parse`] reads it. A URL
+/// with no userinfo is unchanged.
+pub(crate) fn shown_url(url: &str) -> String {
+    let (scheme, rest) = match url.split_once("://") {
+        Some((scheme, rest)) => (Some(scheme), rest),
+        None => (None, url),
+    };
+    let end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let Some(at) = rest[..end].rfind('@') else {
+        return url.to_string();
+    };
+    match scheme {
+        Some(scheme) => format!("{scheme}://***{}", &rest[at..]),
+        None => format!("***{}", &rest[at..]),
+    }
+}
+
 impl fmt::Debug for SecretString {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str("[REDACTED]")
@@ -99,8 +125,9 @@ pub enum RoleFrom {
 /// Open-time configuration for the LDAP module — the module's OPAQUE `auth.methods.ldap` settings,
 /// deserialized from the JSON the engine passes to `open`. Every LDAP-specific knob (URL, DN
 /// templates, TLS/CA, group attribute) fits here as opaque module settings: the engine never needs
-/// to understand any of these fields.
-#[derive(Debug, Clone, Deserialize)]
+/// to understand any of these fields. Its `Debug` prints the URL with any userinfo cut
+/// ([`shown_url`]) and the service password redacted.
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LdapConfig {
     /// The directory URL: `ldaps://ad.corp.example:636` (LDAPS) or `ldap://ad.corp.example:389`
@@ -175,6 +202,25 @@ fn default_group_attr() -> String {
 }
 fn default_timeout_secs() -> u64 {
     10
+}
+
+impl fmt::Debug for LdapConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LdapConfig")
+            .field("url", &shown_url(&self.url))
+            .field("bind_dn_template", &self.bind_dn_template)
+            .field("base_dn", &self.base_dn)
+            .field("group_attr", &self.group_attr)
+            .field("role_from", &self.role_from)
+            .field("user_search_filter", &self.user_search_filter)
+            .field("bind_service_dn", &self.bind_service_dn)
+            .field("bind_service_password", &self.bind_service_password)
+            .field("ca_cert_pem", &self.ca_cert_pem.is_some())
+            .field("start_tls", &self.start_tls)
+            .field("allow_insecure_transport", &self.allow_insecure_transport)
+            .field("timeout_secs", &self.timeout_secs)
+            .finish()
+    }
 }
 
 impl LdapConfig {
@@ -269,12 +315,13 @@ impl LdapModule {
         // service-account AND every end-user password in cleartext. Reject unless the operator
         // explicitly opts out. `ldaps://`, STARTTLS, or a loopback host are already secure/local.
         if is_insecure_transport(&cfg.url, cfg.start_tls) && !cfg.allow_insecure_transport {
+            // The URL is quoted with any userinfo cut: the words are 1.5.5's otherwise (H5).
             return Err(format!(
                 "ldap url {:?} uses plaintext ldap:// to a non-loopback host with no STARTTLS, \
                  which sends the service and end-user credentials in cleartext; use an ldaps:// \
                  URL, set start_tls = true, or (to knowingly override) set \
                  allow_insecure_transport = true",
-                cfg.url
+                shown_url(&cfg.url)
             ));
         }
         // The opt-out is honoured, but never SILENTLY. An operator who copies a lab config into
@@ -288,7 +335,7 @@ impl LdapModule {
         if is_insecure_transport(&cfg.url, cfg.start_tls) {
             tracing::warn!(
                 module = "ldap",
-                url = %cfg.url,
+                url = %shown_url(&cfg.url),
                 "allow_insecure_transport is set: binds run over plaintext ldap:// to a \
                  non-loopback host, so the service-account AND every end-user password cross the \
                  network in cleartext"
@@ -543,7 +590,7 @@ impl LdapModule {
         password: &str,
     ) -> Result<Principal, BindError> {
         ldap.connect()
-            .map_err(at(&format!("connect {}", self.cfg.url)))?;
+            .map_err(at(&format!("connect {}", shown_url(&self.cfg.url))))?;
         self.bind_and_identify_on(ldap, username, password)
     }
     /// The post-connect bind/search/group logic, generic over [`LdapBackend`] so the reject paths are

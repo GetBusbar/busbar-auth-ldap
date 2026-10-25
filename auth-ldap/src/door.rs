@@ -286,7 +286,8 @@ fn write_identity(
 struct Run {
     module: Arc<LdapModule>,
     username: Option<String>,
-    password: Option<String>,
+    /// The end user's password, held across PENDING answers: wiped when the run ends.
+    password: Option<zeroize::Zeroizing<String>>,
     conv: Conversation,
     stream: Option<u64>,
     at: u32,
@@ -372,7 +373,7 @@ fn drive(
             Run {
                 module: h.life().module(),
                 username: field(&fields, USERNAME.0).map(str::to_owned),
-                password: field(&fields, PASSWORD.0).map(str::to_owned),
+                password: field(&fields, PASSWORD.0).map(|p| zeroize::Zeroizing::new(p.to_owned())),
                 conv: Conversation::new(),
                 stream: None,
                 at: 0,
@@ -390,7 +391,7 @@ fn drive(
         &mut run.conv,
         &mut wire,
         run.username.as_deref(),
-        run.password.as_deref(),
+        run.password.as_deref().map(String::as_str),
         now,
     );
     match answer {
