@@ -22,7 +22,7 @@ fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
 #[test]
 fn an_anonymous_bind_is_the_textbook_bytes() {
     assert_eq!(
-        bind(1, "", ""),
+        bind(1, "", "")[..],
         [0x30, 0x0c, 0x02, 0x01, 0x01, 0x60, 0x07, 0x02, 0x01, 0x03, 0x04, 0x00, 0x80, 0x00]
     );
 }
@@ -36,7 +36,7 @@ fn a_simple_bind_carries_version_3_the_dn_and_the_password() {
     ]
     .concat();
     let want = tlv(0x30, &[tlv(0x02, &[2]), tlv(0x60, &op)].concat());
-    assert_eq!(bind(2, "cn=a,dc=x", "s3cret"), want);
+    assert_eq!(bind(2, "cn=a,dc=x", "s3cret")[..], want[..]);
 }
 
 #[test]

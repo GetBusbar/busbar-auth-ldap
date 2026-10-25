@@ -196,7 +196,7 @@ fn login(m: &LdapModule, dir: &mut Directory, password: &str) -> (Login, u32) {
 
 fn direct_bytes(group_attr: &str) -> Vec<u8> {
     [
-        codec::bind(1, ALICE, "pw"),
+        codec::bind(1, ALICE, "pw").to_vec(),
         codec::search(
             2,
             ALICE,
@@ -299,7 +299,7 @@ fn start_tls_sends_the_extended_request_then_secures() {
     );
     let want = [
         codec::start_tls(1),
-        codec::bind(2, ALICE, "pw"),
+        codec::bind(2, ALICE, "pw").to_vec(),
         codec::search(
             3,
             ALICE,
@@ -376,7 +376,7 @@ fn search_then_bind_speaks_in_1_5_5s_order() {
     };
     assert_eq!(p.roles, vec!["admins".to_string()]);
     let want = [
-        codec::bind(1, "cn=svc,dc=corp,dc=example", "svc-pw"),
+        codec::bind(1, "cn=svc,dc=corp,dc=example", "svc-pw").to_vec(),
         codec::search(
             2,
             "dc=corp,dc=example",
@@ -385,7 +385,7 @@ fn search_then_bind_speaks_in_1_5_5s_order() {
             &["dn"],
         )
         .unwrap(),
-        codec::bind(3, ALICE, "pw"),
+        codec::bind(3, ALICE, "pw").to_vec(),
         codec::search(
             4,
             ALICE,
@@ -693,7 +693,7 @@ fn a_username_the_dn_template_refuses_is_refused_after_the_dial() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
     let mut dir = Directory::new(Vec::new());
     let mut conv = Conversation::new();
-    let got = m.login_over(&mut conv, &mut dir, Some("admin,dc=x"), Some("pw"), None);
+    let got = m.login_over(&mut conv, &mut dir, Some("admin,dc=x"), Some("pw"), Some(0));
     assert_eq!(got, Poll::Ready(Login::BadCredential));
     assert_eq!(dir.seen, vec![Seen::Establish("127.0.0.1:389".into())]);
     assert!(dir.written.is_empty(), "no bind is sent for it");
@@ -702,7 +702,7 @@ fn a_username_the_dn_template_refuses_is_refused_after_the_dial() {
     let mut dir = Directory::new(Vec::new());
     dir.refuse_establish = Some("the connection was refused".into());
     let mut conv = Conversation::new();
-    let got = m.login_over(&mut conv, &mut dir, Some("alice"), Some("pw"), None);
+    let got = m.login_over(&mut conv, &mut dir, Some("alice"), Some("pw"), Some(0));
     assert_eq!(got, Poll::Ready(Login::Outage));
     assert!(!conv.opened());
 }
@@ -832,7 +832,7 @@ fn the_resolved_service_secret_reaches_only_the_bind() {
         }
         assert_eq!(
             dir.written,
-            codec::bind(1, "cn=svc,dc=x", SECRET),
+            codec::bind(1, "cn=svc,dc=x", SECRET).to_vec(),
             "the bind sends it"
         );
     }
@@ -909,4 +909,67 @@ fn a_failed_secure_is_an_outage_and_never_binds() {
         codec::start_tls(1),
         "only the StartTLS request"
     );
+}
+
+/// OWNER RULING (non-49 user bind), through `login_over` so the verdict is the one the door
+/// answers: a code naming a server/session condition is an outage; every other non-zero code is
+/// the same bad credential as a wrong password, logged at warn with the directory's real result
+/// (its code and RFC 4511 name), never the password and never the DN.
+#[test]
+fn a_non_49_user_bind_is_a_bad_credential_unless_the_server_is_failing() {
+    use busbar_contract::testkit::WarnCapture;
+    const PW: &str = "hunter2-s3cret";
+    let m = module("ldap://127.0.0.1", serde_json::json!({}));
+    for rc in [48_u32, 50, 53, 32, 19, 999] {
+        let cap = WarnCapture::default();
+        let mut dir = Directory::new(vec![bind_response(1, i64::from(rc))]);
+        let (got, _) = tracing::subscriber::with_default(cap.clone(), || login(&m, &mut dir, PW));
+        assert_eq!(got, Login::BadCredential, "rc {rc}");
+        assert!(
+            cap.contains(&format!("rc={rc}")),
+            "rc {rc}: {:?}",
+            cap.messages()
+        );
+        assert!(
+            cap.contains(&format!("result={}", codec::rc_name(rc))),
+            "rc {rc}: {:?}",
+            cap.messages()
+        );
+        assert!(cap.contains("module=ldap"), "{:?}", cap.messages());
+        assert!(
+            !cap.contains(PW),
+            "the password leaked: {:?}",
+            cap.messages()
+        );
+        assert!(!cap.contains(ALICE), "the DN leaked: {:?}", cap.messages());
+    }
+    let cap = WarnCapture::default();
+    let mut dir = Directory::new(vec![bind_response(1, 53)]);
+    tracing::subscriber::with_default(cap.clone(), || login(&m, &mut dir, PW));
+    assert!(cap.contains("unwillingToPerform"), "{:?}", cap.messages());
+    for rc in [51_i64, 52, 80, 8] {
+        let mut dir = Directory::new(vec![bind_response(1, rc)]);
+        assert_eq!(login(&m, &mut dir, PW).0, Login::Outage, "rc {rc}");
+    }
+}
+
+/// The BIND request in flight is held in a buffer wiped on drop.
+#[test]
+fn the_request_in_flight_is_wiped_on_drop() {
+    fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+    let m = module("ldap://127.0.0.1", serde_json::json!({}));
+    let mut dir = Directory::new(vec![bind_response(1, 0), done(2, 0)]).pending();
+    let mut conv = Conversation::new();
+    let mut held = false;
+    for _ in 0..200 {
+        let answer = m.login_over(&mut conv, &mut dir, Some("alice"), Some("pw"), Some(0));
+        if let Some(d) = conv.doing.as_ref() {
+            wipes(&d.out);
+            held = true;
+        }
+        if answer.is_ready() {
+            break;
+        }
+    }
+    assert!(held, "a request was held in flight");
 }

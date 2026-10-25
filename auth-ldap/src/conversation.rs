@@ -20,6 +20,8 @@
 use std::fmt;
 use std::task::Poll;
 
+use zeroize::Zeroizing;
+
 use crate::codec::{self, Message, Reply};
 use crate::{DirEntry, Io, LdapBackend, SearchScope};
 
@@ -145,10 +147,11 @@ enum Stage {
 }
 
 /// The operation in progress: its stage, its request bytes and how many went, its message id,
-/// and the entries a search has read so far.
+/// and the entries a search has read so far. The request bytes are held in a buffer wiped on drop:
+/// a BIND's carry the cleartext password.
 struct Doing {
     stage: Stage,
-    out: Box<[u8]>,
+    out: Zeroizing<Vec<u8>>,
     sent: usize,
     id: i32,
     entries: Vec<DirEntry>,
@@ -385,12 +388,12 @@ impl<'a, W: Wire> Over<'a, W> {
     }
 
     /// Begin a request operation carrying `bytes` (built with its message id).
-    fn request(&mut self, build: impl FnOnce(i32) -> Vec<u8>) -> Result<(), Io> {
+    fn request(&mut self, build: impl FnOnce(i32) -> Zeroizing<Vec<u8>>) -> Result<(), Io> {
         self.doing(|c| {
             let id = c.next_id();
             Doing {
                 stage: Stage::Send,
-                out: build(id).into_boxed_slice(),
+                out: build(id),
                 sent: 0,
                 id,
                 entries: Vec::new(),
@@ -418,7 +421,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
         };
         self.doing(|_| Doing {
             stage: Stage::Establish,
-            out: Box::default(),
+            out: Zeroizing::default(),
             sent: 0,
             id: 0,
             entries: Vec::new(),
@@ -437,7 +440,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                                 let id = self.conv.next_id();
                                 if let Some(d) = self.conv.doing.as_mut() {
                                     d.id = id;
-                                    d.out = codec::start_tls(id).into_boxed_slice();
+                                    d.out = Zeroizing::new(codec::start_tls(id));
                                     d.stage = Stage::SendStartTls;
                                 }
                             }
@@ -509,7 +512,9 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
         if self.conv.doing.is_none() {
             codec::search(0, base, scope, filter, attrs).map_err(|e| Io::Failed(e.to_string()))?;
         }
-        self.request(|id| codec::search(id, base, scope, filter, attrs).unwrap_or_default())?;
+        self.request(|id| {
+            Zeroizing::new(codec::search(id, base, scope, filter, attrs).unwrap_or_default())
+        })?;
         if self.stage() == Stage::Send {
             self.send()?;
             self.set_stage(Stage::Read);
@@ -548,7 +553,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
         if self.kept().is_some() {
             return Ok(());
         }
-        self.request(codec::unbind)?;
+        self.request(|id| Zeroizing::new(codec::unbind(id)))?;
         self.send()?;
         self.keep(Kept::Unbound);
         Ok(())

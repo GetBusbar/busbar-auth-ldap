@@ -8,8 +8,9 @@
 //! * the lifecycle is the SDK's (`lifecycle: life(Ldap)`): `validate`/`open` parse the settings
 //!   blob with [`LdapModule::from_settings`] (its refusal texts), `refresh` swaps the module whole
 //!   (a refusal keeps the running one);
-//! * `verify` answers PASS: LDAP judges no bearer credential on the data plane (1.5.5's
-//!   `authenticate` = `Pass`);
+//! * `verify` is not served: LDAP judges no bearer credential on the data plane, so the tail
+//!   states the login family alone (`CAP_LOGIN`, as busbar-auth-github's) and `verify` answers
+//!   REFUSED, never called;
 //! * `begin_login` answers the credential form (`username` text, `password` password), `'static`;
 //! * `complete_login` BINDs the submitted credential over the host connector's stream on the ONE
 //!   declared need ([`NEEDS`]) and writes the principal into the host's identity buffer:
@@ -18,7 +19,9 @@
 //!   ticket, and resumes on the wake (THE REPLAY RULE, `abi::sdk::conn`): the connector is made
 //!   from the handle of the service that pended, so no completed service runs twice. A short
 //!   buffer keeps the reached identity for the ticket's one re-call, so the retry never binds again;
-//! * the outbound ops are not served (the tail states no `CAP_OUTBOUND`) and answer REFUSED.
+//! * the outbound ops are not served (the tail states no `CAP_OUTBOUND`) and answer REFUSED;
+//! * a login with no host clock answers `LOGIN_OUTAGE` ([`LdapModule::login_over`]): every
+//!   directory operation is bounded on that clock, and none runs untimed.
 //!
 //! No call blocks: the Statement states no `MARK_BLOCKS` (BUSBAR-1.6.0.md THE DESIGN §5: no plugin
 //! opens a socket, dials, binds or does TLS; the plugin ABI: Ready or Pending(wake)).
@@ -34,9 +37,8 @@ use std::task::Poll;
 use busbar_contract::abi::auth::{
     AuthTail, BeginLoginIn, BeginLoginOut, CompleteLoginIn, FieldsIn, FieldsOut, IdentifyOut,
     IdentityBuf, LoginField, OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut,
-    VerifyIn, BEGIN_FORM, CANCEL_ABANDONED, CAP_INBOUND, CAP_LOGIN, DECISION_CONTINUE,
-    FACT_CACHEABLE, FORM_PASSWORD, FORM_TEXT, IDENTITY_HAS_TTL, LOGIN_BAD_CREDENTIAL,
-    LOGIN_IDENTITY, LOGIN_KIND_CREDENTIAL, LOGIN_OUTAGE, POINT_HEAD, SPAN_ABSENT, VERDICT_PASS,
+    VerifyIn, BEGIN_FORM, CANCEL_ABANDONED, CAP_LOGIN, FORM_PASSWORD, FORM_TEXT, IDENTITY_HAS_TTL,
+    LOGIN_BAD_CREDENTIAL, LOGIN_IDENTITY, LOGIN_KIND_CREDENTIAL, LOGIN_OUTAGE, SPAN_ABSENT,
 };
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
@@ -50,6 +52,7 @@ use busbar_contract::abi::sdk::door::{abi_str, statement, AbiIn, AbiOut, Slot};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 use busbar_contract::auth::Principal;
+use zeroize::Zeroizing;
 
 use crate::conversation::{Conversation, Wire};
 use crate::{LdapModule, Login, PASSWORD, USERNAME};
@@ -75,17 +78,17 @@ const REWRITES: &[Rewrite] = &[Rewrite {
     to: NONE,
 }];
 
-/// The auth tail: inbound (always PASS) and the credential login.
+/// The auth tail: the credential login alone. LDAP judges no bearer credential on the data plane,
+/// so it states no inbound family (`verify` is never called) and no fact about verify answers.
 const TAIL: AuthTail = AuthTail {
     head: KindTailHead {
         size: size_of::<AuthTail>() as u32,
         _reserved: 0,
     },
-    caps: CAP_INBOUND | CAP_LOGIN,
-    facts: FACT_CACHEABLE,
+    caps: CAP_LOGIN,
+    facts: 0,
     login_kind: LOGIN_KIND_CREDENTIAL,
-    // `verify` judges no credential (always PASS): it needs only the head, once per request.
-    inbound_points: POINT_HEAD,
+    inbound_points: 0,
     styles: ptr::null(),
     styles_len: 0,
     operator_principal: NONE,
@@ -194,10 +197,10 @@ impl Ldap {
 impl Life for Ldap {
     const CANCEL: u32 = CANCEL_ABANDONED;
 
+    /// The settings-only checks: `validate` is handed no secrets, so a secret-referenced service
+    /// password's presence is `open`'s to check ([`LdapModule::validate_settings`]).
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
-        LdapModule::from_settings(settings)
-            .map(drop)
-            .map_err(Refusal::failed)
+        LdapModule::validate_settings(settings).map_err(Refusal::failed)
     }
 
     fn open(settings: &[u8], secrets: &[&[u8]], _: u64) -> Result<Self, Refusal> {
@@ -212,20 +215,6 @@ impl Life for Ldap {
         let module = LdapModule::from_settings_with(settings, secrets).map_err(Refusal::failed)?;
         *self.module.write().unwrap_or_else(PoisonError::into_inner) = Arc::new(module);
         Ok(Refreshed::default())
-    }
-}
-
-/// `verify`: PASS, not this module's credential.
-pub struct Verify;
-
-impl Slot for Verify {
-    type In = VerifyIn;
-    type Out = IdentifyOut;
-    fn call(_: *mut c_void, _: &VerifyIn, out: &mut IdentifyOut) -> Outcome {
-        out.verdict = VERDICT_PASS;
-        // Not this module's credential: the request goes on to the chain's next method.
-        out.decision = DECISION_CONTINUE;
-        Outcome::Ready
     }
 }
 
@@ -310,12 +299,13 @@ fn write_identity(
 }
 
 /// One login in flight, parked on its ticket across its PENDING answers: the module it began with
-/// (a `refresh` meanwhile does not change it), the submitted credential, the conversation, the
-/// stream once established, and the handle of the first connector service not yet completed.
+/// (a `refresh` meanwhile does not change it), the submitted credential (the password in a buffer
+/// wiped on drop), the conversation, the stream once established, and the handle of the first
+/// connector service not yet completed.
 struct Run {
     module: Arc<LdapModule>,
     username: Option<String>,
-    password: Option<String>,
+    password: Option<Zeroizing<String>>,
     conv: Conversation,
     stream: Option<u64>,
     at: u32,
@@ -401,7 +391,7 @@ fn drive(
             Run {
                 module: h.life().module(),
                 username: field(&fields, USERNAME.0).map(str::to_owned),
-                password: field(&fields, PASSWORD.0).map(str::to_owned),
+                password: field(&fields, PASSWORD.0).map(|p| Zeroizing::new(p.to_owned())),
                 conv: Conversation::new(),
                 stream: None,
                 at: 0,
@@ -419,7 +409,7 @@ fn drive(
         &mut run.conv,
         &mut wire,
         run.username.as_deref(),
-        run.password.as_deref(),
+        run.password.as_ref().map(|p| p.as_str()),
         now,
     );
     match answer {
@@ -497,8 +487,8 @@ impl SafeSlot for CompleteLogin {
     }
 }
 
-/// An auth op this plugin does not serve (the tail states no `CAP_OUTBOUND`): REFUSED, never
-/// called.
+/// An auth op this plugin does not serve (the tail states neither `CAP_INBOUND` nor
+/// `CAP_OUTBOUND`): REFUSED, never called.
 pub struct NotServed<I, O>(PhantomData<(I, O)>);
 
 impl<I: AbiIn, O: AbiOut> Slot for NotServed<I, O> {
@@ -511,8 +501,8 @@ impl<I: AbiIn, O: AbiOut> Slot for NotServed<I, O> {
 
 mod table {
     use super::{
-        BeginLogin, CompleteLogin, FieldsIn, FieldsOut, Ldap, NotServed, OpenOutboundIn,
-        OpenOutboundOut, OutboundReadyIn, OutboundReadyOut, Safe, Verify,
+        BeginLogin, CompleteLogin, FieldsIn, FieldsOut, IdentifyOut, Ldap, NotServed,
+        OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut, Safe, VerifyIn,
     };
 
     busbar_contract::plugin_door! {
@@ -520,7 +510,7 @@ mod table {
         statement: super::STATEMENT,
         lifecycle: life(Ldap),
         kind_ops: {
-            verify: Verify,
+            verify: NotServed<VerifyIn, IdentifyOut>,
             begin_login: BeginLogin,
             complete_login: Safe<CompleteLogin>,
             open_outbound: NotServed<OpenOutboundIn, OpenOutboundOut>,

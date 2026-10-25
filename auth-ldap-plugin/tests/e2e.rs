@@ -305,14 +305,21 @@ impl busbar_auth_ldap::conversation::Wire for TestStream {
 }
 
 /// Run one credential login on the library module directly (no busbar boot): the module's codec
-/// over the test's own stream.
+/// over the test's own stream, on a clock (a login with none refuses to run untimed; the stream
+/// never pends, so the deadline is never reached).
 fn live_login(settings: serde_json::Value, username: &str, password: &str) -> Login {
     let cfg: busbar_auth_ldap::LdapConfig =
         serde_json::from_value(settings).expect("live ldap settings parse");
     let module = busbar_auth_ldap::LdapModule::new(cfg).expect("live ldap settings are valid");
     let mut conv = busbar_auth_ldap::conversation::Conversation::new();
     let mut stream = TestStream(None);
-    match module.login_over(&mut conv, &mut stream, Some(username), Some(password), None) {
+    match module.login_over(
+        &mut conv,
+        &mut stream,
+        Some(username),
+        Some(password),
+        Some(0),
+    ) {
         std::task::Poll::Ready(login) => login,
         std::task::Poll::Pending => panic!("the test stream never pends"),
     }

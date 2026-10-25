@@ -6,10 +6,12 @@
 //! plugin crate's `tests/conformance.rs` (linked and dropped in).
 
 use super::{
-    field, take_reached, Ldap, ALIAS, FORM, NAME, NEED, NEEDS, SECRET_REFS, STATEMENT, TAIL,
+    field, take_reached, Ldap, Run, ALIAS, FORM, NAME, NEED, NEEDS, SECRET_REFS, STATEMENT, TAIL,
 };
 use crate::LdapModule;
-use busbar_contract::abi::auth::{CAP_INBOUND, CAP_LOGIN, CAP_OUTBOUND, LOGIN_KIND_CREDENTIAL};
+use busbar_contract::abi::auth::{
+    CAP_INBOUND, CAP_LOGIN, CAP_OUTBOUND, FACT_CACHEABLE, LOGIN_KIND_CREDENTIAL,
+};
 use busbar_contract::abi::host::conn::connector::{
     DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE,
 };
@@ -102,7 +104,7 @@ fn text(s: AbiStr) -> &'static str {
 /// target named per login), and the service password as its one secret reference.
 #[test]
 fn the_statement_states_a_non_blocking_credential_login_over_one_need() {
-    assert_eq!(TAIL.caps, CAP_INBOUND | CAP_LOGIN);
+    assert_eq!(TAIL.caps, CAP_LOGIN);
     assert_eq!(TAIL.caps & CAP_OUTBOUND, 0);
     assert_eq!(TAIL.login_kind, LOGIN_KIND_CREDENTIAL);
     assert_eq!(STATEMENT.marks & MARK_BLOCKS, 0, "no call blocks");
@@ -186,4 +188,108 @@ fn a_ticketless_call_leaves_slot_zeros_kept_identity() {
         reached.contains_key(&(0, 5)),
         "a ticketless call dropped slot 0's identity"
     );
+}
+
+/// LDAP is a login method and judges no bearer credential on the data plane: its tail states the
+/// login family alone (no `CAP_INBOUND`, so `verify` is never called and answers REFUSED), and no
+/// `FACT_CACHEABLE` (a fact about verify answers it does not give), as busbar-auth-github's.
+#[test]
+fn the_tail_states_the_login_family_alone() {
+    assert_eq!(TAIL.caps, CAP_LOGIN);
+    assert_eq!(TAIL.caps & CAP_INBOUND, 0);
+    assert_eq!(TAIL.facts & FACT_CACHEABLE, 0);
+    assert_eq!(TAIL.inbound_points, 0);
+}
+
+/// Search-then-bind settings whose service password is a secret reference (no literal in the
+/// settings) validate: `validate` is handed no secrets, so the password-presence rule is `open`'s,
+/// where the resolved secret is known. `open` with no secret still refuses; an explicit empty
+/// literal is refused by both.
+#[test]
+fn validate_accepts_search_then_bind_whose_password_is_a_secret() {
+    let blob = br#"{
+        "url": "ldaps://ad.corp.example:636",
+        "bind_dn_template": "uid={username},dc=corp,dc=example",
+        "base_dn": "dc=corp,dc=example",
+        "user_search_filter": "(uid={username})",
+        "bind_service_dn": "cn=svc,dc=corp,dc=example"
+    }"#;
+    assert!(
+        Ldap::validate(blob).is_ok(),
+        "{:?}",
+        Ldap::validate(blob).err()
+    );
+    assert!(Ldap::open(blob, &[b"resolved".as_slice()], 1).is_ok());
+    let e = Ldap::open(blob, &[], 1).err().expect("no password at open");
+    assert!(
+        e.text()
+            .is_some_and(|t| t.contains("bind_service_password")),
+        "{e:?}"
+    );
+    let empty = br#"{
+        "url": "ldaps://ad.corp.example:636",
+        "bind_dn_template": "uid={username},dc=corp,dc=example",
+        "base_dn": "dc=corp,dc=example",
+        "user_search_filter": "(uid={username})",
+        "bind_service_dn": "cn=svc,dc=corp,dc=example",
+        "bind_service_password": ""
+    }"#;
+    assert!(Ldap::validate(empty).is_err(), "an explicit empty literal");
+    // The other settings-only rules still hold at validate.
+    let no_dn = br#"{
+        "url": "ldaps://ad.corp.example:636",
+        "bind_dn_template": "uid={username},dc=corp,dc=example",
+        "base_dn": "dc=corp,dc=example",
+        "user_search_filter": "(uid={username})"
+    }"#;
+    assert!(Ldap::validate(no_dn).is_err(), "no bind_service_dn");
+}
+
+/// A settings value of the wrong type is refused WITHOUT quoting it (it may be a secret pasted
+/// into the wrong key); a missing or unknown key is still named.
+#[test]
+fn a_mistyped_setting_is_refused_without_echoing_its_value() {
+    for blob in [
+        r#"{"url":"ldaps://x","bind_dn_template":"uid={username},dc=x","base_dn":"dc=x","timeout_secs":"hunter2"}"#,
+        r#"{"url":"ldaps://x","bind_dn_template":"uid={username},dc=x","base_dn":"dc=x","start_tls":"hunter2"}"#,
+        r#"{"url":"ldaps://x","bind_dn_template":"uid={username},dc=x","base_dn":"dc=x","bind_service_password":{"v":"hunter2"}}"#,
+    ] {
+        let e = LdapModule::from_settings(blob.as_bytes())
+            .err()
+            .expect("refused");
+        assert!(!e.contains("hunter2"), "the value is echoed: {e}");
+        assert!(e.starts_with("invalid ldap plugin config:"), "{e}");
+        assert!(e.contains("line 1, column"), "{e}");
+        let r = Ldap::validate(blob.as_bytes()).expect_err("refused");
+        assert!(!format!("{r:?}").contains("hunter2"), "{r:?}");
+    }
+    let e = LdapModule::from_settings(br#"{"url":"ldaps://x"}"#)
+        .err()
+        .expect("refused");
+    assert!(e.contains("missing field `bind_dn_template`"), "{e}");
+    let e = LdapModule::from_settings(
+        br#"{"url":"ldaps://x","bind_dn_template":"uid={username},dc=x","base_dn":"dc=x","bogus":"hunter2"}"#,
+    )
+    .err()
+    .expect("refused");
+    assert!(e.contains("unknown field `bogus`"), "{e}");
+    assert!(!e.contains("hunter2"), "{e}");
+}
+
+/// The submitted password a parked login holds wipes on drop.
+#[test]
+fn a_parked_logins_password_is_wiped_on_drop() {
+    fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+    let module = std::sync::Arc::new(LdapModule::from_settings(MINIMAL.as_bytes()).unwrap());
+    let run = Run {
+        module,
+        username: Some("alice".to_string()),
+        password: Some(zeroize::Zeroizing::new("pw".to_string())),
+        conv: crate::conversation::Conversation::new(),
+        stream: None,
+        at: 0,
+    };
+    if let Some(pw) = run.password.as_ref() {
+        wipes(pw);
+    }
 }
