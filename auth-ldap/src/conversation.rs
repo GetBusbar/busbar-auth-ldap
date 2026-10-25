@@ -429,7 +429,15 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                     self.set_stage(Stage::ReadStartTls);
                 }
                 Stage::ReadStartTls => match self.reply()? {
-                    Reply::Extended(r, _) if r.rc == 0 => self.set_stage(Stage::Secure),
+                    // Bytes read before the upgrade are never honoured after it (RFC 4513 s3.1.1).
+                    Reply::Extended(r, _) if r.rc == 0 => {
+                        if !self.conv.inbound.is_empty() {
+                            return self.fail(
+                                "the directory sent data after the StartTLS response, before TLS",
+                            );
+                        }
+                        self.set_stage(Stage::Secure);
+                    }
                     Reply::Extended(r, _) => return self.fail(r.to_string()),
                     _ => return self.fail("malformed reply: not an extended response"),
                 },

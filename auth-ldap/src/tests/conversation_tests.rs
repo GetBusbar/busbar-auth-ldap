@@ -299,6 +299,28 @@ fn start_tls_sends_the_extended_request_then_secures() {
     assert_eq!(dir.written, want);
 }
 
+/// A MITM appends forged bind replies to the plaintext StartTLS success: whatever arrived before
+/// the upgrade is never honoured after it (CVE-2011-0411's class), so the login is an outage and
+/// no bind is ever sent.
+#[test]
+fn data_sent_with_the_start_tls_response_is_never_honoured() {
+    let m = module(
+        "ldap://ad.corp.example",
+        serde_json::json!({"start_tls": true}),
+    );
+    let forged = [
+        extended(1, 0),
+        bind_response(2, 0),
+        entry(3, ALICE, "memberOf", &["cn=admins,dc=corp"]),
+        done(3, 0),
+    ]
+    .concat();
+    let mut dir = Directory::new(vec![forged]);
+    assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
+    assert_eq!(dir.written, codec::start_tls(1), "no bind request is sent");
+    assert!(!dir.seen.contains(&Seen::Secure), "never secured");
+}
+
 #[test]
 fn a_refused_start_tls_never_secures_and_never_binds() {
     let m = module(
