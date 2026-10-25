@@ -385,6 +385,41 @@ fn search_then_bind_speaks_in_1_5_5s_order() {
     assert_eq!(dir.written, want);
 }
 
+/// A search keeps at most two entries (the module needs only whether a second exists); the rest
+/// are read and dropped, and a user search matching several is still ambiguous: a bad credential.
+#[test]
+fn a_search_keeps_at_most_two_entries() {
+    use crate::{LdapBackend, SearchScope};
+    let many = |n: i64| -> Vec<Vec<u8>> {
+        let mut r = vec![bind_response(1, 0)];
+        for i in 0..n {
+            r.push(entry(2, &format!("uid=u{i},dc=x"), "dn", &[]));
+        }
+        r.push(done(2, 0));
+        r
+    };
+    let mut dir = Directory::new(many(5));
+    let mut conv = Conversation::new();
+    let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, None, 10);
+    over.connect().expect("connects");
+    over.simple_bind("cn=svc,dc=x", "pw").expect("binds");
+    let got = over
+        .search("dc=x", SearchScope::Subtree, "(uid=alice)", &["dn"])
+        .expect("searches");
+    assert_eq!(got.len(), 2, "kept only two of five");
+
+    let m = module(
+        "ldap://127.0.0.1",
+        serde_json::json!({
+            "user_search_filter": "(uid={username})",
+            "bind_service_dn": "cn=svc,dc=x",
+            "bind_service_password": "svc-pw",
+        }),
+    );
+    let mut dir = Directory::new(many(5));
+    assert_eq!(login(&m, &mut dir, "pw").0, Login::BadCredential);
+}
+
 /// 1.5.5 panicked reading a referral as an entry; it is an outage now.
 #[test]
 fn a_search_reference_fails_closed() {

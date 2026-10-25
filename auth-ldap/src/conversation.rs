@@ -159,6 +159,10 @@ struct Doing {
 /// "deadline has elapsed").
 pub const TIMEOUT: &str = "timeout: deadline has elapsed";
 
+/// How many entries of one search are kept: the module reads the first entry and needs to know
+/// only whether a second exists. Later entries are read and dropped.
+const MAX_ENTRIES_KEPT: usize = 2;
+
 /// How much one read asks for.
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -501,7 +505,9 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
             match self.reply()? {
                 Reply::Entry(e) => {
                     if let Some(d) = self.conv.doing.as_mut() {
-                        d.entries.push(e);
+                        if d.entries.len() < MAX_ENTRIES_KEPT {
+                            d.entries.push(e);
+                        }
                     }
                 }
                 Reply::Done(r) if r.rc == 0 => {
