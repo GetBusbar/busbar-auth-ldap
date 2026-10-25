@@ -169,6 +169,16 @@ pub struct Ldap {
     reached: Mutex<HashMap<(u32, u32), Principal>>,
 }
 
+/// The identity a short answer kept for `key`'s re-call, taken. Nothing else is left behind for
+/// that ticket SLOT: an op on the slot under another generation proves the earlier op is over.
+fn take_reached(
+    reached: &mut HashMap<(u32, u32), Principal>,
+    key: (u32, u32),
+) -> Option<Principal> {
+    reached.retain(|&(slot, generation), _| slot != key.0 || generation == key.1);
+    reached.remove(&key)
+}
+
 impl Ldap {
     fn module(&self) -> Arc<LdapModule> {
         self.module
@@ -231,37 +241,12 @@ impl Slot for BeginLogin {
 }
 
 /// The submitted form fields `(name, value)`, lent for the call.
-///
-/// The safe SDK lends no accessor for `CompleteLoginIn::submitted`, so this reads the list the
-/// auth ABI states directly: the one `unsafe` in this crate.
-#[allow(unsafe_code)]
-fn submitted(input: &CompleteLoginIn) -> Vec<(&[u8], &[u8])> {
-    /// # Safety
-    /// NULL, or `len` readable bytes at `p` for the call.
-    unsafe fn bytes<'a>(p: *const u8, len: usize) -> &'a [u8] {
-        if p.is_null() || len == 0 {
-            return &[];
-        }
-        // SAFETY: the caller's contract.
-        unsafe { std::slice::from_raw_parts(p, len) }
-    }
-    if input.submitted.is_null() || input.submitted_len == 0 {
-        return Vec::new();
-    }
-    // SAFETY: `abi::auth::CompleteLoginIn`: `submitted` is `submitted_len` `NamedValue`s the host
-    // lends for the call, each name and value bytes it lends for the call; `input` is the
-    // trampoline's copy of that `in`, alive for the call, and nothing here outlives it.
-    unsafe {
-        std::slice::from_raw_parts(input.submitted, input.submitted_len)
-            .iter()
-            .map(|f| {
-                (
-                    bytes(f.name.ptr, f.name.len),
-                    bytes(f.value.ptr, f.value.len),
-                )
-            })
-            .collect()
-    }
+fn submitted<'a>(input: Lent<'a, CompleteLoginIn>) -> Vec<(&'a [u8], &'a [u8])> {
+    input
+        .submitted()
+        .iter()
+        .map(|f| (f.name().bytes(), f.value().bytes()))
+        .collect()
 }
 
 /// The submitted value of the field `name`, when it is text.
@@ -402,7 +387,7 @@ fn now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
 fn drive(
     h: &Held<Ldap>,
     instance: &Instance<'_, Held<Ldap>>,
-    input: &CompleteLoginIn,
+    input: Lent<'_, CompleteLoginIn>,
     out: &mut Out<'_, IdentifyOut>,
 ) -> Poll<Login> {
     let ticket = instance.ticket();
@@ -474,14 +459,13 @@ impl SafeSlot for CompleteLogin {
         let ldap = h.life();
         let ticket = instance.ticket();
         let key = (ticket.slot, ticket.generation);
-        let kept = ldap
-            .reached
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .remove(&key);
+        let kept = take_reached(
+            &mut ldap.reached.lock().unwrap_or_else(PoisonError::into_inner),
+            key,
+        );
         let login = match kept {
             Some(p) => Login::Identity(p),
-            None => match drive(h, &instance, input.get(), &mut out) {
+            None => match drive(h, &instance, input, &mut out) {
                 Poll::Ready(login) => login,
                 Poll::Pending => return Outcome::Pending,
             },
