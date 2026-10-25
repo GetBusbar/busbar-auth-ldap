@@ -683,7 +683,10 @@ fn a_conversation_in_flight_never_debug_prints_the_password() {
         // `Debug` of a byte slice prints its bytes as decimals: the password's, too, is a leak.
         let digits = format!("{:?}", PW.as_bytes());
         let digits = digits.trim_matches(['[', ']']);
-        assert!(!shown.contains(digits), "the password's bytes are in: {shown}");
+        assert!(
+            !shown.contains(digits),
+            "the password's bytes are in: {shown}"
+        );
         if answer.is_ready() {
             break;
         }
@@ -726,5 +729,9 @@ fn a_failed_secure_is_an_outage_and_never_binds() {
     let mut dir = Directory::new(vec![extended(1, 0), bind_response(2, 0), done(3, 0)]).held();
     dir.secure_error = Some("tls handshake failed".to_string());
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
-    assert_eq!(dir.written, codec::start_tls(1), "only the StartTLS request");
+    assert_eq!(
+        dir.written,
+        codec::start_tls(1),
+        "only the StartTLS request"
+    );
 }
