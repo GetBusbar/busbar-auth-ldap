@@ -16,6 +16,8 @@ busbar-contract = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+# Wipes the end user's password and the encoded BIND that carries it (CREDENTIAL-LOCKDOWN A.3).
+zeroize = { workspace = true }
 # No LDAP client crate and no socket or TLS stack: the module speaks LDAP through its own sans-IO
 # codec (src/ber.rs, src/filter.rs, src/codec.rs) over the host connector's stream (BUSBAR-1.6.0.md
 # THE DESIGN §5; R5/Q82).

@@ -154,6 +154,13 @@ struct Doing {
     entries: Vec<DirEntry>,
 }
 
+// `out` is the encoded request, a BIND's cleartext password with it: wiped when the op ends.
+impl Drop for Doing {
+    fn drop(&mut self) {
+        zeroize::Zeroize::zeroize(&mut self.out);
+    }
+}
+
 // By hand: `out` is the encoded request, a BIND's cleartext password with it; only its length shows.
 impl fmt::Debug for Doing {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
