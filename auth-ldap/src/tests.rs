@@ -212,6 +212,47 @@ fn userinfo_loopback_prefix_is_treated_as_remote() {
     );
 }
 
+/// The guard must end the authority where the dialer does ('/', '?' or '#'): otherwise
+/// `ldap://evil.example?x@127.0.0.1` reads as loopback while the dial lands on `evil.example`.
+#[test]
+fn query_or_fragment_cannot_hide_a_remote_host_behind_a_loopback_userinfo() {
+    for url in [
+        "ldap://evil.example?x@127.0.0.1",
+        "ldap://evil.example#@localhost",
+        "ldap://evil.example/p?x@127.0.0.1",
+        "ldap://evil.example:389?@[::1]",
+    ] {
+        assert!(crate::is_insecure_transport(url, false), "{url}");
+        let mut cfg = base_cfg();
+        cfg.url = url.to_string();
+        assert!(
+            LdapModule::new(cfg).is_err(),
+            "{url} must be refused without allow_insecure_transport"
+        );
+    }
+}
+
+/// The guard's host is the host the dialer dials, for every URL shape.
+#[test]
+fn the_guards_host_is_the_dialers_host() {
+    for url in [
+        "ldap://evil.example?x@127.0.0.1",
+        "ldap://evil.example#@localhost",
+        "ldap://127.0.0.1:389@evil.com",
+        "ldap://user:pw@dir.example:1389/dc=x?sub",
+        "ldap://[::1]:389/",
+        "ldap://[::1]?a@b",
+        "ldaps://ad.corp.example",
+        "ldap://localhost/",
+        "ldap://a@b@c.example#f",
+    ] {
+        let dialed = crate::conversation::Endpoint::parse(url, false)
+            .unwrap_or_else(|e| panic!("{url}: {e}"))
+            .host;
+        assert_eq!(crate::host_of(url), dialed, "{url}");
+    }
+}
+
 /// The `ldaps://` scheme check must not panic on a URL whose multi-byte UTF-8 char straddles
 /// byte index 8 (a byte-boundary slice would panic; a plugin must never crash the host on any config).
 #[test]
