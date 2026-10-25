@@ -318,6 +318,10 @@ fn bind_dn_rejects_injection_username() {
         "x\\,y",
         "semi;colon",
         "with\0nul",
+        "plus+sign",
+        "quo\"te",
+        "less<than",
+        "greater>than",
     ] {
         assert!(
             m.bind_dn_for(bad).is_err(),
