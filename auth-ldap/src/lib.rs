@@ -162,8 +162,8 @@ pub struct LdapConfig {
     #[serde(default)]
     pub allow_insecure_transport: bool,
 
-    /// How long one login may wait on the directory, in seconds, from the op's first entry (the
-    /// conversation's deadline; the host bounds each stream service by its own). Default 10.
+    /// How long each directory operation (the connect, each bind, each search) may wait, in
+    /// seconds, as 1.5.5 applied it (the host bounds each stream service by its own). Default 10.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
 }
@@ -403,7 +403,8 @@ impl LdapModule {
     ///
     /// [`Poll::Pending`] = a wire service pends: call again on the wake with the same `conv` (what
     /// completed answers from it; nothing is sent twice). `now_ns` is the caller's monotonic clock
-    /// (`None` = none): the login gives up `timeout_secs` after its first entry.
+    /// (`None` = none): each operation (the connect, each bind, each search) gives up `timeout_secs`
+    /// after it begins, as 1.5.5 timed them.
     pub fn login_over<W: Wire>(
         &self,
         conv: &mut Conversation,
@@ -418,9 +419,14 @@ impl LdapModule {
         if password.is_empty() {
             return Poll::Ready(Login::BadCredential);
         }
-        conv.arm(now_ns, self.cfg.timeout_secs);
-        let expired = matches!((conv.deadline_ns(), now_ns), (Some(d), Some(n)) if n >= d);
-        let mut over = Over::new(conv, wire, &self.cfg.url, self.cfg.start_tls, expired);
+        let mut over = Over::new(
+            conv,
+            wire,
+            &self.cfg.url,
+            self.cfg.start_tls,
+            now_ns,
+            self.cfg.timeout_secs,
+        );
         match self.bind_and_identify(&mut over, username, password) {
             Ok(principal) => Poll::Ready(Login::Identity(principal)),
             Err(BindError::Pending) => Poll::Pending,
