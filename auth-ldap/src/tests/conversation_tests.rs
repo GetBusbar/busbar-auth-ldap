@@ -32,6 +32,8 @@ struct Directory {
     owed: bool,
     write_chunk: Option<usize>,
     refuse_establish: Option<String>,
+    hold: bool,
+    secure_error: Option<String>,
 }
 
 impl Directory {
@@ -40,6 +42,13 @@ impl Directory {
             replies: replies.into(),
             ..Self::default()
         }
+    }
+
+    /// Once the replies run out the stream stays open and a read pends (no EOF), so only a
+    /// fail-closed path can answer.
+    fn held(mut self) -> Self {
+        self.hold = true;
+        self
     }
 
     fn pending(mut self) -> Self {
@@ -76,6 +85,9 @@ impl Wire for Directory {
         if self.wait() {
             return Poll::Pending;
         }
+        if let Some(e) = self.secure_error.clone() {
+            return Poll::Ready(Err(e));
+        }
         self.seen.push(Seen::Secure);
         Poll::Ready(Ok(()))
     }
@@ -94,6 +106,9 @@ impl Wire for Directory {
             return Poll::Pending;
         }
         let Some(mut next) = self.replies.pop_front() else {
+            if self.hold {
+                return Poll::Pending;
+            }
             return Poll::Ready(Ok(0));
         };
         let n = next.len().min(buf.len());
@@ -435,7 +450,7 @@ fn a_search_reference_fails_closed() {
         2,
         ber::element(0x73, &ber::element(0x04, b"ldap://elsewhere/")),
     );
-    let mut dir = Directory::new(vec![bind_response(1, 0), reference]);
+    let mut dir = Directory::new(vec![bind_response(1, 0), reference]).held();
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
 }
 
@@ -448,14 +463,14 @@ fn the_signed_differences_fail_closed_as_an_outage() {
     let overrun = message(1, vec![0x61, 0x7f, 0x0a, 0x01, 0x00]);
     let past_cap = [&[0x30, 0x84][..], &(16_u32 * 1024 * 1024).to_be_bytes()[..]].concat();
     for reply in [malformed, overrun, past_cap] {
-        let mut dir = Directory::new(vec![reply.clone()]);
+        let mut dir = Directory::new(vec![reply.clone()]).held();
         assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage, "{reply:02x?}");
     }
     // A directory that closes the stream before answering is an outage too.
     let mut dir = Directory::new(Vec::new());
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
     // So is a notice of disconnection (message id 0).
-    let mut dir = Directory::new(vec![extended(0, 52)]);
+    let mut dir = Directory::new(vec![extended(0, 52)]).held();
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
 }
 
@@ -821,4 +836,77 @@ fn the_resolved_service_secret_reaches_only_the_bind() {
             "the bind sends it"
         );
     }
+}
+
+/// The BIND request in flight holds the cleartext password: a `Debug` of the conversation (it is
+/// `pub`) must never print it.
+#[test]
+fn a_conversation_in_flight_never_debug_prints_the_password() {
+    const PW: &str = "hunter2-s3cret";
+    let m = module("ldap://127.0.0.1", serde_json::json!({}));
+    let mut dir = Directory::new(vec![bind_response(1, 0), done(2, 0)]).pending();
+    let mut conv = Conversation::new();
+    let mut held = false;
+    for _ in 0..200 {
+        let answer = m.login_over(&mut conv, &mut dir, Some("alice"), Some(PW), Some(0));
+        held |= conv
+            .doing
+            .as_ref()
+            .is_some_and(|d| d.out.windows(PW.len()).any(|w| w == PW.as_bytes()));
+        let shown = format!("{conv:?}");
+        assert!(!shown.contains(PW), "the password is in: {shown}");
+        // `Debug` of a byte slice prints its bytes as decimals: the password's, too, is a leak.
+        let digits = format!("{:?}", PW.as_bytes());
+        let digits = digits.trim_matches(['[', ']']);
+        assert!(
+            !shown.contains(digits),
+            "the password's bytes are in: {shown}"
+        );
+        if answer.is_ready() {
+            break;
+        }
+    }
+    assert!(held, "the bind request was never held in flight");
+}
+
+/// A SearchResultEntry and its SearchResultDone arrive in ONE read (the normal wire shape): the
+/// second message must survive the first's decode, and the stream holds open after it so a lost
+/// message pends instead of reading as EOF.
+#[test]
+fn two_messages_in_one_read_are_both_read() {
+    let m = module("ldap://127.0.0.1", serde_json::json!({}));
+    let both = [
+        entry(2, ALICE, "memberOf", &["cn=Engineers,ou=g,dc=corp"]),
+        done(2, 0),
+    ]
+    .concat();
+    let mut dir = Directory::new(vec![bind_response(1, 0), both]).held();
+    let Login::Identity(p) = login(&m, &mut dir, "pw").0 else {
+        panic!("alice binds");
+    };
+    assert_eq!(p.roles, vec!["Engineers".to_string()]);
+}
+
+/// A TLS handshake the connector fails (`ldaps://`, or StartTLS after the directory agreed) is an
+/// outage that never puts the BIND on the wire.
+#[test]
+fn a_failed_secure_is_an_outage_and_never_binds() {
+    let m = module("ldaps://ad.corp.example", serde_json::json!({}));
+    let mut dir = Directory::new(vec![bind_response(1, 0), done(2, 0)]).held();
+    dir.secure_error = Some("tls handshake failed".to_string());
+    assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
+    assert!(dir.written.is_empty(), "wrote: {:02x?}", dir.written);
+
+    let m = module(
+        "ldap://ad.corp.example",
+        serde_json::json!({"start_tls": true}),
+    );
+    let mut dir = Directory::new(vec![extended(1, 0), bind_response(2, 0), done(3, 0)]).held();
+    dir.secure_error = Some("tls handshake failed".to_string());
+    assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
+    assert_eq!(
+        dir.written,
+        codec::start_tls(1),
+        "only the StartTLS request"
+    );
 }

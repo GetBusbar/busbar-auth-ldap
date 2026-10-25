@@ -13,8 +13,8 @@
 //! 3. The module asks the host connector for a stream on its declared need, secured by the
 //!    connector for `ldaps://` or after the StartTLS extended operation, and performs a **BIND**
 //!    with the user's DN + password over it ([`codec`], [`conversation`]).
-//! 4. On a successful bind it reads the user's group memberships (`memberOf`, or an AD group query)
-//!    and answers a [`Principal`] whose `roles` are the group names, mapped to policy downstream by
+//! 4. On a successful bind it reads the user's group memberships (the `group_attr`
+//!    attribute, `memberOf` by default) and answers a [`Principal`] whose `roles` are the group names, mapped to policy downstream by
 //!    the operator's `auth.role_bindings.ldap`.
 //!
 //! Every stream service may answer PENDING; `complete_login` then answers PENDING and resumes on
@@ -32,7 +32,9 @@
 //! - LDAP is a `Credential` method, so it has NO confidential-client `client_secret` — `LdapConfig`
 //!   structurally has no such field and `deny_unknown_fields` rejects one if configured.
 
-#![deny(unsafe_code)]
+// The test build keeps `deny` only for door_tests' reader of the Statement's 'static strings.
+#![cfg_attr(not(test), forbid(unsafe_code))]
+#![cfg_attr(test, deny(unsafe_code))]
 
 use busbar_contract::auth::Principal;
 use core::fmt;
@@ -106,9 +108,9 @@ pub struct LdapConfig {
     pub url: String,
 
     /// Template that turns a username into the BIND DN. `{username}` is substituted with the
-    /// (validated) username. Examples:
-    ///   - RFC4519 directory: `uid={username},ou=people,dc=corp,dc=example`
-    ///   - Active Directory UPN bind: `{username}@corp.example`
+    /// (validated) username. It must be a DN (contain `=`); `LdapModule::new` refuses any other
+    /// template in direct-bind mode. Example: `uid={username},ou=people,dc=corp,dc=example`. An
+    /// Active Directory UPN login (`{username}@corp.example`) goes through `user_search_filter`.
     ///
     /// Mutually informative with `user_search_filter`: if a search filter is set, the module does
     /// search-then-bind (bind as `bind_service_dn`, find the user, bind as the found DN) instead.
@@ -143,8 +145,8 @@ pub struct LdapConfig {
     #[serde(default)]
     pub bind_service_password: Option<SecretString>,
 
-    /// PEM CA bundle to trust for LDAPS/STARTTLS (private AD CA). The need names it as its
-    /// `trust_from`, but as in 1.5.5 [`LdapModule::new`] rejects a config that sets it
+    /// PEM CA bundle to trust for LDAPS/STARTTLS (private AD CA). The need states no
+    /// `trust_from`, and as in 1.5.5 [`LdapModule::new`] refuses a config that sets it at boot
     /// (fail-closed) rather than silently ignoring it, so the connector's default roots are the
     /// ones trusted.
     #[serde(default)]
@@ -183,7 +185,7 @@ impl LdapConfig {
 }
 
 /// The LDAP auth module: a login-only method (it authenticates a form POST, it does not verify
-/// opaque bearer tokens on the data plane); the work is [`LdapModule::login`].
+/// opaque bearer tokens on the data plane); the work is [`LdapModule::login_over`].
 pub struct LdapModule {
     cfg: LdapConfig,
 }
@@ -326,8 +328,9 @@ fn is_insecure_transport(url: &str, start_tls: bool) -> bool {
 /// bracketed IPv6 literal and an absent scheme. Returns the raw host with no port or path.
 fn host_of(url: &str) -> &str {
     let after = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    // The authority ends at the first '/' (path).
-    let authority = after.split('/').next().unwrap_or("");
+    // The authority ends at the first '/', '?' or '#', as the dialer's `Endpoint::parse` ends it:
+    // a different split lets `ldap://evil.example?x@127.0.0.1` read as loopback here.
+    let authority = after.split(['/', '?', '#']).next().unwrap_or("");
     // Strip any userinfo: everything up to and including the LAST '@'. WITHOUT this, a URL like
     // `ldap://127.0.0.1:389@evil.com` reads as loopback here while the dial actually lands on `evil.com`
     // in cleartext — a fail-OPEN bypass of the plaintext guard.
@@ -610,7 +613,7 @@ impl LdapModule {
         // The credential check: BIND as the user with the presented password. Result code 49
         // (invalidCredentials) is a credential rejection. Any other non-zero code (e.g. 51 busy,
         // 52 unavailable) is a directory-side failure: still refused, but logged by
-        // `login` so an outage is not mistaken for a wrong password.
+        // `login_over` so an outage is not mistaken for a wrong password.
         let rc = ldap.simple_bind(&user_dn, password).map_err(at("bind"))?;
         if rc == LDAP_INVALID_CREDENTIALS {
             return Err(BindError::InvalidCredentials);

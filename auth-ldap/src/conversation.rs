@@ -17,6 +17,7 @@
 //! in the clear, reads its answer, then asks the connector to secure the stream
 //! (`upgrade_secure`, the connector's ONE generic mid-stream service).
 
+use std::fmt;
 use std::task::Poll;
 
 use crate::codec::{self, Message, Reply};
@@ -145,13 +146,25 @@ enum Stage {
 
 /// The operation in progress: its stage, its request bytes and how many went, its message id,
 /// and the entries a search has read so far.
-#[derive(Debug)]
 struct Doing {
     stage: Stage,
     out: Box<[u8]>,
     sent: usize,
     id: i32,
     entries: Vec<DirEntry>,
+}
+
+// By hand: `out` is the encoded request, a BIND's cleartext password with it; only its length shows.
+impl fmt::Debug for Doing {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Doing")
+            .field("stage", &self.stage)
+            .field("out_len", &self.out.len())
+            .field("sent", &self.sent)
+            .field("id", &self.id)
+            .field("entries", &self.entries)
+            .finish()
+    }
 }
 
 /// What an operation that passed its deadline answers, after its operation's prefix (`bind: `, ...):
