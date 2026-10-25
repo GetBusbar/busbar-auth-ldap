@@ -22,6 +22,7 @@ use std::task::Poll;
 
 use zeroize::Zeroizing;
 
+use crate::ber;
 use crate::codec::{self, Message, Reply};
 use crate::{DirEntry, Io, LdapBackend, SearchScope};
 
@@ -343,7 +344,7 @@ impl<'a, W: Wire> Over<'a, W> {
     /// The next whole message off the stream.
     fn receive(&mut self) -> Result<Message, Io> {
         loop {
-            match codec::frame(&self.conv.inbound) {
+            match ber::frame(&self.conv.inbound) {
                 Err(e) => return self.fail(e.to_string()),
                 Ok(Some(n)) => {
                     let msg = codec::decode(&self.conv.inbound[..n]);
