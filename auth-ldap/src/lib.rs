@@ -328,8 +328,9 @@ fn is_insecure_transport(url: &str, start_tls: bool) -> bool {
 /// bracketed IPv6 literal and an absent scheme. Returns the raw host with no port or path.
 fn host_of(url: &str) -> &str {
     let after = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    // The authority ends at the first '/' (path).
-    let authority = after.split('/').next().unwrap_or("");
+    // The authority ends at the first '/', '?' or '#', as the dialer's `Endpoint::parse` ends it:
+    // a different split lets `ldap://evil.example?x@127.0.0.1` read as loopback here.
+    let authority = after.split(['/', '?', '#']).next().unwrap_or("");
     // Strip any userinfo: everything up to and including the LAST '@'. WITHOUT this, a URL like
     // `ldap://127.0.0.1:389@evil.com` reads as loopback here while the dial actually lands on `evil.com`
     // in cleartext — a fail-OPEN bypass of the plaintext guard.
