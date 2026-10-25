@@ -29,8 +29,6 @@
 use std::collections::HashMap;
 use std::ffi::c_void;
 use std::marker::PhantomData;
-use std::mem::size_of;
-use std::ptr;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
 
@@ -43,8 +41,8 @@ use busbar_contract::abi::auth::{
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Blob, Outcome, Span, BLOB_ABSENT};
-use busbar_contract::abi::mechanism::door::{KindTailHead, Rewrite, Statement, REWRITE_ALIAS};
+use busbar_contract::abi::mechanism::call::{AbiStr, Outcome, Span, BLOB_ABSENT};
+use busbar_contract::abi::mechanism::door::{Rewrite, Statement, REWRITE_ALIAS};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::with_tail;
 use busbar_contract::abi::sdk::conn::{Answer, Connector, Host};
@@ -65,10 +63,7 @@ pub const ALIAS: &str = "ldap";
 /// The most logins one instance holds in flight.
 const MAX_INFLIGHT: u32 = 64;
 
-const NONE: AbiStr = AbiStr {
-    ptr: ptr::null(),
-    len: 0,
-};
+const NONE: AbiStr = AbiStr::ABSENT;
 
 /// The other name config may call it by.
 const REWRITES: &[Rewrite] = &[Rewrite {
@@ -80,20 +75,11 @@ const REWRITES: &[Rewrite] = &[Rewrite {
 
 /// The auth tail: the credential login alone. LDAP judges no bearer credential on the data plane,
 /// so it states no inbound family (`verify` is never called) and no fact about verify answers.
-const TAIL: AuthTail = AuthTail {
-    head: KindTailHead {
-        size: size_of::<AuthTail>() as u32,
-        _reserved: 0,
-    },
-    caps: CAP_LOGIN,
-    facts: 0,
-    login_kind: LOGIN_KIND_CREDENTIAL,
-    inbound_points: 0,
-    styles: ptr::null(),
-    styles_len: 0,
-    operator_principal: NONE,
-    credential_kinds: ptr::null(),
-    credential_kinds_len: 0,
+const TAIL: AuthTail = {
+    let mut t = AuthTail::EMPTY;
+    t.caps = CAP_LOGIN;
+    t.login_kind = LOGIN_KIND_CREDENTIAL;
+    t
 };
 
 /// The need every login's stream is established on.
@@ -107,27 +93,15 @@ pub const NEED: u32 = 0;
 /// refuses a `ca_cert_pem` setting, so the connector's own trust is the one used (a need whose
 /// `trust_from` names a setting the configuration leaves unset is not declared, so naming it would
 /// leave the module no stream at all). The timeout is the module's own, per operation (`timeout_secs`).
-pub const NEEDS: &[Need] = &[Need {
-    direction: DIRECTION_OUTBOUND,
-    egress_class: EGRESS_OPERATOR_INFRASTRUCTURE,
-    transport: abi_str("tcp"),
-    auth: NONE,
-    target_from: NONE,
-    trust_from: NONE,
-    details: Blob {
-        ptr: ptr::null(),
-        len: 0,
-        fmt: BLOB_ABSENT,
-        flags: 0,
-    },
-    keep_response_headers: ptr::null(),
-    keep_response_headers_len: 0,
-    timeout_ms: 0,
+pub const NEEDS: &[Need] = &[{
+    let mut n = Need::EMPTY;
+    n.direction = DIRECTION_OUTBOUND;
+    n.egress_class = EGRESS_OPERATOR_INFRASTRUCTURE;
+    n.transport = abi_str("tcp");
+    n.timeout_ms = 0;
     // A raw stream has no response head: the named (empty) list.
-    keep_mode: KEEP_NAMED,
-    _reserved: 0,
-    deny_response_headers: ptr::null(),
-    deny_response_headers_len: 0,
+    n.keep_mode = KEEP_NAMED;
+    n
 }];
 
 /// The settings keys whose values are secret references, resolved in this order into
@@ -137,15 +111,10 @@ pub const SECRET_REFS: &[AbiStr] = &[abi_str("bind_service_password")];
 
 /// This plugin's Statement.
 pub const STATEMENT: Statement = with_tail(
-    Statement {
-        rewrites: REWRITES.as_ptr(),
-        rewrites_len: REWRITES.len(),
-        needs: NEEDS.as_ptr(),
-        needs_len: NEEDS.len(),
-        secret_refs: SECRET_REFS.as_ptr(),
-        secret_refs_len: SECRET_REFS.len(),
-        ..statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
-    },
+    statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
+        .with_rewrites(REWRITES)
+        .with_needs(NEEDS)
+        .with_secret_refs(SECRET_REFS),
     &TAIL,
 );
 
@@ -473,7 +442,7 @@ impl SafeSlot for CompleteLogin {
                 Outcome::Ready
             }
             Login::Identity(p) => {
-                let answer = write_identity(&p, input.field(|i| &i.out_buf), &mut out);
+                let answer = write_identity(&p, input.out_buf(), &mut out);
                 // `0` is never a minted generation: a ticket-less call gets no re-call.
                 if answer == Outcome::Failed && ticket.generation != 0 {
                     ldap.reached
@@ -521,7 +490,7 @@ mod table {
 }
 
 /// This plugin's door: the one a compiled-in build links and the dropped-in image exports.
-pub use table::door;
+pub use table::{door, MACRO_DOOR};
 
 #[cfg(test)]
 #[path = "tests/door_tests.rs"]
