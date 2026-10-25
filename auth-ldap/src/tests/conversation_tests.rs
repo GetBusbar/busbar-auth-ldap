@@ -708,3 +708,23 @@ fn two_messages_in_one_read_are_both_read() {
     };
     assert_eq!(p.roles, vec!["Engineers".to_string()]);
 }
+
+/// A TLS handshake the connector fails (`ldaps://`, or StartTLS after the directory agreed) is an
+/// outage that never puts the BIND on the wire.
+#[test]
+fn a_failed_secure_is_an_outage_and_never_binds() {
+    let m = module("ldaps://ad.corp.example", serde_json::json!({}));
+    let mut dir = Directory::new(vec![bind_response(1, 0), done(2, 0)]).held();
+    dir.secure_error = Some("tls handshake failed".to_string());
+    assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
+    assert!(dir.written.is_empty(), "wrote: {:02x?}", dir.written);
+
+    let m = module(
+        "ldap://ad.corp.example",
+        serde_json::json!({"start_tls": true}),
+    );
+    let mut dir = Directory::new(vec![extended(1, 0), bind_response(2, 0), done(3, 0)]).held();
+    dir.secure_error = Some("tls handshake failed".to_string());
+    assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
+    assert_eq!(dir.written, codec::start_tls(1), "only the StartTLS request");
+}
