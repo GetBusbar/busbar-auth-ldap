@@ -32,6 +32,8 @@ struct Directory {
     owed: bool,
     write_chunk: Option<usize>,
     refuse_establish: Option<String>,
+    hold: bool,
+    secure_error: Option<String>,
 }
 
 impl Directory {
@@ -40,6 +42,13 @@ impl Directory {
             replies: replies.into(),
             ..Self::default()
         }
+    }
+
+    /// Once the replies run out the stream stays open and a read pends (no EOF), so only a
+    /// fail-closed path can answer.
+    fn held(mut self) -> Self {
+        self.hold = true;
+        self
     }
 
     fn pending(mut self) -> Self {
@@ -76,6 +85,9 @@ impl Wire for Directory {
         if self.wait() {
             return Poll::Pending;
         }
+        if let Some(e) = self.secure_error.clone() {
+            return Poll::Ready(Err(e));
+        }
         self.seen.push(Seen::Secure);
         Poll::Ready(Ok(()))
     }
@@ -94,6 +106,9 @@ impl Wire for Directory {
             return Poll::Pending;
         }
         let Some(mut next) = self.replies.pop_front() else {
+            if self.hold {
+                return Poll::Pending;
+            }
             return Poll::Ready(Ok(0));
         };
         let n = next.len().min(buf.len());
@@ -378,7 +393,7 @@ fn a_search_reference_fails_closed() {
         2,
         ber::element(0x73, &ber::element(0x04, b"ldap://elsewhere/")),
     );
-    let mut dir = Directory::new(vec![bind_response(1, 0), reference]);
+    let mut dir = Directory::new(vec![bind_response(1, 0), reference]).held();
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
 }
 
@@ -391,14 +406,14 @@ fn the_signed_differences_fail_closed_as_an_outage() {
     let overrun = message(1, vec![0x61, 0x7f, 0x0a, 0x01, 0x00]);
     let past_cap = [&[0x30, 0x84][..], &(16_u32 * 1024 * 1024).to_be_bytes()[..]].concat();
     for reply in [malformed, overrun, past_cap] {
-        let mut dir = Directory::new(vec![reply.clone()]);
+        let mut dir = Directory::new(vec![reply.clone()]).held();
         assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage, "{reply:02x?}");
     }
     // A directory that closes the stream before answering is an outage too.
     let mut dir = Directory::new(Vec::new());
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
     // So is a notice of disconnection (message id 0).
-    let mut dir = Directory::new(vec![extended(0, 52)]);
+    let mut dir = Directory::new(vec![extended(0, 52)]).held();
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
 }
 
