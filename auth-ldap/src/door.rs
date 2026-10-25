@@ -103,7 +103,7 @@ pub const NEED: u32 = 0;
 /// carrier's target is `host:port`, never an `ldap://` URL. No `trust_from`: as in 1.5.5 the module
 /// refuses a `ca_cert_pem` setting, so the connector's own trust is the one used (a need whose
 /// `trust_from` names a setting the configuration leaves unset is not declared, so naming it would
-/// leave the module no stream at all). The timeout is the module's own, per login (`timeout_secs`).
+/// leave the module no stream at all). The timeout is the module's own, per operation (`timeout_secs`).
 pub const NEEDS: &[Need] = &[Need {
     direction: DIRECTION_OUTBOUND,
     egress_class: EGRESS_OPERATOR_INFRASTRUCTURE,
@@ -397,7 +397,7 @@ fn now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
 }
 
 /// Run (or resume) the login on this call's ticket: PENDING while a stream service pends (the
-/// run parked, the op's timer set to the login's deadline), else what it came to, the stream
+/// run parked, the op's timer set to the operation's deadline), else what it came to, the stream
 /// closed.
 fn drive(
     h: &Held<Ldap>,
