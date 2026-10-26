@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 
 use super::{
-    bind, decode, frame, search, start_tls, unbind, Entry, LdapResult, Message, Reply, SCOPE_BASE,
+    bind, decode, search, start_tls, unbind, Entry, LdapResult, Message, Reply, SCOPE_BASE,
     SCOPE_SUBTREE,
 };
 use crate::ber::{self, BerError};
@@ -98,7 +98,7 @@ fn msg(id: u8, op: &[u8]) -> Vec<u8> {
 #[test]
 fn a_bind_response_decodes() {
     let m = msg(1, &tlv(0x61, &result(49, b"", b"bad")));
-    assert_eq!(frame(&m), Ok(Some(m.len())));
+    assert_eq!(ber::frame(&m), Ok(Some(m.len())));
     assert_eq!(
         decode(&m),
         Ok(Message {
@@ -294,7 +294,7 @@ fn a_malformed_reply_is_an_error_never_a_panic() {
         for b in [0x00, 0x01, 0x7f, 0x80, 0x82, 0xff] {
             let mut c = m.clone();
             c[at] = b;
-            let _ = frame(&c);
+            let _ = ber::frame(&c);
             let _ = decode(&c);
         }
     }
@@ -306,7 +306,11 @@ fn an_overrunning_nested_length_fails_fast() {
     // The entry's attribute list claims 0x7f bytes inside a message that holds far fewer.
     let inner = [tlv(0x04, b"dn"), vec![0x30, 0x7f, 0x30, 0x00]].concat();
     let m = msg(2, &tlv(0x64, &inner));
-    assert_eq!(frame(&m), Ok(Some(m.len())), "the message itself is whole");
+    assert_eq!(
+        ber::frame(&m),
+        Ok(Some(m.len())),
+        "the message itself is whole"
+    );
     assert_eq!(decode(&m), Err(BerError::Overrun));
 }
 
@@ -315,5 +319,5 @@ fn an_overrunning_nested_length_fails_fast() {
 fn a_reply_past_the_cap_is_refused_from_its_header() {
     let len = (ber::INBOUND_CAP as u32).to_be_bytes();
     let head = [&[0x30, 0x84][..], &len[..]].concat();
-    assert!(matches!(frame(&head), Err(BerError::TooLarge(_))));
+    assert!(matches!(ber::frame(&head), Err(BerError::TooLarge(_))));
 }
