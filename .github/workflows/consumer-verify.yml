@@ -20,7 +20,7 @@ permissions:
 
 jobs:
   consumer:
-    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@71b70e487bebe5ae2feb1fabf32d8906edf4ccad
+    uses: GetBusbar/busbar/.github/workflows/plugin-consumer-verify.yml@4f39dc5fc15a7baed8cfa2c7115ef17c58881399
     with:
       version: ${{ inputs.version || '' }}
       asset_prefix: busbar-auth-ldap
