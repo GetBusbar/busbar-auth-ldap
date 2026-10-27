@@ -41,7 +41,6 @@ use busbar_contract::auth::Principal;
 use core::fmt;
 use serde::Deserialize;
 use std::task::Poll;
-use std::time::Duration;
 use zeroize::Zeroizing;
 
 pub mod ber;
@@ -223,13 +222,6 @@ impl fmt::Debug for LdapConfig {
             .field("allow_insecure_transport", &self.allow_insecure_transport)
             .field("timeout_secs", &self.timeout_secs)
             .finish()
-    }
-}
-
-impl LdapConfig {
-    /// The connect/op timeout as a [`Duration`].
-    pub fn timeout(&self) -> Duration {
-        Duration::from_secs(self.timeout_secs)
     }
 }
 
@@ -433,13 +425,6 @@ pub enum Login {
 }
 
 impl LdapModule {
-    /// The module from its settings blob (one JSON document): an empty blob is refused, since an
-    /// LDAP module with no URL/DN template can never bind anyone, so a boot-time error naming the
-    /// reference beats deferring to every login.
-    pub fn from_settings(settings: &[u8]) -> Result<Self, String> {
-        Self::from_settings_with(settings, &[])
-    }
-
     /// `validate`'s check of a settings blob: everything the blob earns on its own, with no secret
     /// in hand. A search-then-bind service password is normally a secret reference the kernel
     /// resolves only at `open`, so its PRESENCE is `open`'s rule ([`LdapModule::new`]), not this
@@ -694,6 +679,9 @@ impl LdapModule {
     /// Connect to the directory, BIND with the credentials, read the user's groups, and build a
     /// [`Principal`]. The connect comes first, as in 1.5.5 (whose client connected when it was
     /// built), so a username the DN template refuses is refused after it (the order is kept).
+    /// Generic over [`LdapBackend`] so the reject paths are unit-testable: a non-zero user-bind result
+    /// code, an empty or AMBIGUOUS (>1 match) search, and an over-long group list are all refused or
+    /// capped here.
     fn bind_and_identify<B: LdapBackend>(
         &self,
         ldap: &mut B,
@@ -702,18 +690,6 @@ impl LdapModule {
     ) -> Result<Principal, BindError> {
         ldap.connect()
             .map_err(at(&format!("connect {}", shown_url(&self.cfg.url))))?;
-        self.bind_and_identify_on(ldap, username, password)
-    }
-    /// The post-connect bind/search/group logic, generic over [`LdapBackend`] so the reject paths are
-    /// unit-testable. Resolves the bind DN (search-then-bind or direct template), rejects a non-zero
-    /// user-bind result code, rejects an empty or AMBIGUOUS (>1 match) search, CAPS the number of
-    /// group values read, and builds a stable, normalized principal id.
-    fn bind_and_identify_on<B: LdapBackend>(
-        &self,
-        ldap: &mut B,
-        username: &str,
-        password: &str,
-    ) -> Result<Principal, BindError> {
         // Resolve the DN to bind as: either search-then-bind, or the direct template.
         let user_dn = if let Some(filter_tpl) = &self.cfg.user_search_filter {
             // The direct-template path runs the username through `validate_username` (which rejects
