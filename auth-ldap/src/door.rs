@@ -64,14 +64,12 @@ pub const ALIAS: &str = "ldap";
 /// The most logins one instance holds in flight.
 const MAX_INFLIGHT: u32 = 64;
 
-const NONE: AbiStr = AbiStr::ABSENT;
-
 /// The other name config may call it by.
 const REWRITES: &[Rewrite] = &[Rewrite {
     class: REWRITE_ALIAS,
     _reserved: 0,
     from: abi_str(ALIAS),
-    to: NONE,
+    to: AbiStr::ABSENT,
 }];
 
 /// The auth tail: the credential login alone. LDAP judges no bearer credential on the data plane,

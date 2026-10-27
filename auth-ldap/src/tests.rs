@@ -14,6 +14,23 @@ use crate::{
 use busbar_contract::abi::sdk::cred::Cred;
 use std::collections::HashMap;
 
+impl LdapModule {
+    /// The module from a settings blob with no lent secret.
+    pub(crate) fn from_settings(settings: &[u8]) -> Result<Self, String> {
+        Self::from_settings_with(settings, &[])
+    }
+
+    /// The bind logic over a fake directory (whose `connect` is the trait's no-op).
+    pub(crate) fn bind_and_identify_on<B: LdapBackend>(
+        &self,
+        ldap: &mut B,
+        username: &str,
+        password: &str,
+    ) -> Result<busbar_contract::auth::Principal, BindError> {
+        self.bind_and_identify(ldap, username, password)
+    }
+}
+
 fn base_cfg() -> LdapConfig {
     serde_json::from_value(serde_json::json!({
         "url": "ldaps://ad.corp.example:636",
@@ -398,14 +415,6 @@ fn first_cn_unescapes_hex_pairs() {
         first_cn("CN=A\\,\\42,DC=x").as_deref(),
         Some("A,B") // `\,` → ',', `\42` → 'B'
     );
-}
-
-/// The operation timeout is derived from `timeout_secs`.
-#[test]
-fn timeout_duration_derives_from_secs() {
-    let mut cfg = base_cfg();
-    cfg.timeout_secs = 7;
-    assert_eq!(cfg.timeout(), std::time::Duration::from_secs(7));
 }
 
 #[test]

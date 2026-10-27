@@ -577,46 +577,17 @@ fn an_endpoint_reads_its_target_and_security() {
 #[test]
 fn a_directory_that_never_answers_is_an_outage_after_the_timeout() {
     let m = module("ldap://127.0.0.1", serde_json::json!({"timeout_secs": 2}));
-    /// Opens, takes every byte, never answers.
-    struct Silent;
-    impl Wire for Silent {
-        fn establish(&mut self, _: &str) -> Poll<Result<(), String>> {
-            Poll::Ready(Ok(()))
-        }
-        fn secure(&mut self) -> Poll<Result<(), String>> {
-            Poll::Ready(Ok(()))
-        }
-        fn write(&mut self, b: &[u8]) -> Poll<Result<usize, String>> {
-            Poll::Ready(Ok(b.len()))
-        }
-
-        fn write_sealed(
-            &mut self,
-            w: &mut busbar_contract::abi::sdk::cred::SealedWrite,
-        ) -> std::task::Poll<Result<(), String>> {
-            busbar_contract::abi::sdk::test_support::chip::drive_sealed(w, |b| self.write(b))
-        }
-        fn read(&mut self, _: &mut [u8]) -> Poll<Result<usize, String>> {
-            Poll::Pending
-        }
-    }
     let mut conv = Conversation::new();
     let start = 5_000_000_000_u64;
     assert_eq!(
-        m.login_over(
-            &mut conv,
-            &mut Silent,
-            Some("alice"),
-            Some("pw"),
-            Some(start)
-        ),
+        m.login_over(&mut conv, &mut Mute, Some("alice"), Some("pw"), Some(start)),
         Poll::Pending
     );
     assert_eq!(conv.deadline_ns(), Some(start + 2_000_000_000));
     assert_eq!(
         m.login_over(
             &mut conv,
-            &mut Silent,
+            &mut Mute,
             Some("alice"),
             Some("pw"),
             Some(start + 1_999_999_999)
@@ -627,7 +598,7 @@ fn a_directory_that_never_answers_is_an_outage_after_the_timeout() {
     assert_eq!(
         m.login_over(
             &mut conv,
-            &mut Silent,
+            &mut Mute,
             Some("alice"),
             Some("pw"),
             Some(start + 2_000_000_000)

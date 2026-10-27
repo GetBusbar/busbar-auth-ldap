@@ -198,15 +198,6 @@ pub struct Message {
     pub reply: Reply,
 }
 
-/// How many bytes the first message at the head of `input` takes once whole (`None` while more
-/// are owed): [`ber::frame`].
-///
-/// # Errors
-/// As [`ber::frame`].
-pub fn frame(input: &[u8]) -> Result<Option<usize>, BerError> {
-    ber::frame(input)
-}
-
 fn text(bytes: &[u8], what: &'static str) -> Result<String, BerError> {
     String::from_utf8(bytes.to_vec()).map_err(|_| BerError::Malformed(what))
 }
@@ -261,7 +252,7 @@ fn entry(content: &[u8]) -> Result<Entry, BerError> {
     Ok(Entry { dn, attrs })
 }
 
-/// Decode one whole message (exactly the bytes [`frame`] measured).
+/// Decode one whole message (exactly the bytes [`ber::frame`] measured).
 ///
 /// # Errors
 /// Anything that is not an LDAPMessage, an overrunning nested length: [`BerError`].
