@@ -220,11 +220,10 @@ dependencies = [
  "busbar-core-connector",
  "busbar-plugin-loader",
  "busbar-test-kit",
- "busbar-transport-tcp",
  "ldap3",
  "reqwest",
+ "rustls",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -428,14 +427,6 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
-]
-
-[[package]]
-name = "busbar-transport-tcp"
-version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar-transport-tcp?rev=223ec3f02000de94089a1752635b9e206f7492e5#223ec3f02000de94089a1752635b9e206f7492e5"
-dependencies = [
- "busbar-contract",
 ]
 
 [[package]]

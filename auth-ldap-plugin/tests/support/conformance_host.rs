@@ -5,19 +5,18 @@
 // template/conformance-host/, because this repo's declares file states network needs (`needs`:
 // `tcp`); a hand edit is overwritten by the next sync.
 
-//! **THE SUITE'S HOST CONNECTOR, IN THIS PLUGIN'S OWN TEST** (ARCHITECT Q-P4-9 (d)). busbar keeps
-//! only the neutral seam (`busbar_test_kit::conformance::Host`, the suite's `host:` and `tls:`
-//! arguments); this adapter implements it the way busbar's composition root composes the process's
-//! one connector — carrier -> [TLS] -> framer (`BUSBAR-1.6.0.md` THE DESIGN §5):
+//! **THE SUITE'S HOST CONNECTION TABLE, IN THIS PLUGIN'S OWN TEST** (ARCHITECT Q-P4-9 (d)). busbar
+//! keeps only the neutral seam (`busbar_test_kit::conformance::Host`, the suite's `host:` and
+//! `tls:` arguments); this adapter serves it with busbar's test kit's stream table
+//! ([`TcpConns`]), the plugin reaching the network only through the host's connection slots over
+//! the ABI, as every plugin does. No transport plugin's crate is linked: a plugin depends on no
+//! other plugin's code (the memory-ABI rule), and busbar at the pin links no framer.
 //!
-//! * busbar's own `Connector` (`busbar-core-connector`, a dev-dependency at the pin), its framer
-//!   entries the transport doors this plugin's needs name (`tcp`), each loaded
-//!   through the loader's one load and opened as the root opens a transport door;
-//! * the connector's own TLS (connsec), trusting the platform roots plus the suite's TEST trust
-//!   anchors (`tls:`), never handed to the plugin: no plugin holds a key, a certificate or a TLS
-//!   type (TRANSPORT-STACK (1));
-//! * a dial judge that admits loopback only: the suite dials the REAL local endpoints its settings
-//!   name, never the network;
+//! * the table dials the REAL local endpoints the suite's settings name (`host:port`), never the
+//!   network beyond loopback;
+//! * `upgrade_secure` runs the connector's own client TLS (`busbar_core_connector::tls`), trusting
+//!   the platform roots plus the suite's TEST trust anchors (`tls:`), never handed to the plugin: no
+//!   plugin holds a key, a certificate or a TLS type (TRANSPORT-STACK (1));
 //! * a parked read wakes the plugin's ticket through the leg dispatcher's conn waker.
 //!
 //! [`far_end`] is a TLS far end at [`FAR_END`] whose certificate chains to [`anchors`] (busbar's
@@ -38,52 +37,29 @@
 //! }
 //! ```
 //!
-//! with the dev-dependencies the rendered root `Cargo.toml` states (`{ workspace = true }`):
-//! `busbar-core-connector`, `busbar-transport-tcp`, `tokio`.
+//! with the dev-dependencies the root `Cargo.toml` states (`{ workspace = true }`):
+//! `busbar-test-kit`, `busbar-core-connector`, `rustls`.
 
 #![allow(dead_code)]
 
 use std::io::{Read, Write};
-use std::net::{SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use busbar_contract::abi::host::conn::connector::{
     DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE,
 };
-use busbar_contract::abi::mechanism::call::{Blob, Outcome};
-use busbar_contract::abi::mechanism::lifecycle::{slot as life, OpenIn, OpenOut};
 use busbar_contract::abi::mechanism::rendering::{ReadBlob, ReadNeed};
-use busbar_contract::abi::sdk::door::{blank_in, blank_out, MacroDoor};
-use busbar_contract::abi::transport::slot;
 use busbar_contract::conn::{
     ConnError, ConnId, DeclaredConns, InstanceId, NeedId, OpenDesc, PieceKind, NO_TICKET,
 };
 use busbar_contract::transport::EgressTrust;
-use busbar_core_connector::framer::{Call, Crossed, DoorFacts, FramerDoor};
-use busbar_core_connector::registry::{Entry, Transports};
 use busbar_core_connector::test_support::{private_ca, ServerTls, StdServerSession, TestCa};
-use busbar_core_connector::{Connector, Judged, Verdict};
-use busbar_plugin_loader::dispatch::kinds::transport::{Transport, TransportFacts};
-use busbar_plugin_loader::dispatch::{
-    load_linked, Bind, ConnTable, DispatchConfig, Dispatcher, Frame, InFrame, LinkedRow, NoSink,
-    OutFrame, Plugin,
-};
+use busbar_test_kit::tcp_conns::{SecureDial, SecuredSock, TcpConns};
 
 /// Where [`far_end`] listens: loopback, a port of this repo's own.
 pub const FAR_END: &str = "localhost:41859";
-
-/// The framer doors the host serves, as the root links them: (claim, door). One row a line,
-/// whatever the claims' lengths (a `vec!` would be reflowed by rustfmt).
-#[allow(clippy::vec_init_then_push)]
-fn doors() -> Vec<(&'static str, MacroDoor)> {
-    use busbar_transport_tcp::door::MACRO_DOOR as tcp_door;
-    // Each row is compiled against this repo's own pin of busbar-contract (the rendered `[patch]`),
-    // as busbar compiles the rows it links.
-    let mut doors: Vec<(&'static str, MacroDoor)> = Vec::new();
-    doors.push(("tcp", tcp_door));
-    doors
-}
 
 /// The suite's test CA: [`anchors`] is its certificate, [`far_end`] serves a leaf it signed.
 fn ca() -> &'static TestCa {
@@ -97,61 +73,79 @@ pub fn anchors() -> &'static str {
     &ca().ca_pem
 }
 
-/// THE HOST CONNECTOR (`busbar_test_kit::conformance::Host`): one per leg.
+/// THE HOST CONNECTION TABLE (`busbar_test_kit::conformance::Host`): one per leg.
 ///
 /// # Panics
-/// The anchors do not parse, a transport door does not load or open, or the view does not compose.
+/// The anchors do not parse, or the connector's client TLS does not build.
 #[must_use]
 pub fn host(
     wake: busbar_contract::conn::ConnWake,
     anchors: Option<&str>,
 ) -> Arc<dyn DeclaredConns> {
-    // The reactor a socket a plugin opens from a dispatcher worker registers on, as the root
-    // installs it (`root::connector::io_reactor`): the connector's own I/O thread.
-    busbar_core_connector::io::install_process_reactor(io_reactor());
     let trust = EgressTrust {
         extra_anchors: anchors.map(pem_certs).unwrap_or_default(),
         ..EgressTrust::default()
     };
     let tls = busbar_core_connector::tls::client::build_client_config(&trust)
         .unwrap_or_else(|e| panic!("the host's connection security does not build: {e}"));
-    let view = Transports::new(entries())
-        .unwrap_or_else(|e| panic!("the host's transport doors do not compose: {e}"));
-    Arc::new(Connector::serving(
-        view,
-        Arc::new(loopback),
-        Some(Arc::new(tls)),
-        wake,
-    ))
+    Arc::new(TcpConns::with_tls(wake, Arc::new(HostTls(Arc::new(tls)))))
 }
 
-/// The connector's I/O thread: a single-threaded runtime of its own whose reactor drives every
-/// socket the plugin opens from a dispatcher worker. Built once.
-fn io_reactor() -> tokio::runtime::Handle {
-    static IO: OnceLock<tokio::runtime::Handle> = OnceLock::new();
-    IO.get_or_init(|| {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("the host's I/O runtime builds");
-        let handle = rt.handle().clone();
-        std::thread::Builder::new()
-            .name("conformance-host-io".into())
-            .spawn(move || rt.block_on(std::future::pending::<()>()))
-            .expect("the host's I/O thread starts");
-        handle
-    })
-    .clone()
+/// The connector's client TLS, as the table's [`SecureDial`]: the handshake runs to completion on
+/// the blocking socket, verified against the trust it was built with.
+struct HostTls(Arc<rustls::ClientConfig>);
+
+impl SecureDial for HostTls {
+    fn secure(
+        &self,
+        server: &str,
+        verify_off: bool,
+        mut tcp: TcpStream,
+    ) -> std::io::Result<Box<dyn SecuredSock>> {
+        if verify_off {
+            // The suite's needs always verify; an unverified upgrade is not served here.
+            return Err(std::io::Error::other("an unverified upgrade is not served"));
+        }
+        let name = rustls::pki_types::ServerName::try_from(server.to_owned())
+            .map_err(|e| std::io::Error::other(format!("server name {server:?}: {e}")))?;
+        let mut session = rustls::ClientConnection::new(Arc::clone(&self.0), name)
+            .map_err(std::io::Error::other)?;
+        while session.is_handshaking() {
+            session.complete_io(&mut tcp)?;
+        }
+        Ok(Box::new(Secured(rustls::StreamOwned::new(session, tcp))))
+    }
 }
 
-/// THE DIAL JUDGE: a loopback address (a literal, or a name that resolves to one) and nothing else.
-fn loopback(dest: &str, _class: u32, _done: Judged) -> Option<Result<SocketAddr, Verdict>> {
-    let refused = busbar_contract::abi::host::service::DEST_UNRESOLVABLE;
-    let at = dest
-        .to_socket_addrs()
-        .ok()
-        .and_then(|mut a| a.find(|a| a.ip().is_loopback()));
-    Some(at.ok_or(refused))
+/// One secured stream.
+struct Secured(rustls::StreamOwned<rustls::ClientConnection, TcpStream>);
+
+impl Read for Secured {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.0.read(buf)
+    }
+}
+
+impl Write for Secured {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+impl SecuredSock for Secured {
+    fn tcp(&self) -> &TcpStream {
+        self.0.get_ref()
+    }
+
+    fn close(&mut self) {
+        self.0.conn.send_close_notify();
+        let _ = self.0.flush();
+        let _ = self.0.sock.shutdown(std::net::Shutdown::Both);
+    }
 }
 
 /// Every certificate in `pem`, DER.
@@ -162,186 +156,6 @@ fn pem_certs(pem: &str) -> Vec<Vec<u8>> {
         "the suite's trust anchors hold no certificate"
     );
     certs
-}
-
-/// The dispatcher the host's transport doors are adopted by. As the root's: its workers run inside
-/// the connector's I/O runtime, and a CARRIER door moves its bytes over the process's one host I/O
-/// (`io.*`, `busbar_core_connector::hostio::process`), the connector's.
-fn transport_dispatcher() -> &'static Dispatcher {
-    static ONE: OnceLock<Dispatcher> = OnceLock::new();
-    ONE.get_or_init(|| {
-        let d = Dispatcher::new(DispatchConfig::default());
-        d.install_runtime(io_reactor());
-        d.install_io(busbar_core_connector::hostio::process());
-        d
-    })
-}
-
-/// The framer entries: each door loaded through the one loader and opened with no settings, as
-/// the root opens a transport door that declares none it reads.
-fn entries() -> Vec<Entry> {
-    doors()
-        .into_iter()
-        .map(|(claim, door)| {
-            let bind = Bind {
-                instance: Arc::from(claim),
-                max_inflight_cap: 1024,
-                sink: Arc::new(NoSink),
-                dispatcher: transport_dispatcher().adopter(),
-                // A transport door is a framer the connector drives: it declares no need.
-                conns: ConnTable::NoNeeds,
-            };
-            let plugin = LinkedRow::of_macro(door)
-                .and_then(|row| load_linked::<Transport>(&row, bind))
-                .unwrap_or_else(|e| panic!("the host's transport `{claim}` does not load: {e}"));
-            Entry {
-                door: Arc::new(Opened::open(plugin, claim)),
-                alpn: Vec::new(),
-            }
-        })
-        .collect()
-}
-
-/// One transport door, opened, as the connector reaches it (the root's `doors::Dispatched`).
-struct Opened {
-    plugin: Plugin<Transport>,
-    facts: DoorFacts,
-}
-
-impl Opened {
-    fn open(plugin: Plugin<Transport>, claim: &str) -> Self {
-        let stated = plugin
-            .context::<TransportFacts>()
-            .cloned()
-            .unwrap_or_else(|| panic!("the host's transport `{claim}` states no transport tail"));
-        let mut i: OpenIn = blank_in();
-        i.settings = Blob::ABSENT;
-        let mut f = Frame::new(i, blank_out::<OpenOut>());
-        let opened = plugin.call(life::OPEN, &mut f);
-        assert_eq!(
-            opened.outcome,
-            Outcome::Ready,
-            "the host's transport `{claim}` does not open"
-        );
-        plugin
-            .ready(transport_dispatcher(), Duration::from_secs(10))
-            .unwrap_or_else(|e| panic!("the host's transport `{claim}` is not ready: {e}"));
-        let facts = DoorFacts {
-            name: plugin.name().to_owned(),
-            claims: stated.claims,
-            role: stated.role,
-            composes_over: stated.composes_over,
-            ported: stated.ported,
-            status_rows: stated.status_rows,
-            datagram: stated.datagram,
-            duplex: stated
-                .upgrades
-                .iter()
-                .chain(&stated.sessions)
-                .copied()
-                .collect(),
-        };
-        Self { plugin, facts }
-    }
-}
-
-/// One crossing through the dispatcher: the host's `in`/`out` copied in, the answer copied back.
-fn go<I: InFrame, O: OutFrame>(p: &Plugin<Transport>, s: u32, i: &mut I, o: &mut O) -> Crossed {
-    let mut f = Frame::new(*i, *o);
-    let c = p.call(s, &mut f);
-    *i = f.input;
-    *o = f.out;
-    Crossed {
-        outcome: c.outcome,
-        error: c.error,
-    }
-}
-
-/// One side of a carried connection: an inline ticket of the transport dispatcher, the one every
-/// transport door is adopted by (its wakes route there), as the root's.
-struct InlineSide(busbar_plugin_loader::dispatch::InlineTicket);
-
-impl busbar_core_connector::carrier::Side for InlineSide {
-    fn ticket(&self) -> busbar_contract::abi::mechanism::ticket::Ticket {
-        self.0.ticket()
-    }
-
-    fn register(&self, waker: &std::task::Waker) {
-        self.0.register(waker);
-    }
-}
-
-/// One INLINE crossing on `ticket` (a RESUME when `resume`): the host's `in`/`out` copied in, the
-/// answer copied back.
-fn go_inline<I: InFrame, O: OutFrame>(
-    p: &Plugin<Transport>,
-    ticket: busbar_contract::abi::mechanism::ticket::Ticket,
-    resume: bool,
-    s: u32,
-    i: &mut I,
-    o: &mut O,
-) -> Crossed {
-    let mut f = Frame::new(*i, *o);
-    let c = p.call_inline(ticket, resume, s, &mut f);
-    *i = f.input;
-    *o = f.out;
-    Crossed {
-        outcome: c.outcome,
-        error: c.error,
-    }
-}
-
-impl FramerDoor for Opened {
-    fn facts(&self) -> &DoorFacts {
-        &self.facts
-    }
-
-    fn side(&self) -> Option<Box<dyn busbar_core_connector::carrier::Side>> {
-        if self.facts.role != busbar_contract::abi::transport::ROLE_CARRIER {
-            return None;
-        }
-        transport_dispatcher()
-            .inline_ticket()
-            .map(|t| Box::new(InlineSide(t)) as Box<dyn busbar_core_connector::carrier::Side>)
-    }
-
-    fn carry(
-        &self,
-        side: &dyn busbar_core_connector::carrier::Side,
-        resume: bool,
-        call: busbar_core_connector::carrier::Carry<'_>,
-    ) -> Crossed {
-        use busbar_core_connector::carrier::Carry;
-        let (p, t) = (&self.plugin, side.ticket());
-        match call {
-            Carry::Listen(i, o) => go_inline(p, t, resume, slot::LISTEN, i, o),
-            Carry::Accept(i, o) => go_inline(p, t, resume, slot::ACCEPT, i, o),
-            Carry::Dial(i, o) => go_inline(p, t, resume, slot::DIAL, i, o),
-            Carry::Read(i, o) => go_inline(p, t, resume, slot::READ, i, o),
-            Carry::Write(i, o) => go_inline(p, t, resume, slot::WRITE, i, o),
-            Carry::Flush(i, o) => go_inline(p, t, resume, slot::FLUSH, i, o),
-            Carry::Shut(i, o) => go_inline(p, t, resume, slot::SHUT, i, o),
-            Carry::Arrival(i, o) => go_inline(p, t, resume, slot::ARRIVAL, i, o),
-            // `cancel` is made on no ticket: the ticket it cancels rides its `in`.
-            Carry::Cancel(i, o) => go(p, life::CANCEL, i, o),
-        }
-    }
-
-    fn cross(&self, call: Call<'_>) -> Crossed {
-        let p = &self.plugin;
-        match call {
-            Call::Locate(i, o) => go(p, slot::LOCATE, i, o),
-            Call::Begin(i, o) => go(p, slot::BEGIN, i, o),
-            Call::Ingest(i, o) => go(p, slot::INGEST, i, o),
-            Call::Emit(i, o) => go(p, slot::EMIT, i, o),
-            Call::Encode(i, o) => go(p, slot::ENCODE, i, o),
-            Call::Refuse(i, o) => go(p, slot::REFUSE, i, o),
-            Call::Finish(i, o) => go(p, slot::FINISH, i, o),
-            Call::Detach(i, o) => go(p, slot::DETACH, i, o),
-            Call::Adopt(i, o) => go(p, slot::ADOPT, i, o),
-            Call::Timer(i, o) => go(p, slot::TIMER, i, o),
-        }
-    }
 }
 
 // ---- the far end ----
