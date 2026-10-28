@@ -141,10 +141,11 @@ env:
           SVC_CONTAINER="$n"; ready() { curl -fsS "http://127.0.0.1:$p/__admin/mappings" >/dev/null 2>&1; }
           export BUSBAR_TEST_WIREMOCK_URL="http://127.0.0.1:$p" ;;
         openldap) p=$(free_port)
-          # The pinned image is linux/amd64 only: it runs under the backend's amd64 emulation.
-          docker run -d $L --platform linux/amd64 --name "$n" -e LDAP_ORGANISATION="Example Org" -e LDAP_DOMAIN=example.org -e LDAP_ADMIN_PASSWORD=adminpassword \
+          # The pinned digest is a multi-arch index (amd64, arm/v7, arm64): the runner's own platform.
+          docker run -d $L --name "$n" -e LDAP_ORGANISATION="Example Org" -e LDAP_DOMAIN=example.org -e LDAP_ADMIN_PASSWORD=adminpassword \
             -p "127.0.0.1:$p:389" osixia/openldap:1.5.0@sha256:18742e9c449c9c1afe129d3f2f3ee15fb34cc43e5f940a20f3399728f41d7c28 >/dev/null
-          SVC_CONTAINER="$n"; ready() { (exec 3<>"/dev/tcp/127.0.0.1/$p") 2>/dev/null; }
+          # Ready = slapd takes the administrator's bind (the port proxy accepts before slapd serves).
+          SVC_CONTAINER="$n"; ready() { docker exec "$n" ldapwhoami -x -H ldap://127.0.0.1:389 -D cn=admin,dc=example,dc=org -w adminpassword >/dev/null 2>&1; }
           export BUSBAR_TEST_LDAP_URL="ldap://127.0.0.1:$p" ;;
         *) echo "plugin-ci: unknown service '$PLUGIN_SERVICE'"; return 1 ;;
       esac
