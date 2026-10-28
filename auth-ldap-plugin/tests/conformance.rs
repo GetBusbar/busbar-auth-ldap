@@ -187,12 +187,13 @@ fn admin_bound(at: &str, until: Instant) -> Result<ldap3::LdapConn, String> {
 /// administrator (`ldap3`, a dev-only client; the module speaks its own codec): the container makes
 /// its base suffix and its root DN, but no entry the module could read groups off. With
 /// `BUSBAR_TEST_LDAP_URL` set the directory must take the administrator's bind within
-/// [`DIRECTORY_WAIT`], or the suite stops here naming it (never a login that reads an outage). With
+/// [`DIRECTORY_WAIT`], or the suite stops here naming it (never a login that reads an outage); the
+/// wait is made once, and every later test that asks is refused at once with the same words. With
 /// no directory named (a macOS runner) it is one try and nothing is added; the live arms, skipped
 /// there, would read an outage.
 fn seed_user() {
-    static SEEDED: OnceLock<()> = OnceLock::new();
-    SEEDED.get_or_init(|| {
+    static SEEDED: OnceLock<Result<(), String>> = OnceLock::new();
+    let seeded = SEEDED.get_or_init(|| {
         let named = std::env::var_os("BUSBAR_TEST_LDAP_URL").is_some();
         let until = Instant::now()
             + if named {
@@ -202,8 +203,8 @@ fn seed_user() {
             };
         let mut ldap = match admin_bound(upstream(), until) {
             Ok(ldap) => ldap,
-            Err(e) if named => panic!("{e}"),
-            Err(_) => return,
+            Err(e) if named => return Err(e),
+            Err(_) => return Ok(()),
         };
         let attrs = vec![
             (
@@ -213,14 +214,18 @@ fn seed_user() {
             ("cn", ["conformance"].into()),
             ("userPassword", [USER_PW].into()),
         ];
-        match ldap.add(USER_DN, attrs).and_then(|r| r.success()) {
+        let added = match ldap.add(USER_DN, attrs).and_then(|r| r.success()) {
             // 68 = entryAlreadyExists: a rerun against a warm directory.
-            Ok(_) => {}
-            Err(ldap3::LdapError::LdapResult { result }) if result.rc == 68 => {}
-            Err(e) => panic!("the suite's user {USER_DN} cannot be added: {e}"),
-        }
+            Ok(_) => Ok(()),
+            Err(ldap3::LdapError::LdapResult { result }) if result.rc == 68 => Ok(()),
+            Err(e) => Err(format!("the suite's user {USER_DN} cannot be added: {e}")),
+        };
         let _ = ldap.unbind();
+        added
     });
+    if let Err(e) = seeded {
+        panic!("{e}");
+    }
 }
 
 /// The host the suite binds the module over, with the TLS front its settings name already
