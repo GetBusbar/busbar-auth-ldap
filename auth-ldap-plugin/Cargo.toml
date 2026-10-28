@@ -42,7 +42,8 @@ busbar-auth-ldap-plugin = { path = ".", features = ["dropped-in"] }
 # binary + an OpenLDAP service container, and SEED that directory over plaintext LDAP (ldap3, a
 # dev-only client: `sync` and no TLS feature, so no rustls 0.21 / ring 0.16 enters the lock; the
 # plugin itself speaks its own sans-IO codec).
-busbar-plugin-loader = { workspace = true, features = ["conformance"] }
+busbar-plugin-loader = { workspace = true }
+busbar-test-kit = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true, features = ["json", "blocking"] }
 ldap3 = { workspace = true }

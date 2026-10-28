@@ -44,9 +44,9 @@ use busbar_contract::abi::mechanism::call::{
 };
 use busbar_contract::abi::mechanism::door::MARK_BLOCKS;
 use busbar_contract::abi::mechanism::rendering;
-use busbar_plugin_loader::conformance::{self, Leg, Subject};
 use busbar_plugin_loader::dispatch::kinds::auth::Auth;
 use busbar_plugin_loader::dispatch::{now_ns, DispatchConfig, Dispatcher, Frame, LinkedRow};
+use busbar_test_kit::conformance::{self, Leg, Subject};
 
 #[path = "support/conformance_host.rs"]
 mod conformance_host;
@@ -54,7 +54,7 @@ mod conformance_host;
 #[path = "support/net_ban.rs"]
 mod net_ban;
 
-busbar_plugin_loader::conformance_suite! {
+busbar_test_kit::conformance_suite! {
     door: busbar_auth_ldap::door::MACRO_DOOR,
     cdylib: "busbar_auth_ldap_plugin",
     inputs: include_str!("conformance.json"),
