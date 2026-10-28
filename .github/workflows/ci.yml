@@ -29,7 +29,7 @@ permissions:
 
 jobs:
   ci:
-    uses: GetBusbar/busbar/.github/workflows/plugin-ci.yml@71b70e487bebe5ae2feb1fabf32d8906edf4ccad
+    uses: GetBusbar/busbar/.github/workflows/plugin-ci.yml@9aa28f7f8701dcd8dcf1fbb0c7cbab339ea9880a
     with:
       service: openldap
       busbar_checkout: true
