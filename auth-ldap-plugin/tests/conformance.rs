@@ -150,23 +150,62 @@ const ADMIN_PW: &str = "adminpassword";
 const USER_DN: &str = "cn=conformance,dc=example,dc=org";
 const USER_PW: &str = "conformance-password";
 
+/// How long the suite waits for a named live directory to take its administrator's bind. A service
+/// container's port answers before its slapd serves (the runner's port proxy accepts at once), and
+/// the image bootstraps its suffix before the first bind succeeds.
+const DIRECTORY_WAIT: Duration = Duration::from_secs(180);
+
+/// The live directory at `at`, bound as its administrator, retried until `until`.
+///
+/// # Errors
+///
+/// The last refusal, naming `at`, once `until` has passed with no bind taken.
+fn admin_bound(at: &str, until: Instant) -> Result<ldap3::LdapConn, String> {
+    let settings = ldap3::LdapConnSettings::new().set_conn_timeout(Duration::from_secs(5));
+    loop {
+        let tried = ldap3::LdapConn::with_settings(settings.clone(), &format!("ldap://{at}"))
+            .and_then(|mut ldap| {
+                let bound = ldap
+                    .with_timeout(Duration::from_secs(5))
+                    .simple_bind(ADMIN_DN, ADMIN_PW)
+                    .and_then(|r| r.success());
+                bound.map(|_| ldap)
+            });
+        match tried {
+            Ok(ldap) => return Ok(ldap),
+            Err(e) if Instant::now() >= until => {
+                return Err(format!(
+                    "the live directory at {at} took no bind as {ADMIN_DN}: {e}"
+                ))
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(500)),
+        }
+    }
+}
+
 /// The suite's user in the live directory, added once over plaintext LDAP on loopback by the
 /// administrator (`ldap3`, a dev-only client; the module speaks its own codec): the container makes
-/// its base suffix and its root DN, but no entry the module could read groups off. Best effort: with
-/// no directory (a macOS runner) nothing is added, and the live arms, skipped there, would read an
-/// outage.
+/// its base suffix and its root DN, but no entry the module could read groups off. With
+/// `BUSBAR_TEST_LDAP_URL` set the directory must take the administrator's bind within
+/// [`DIRECTORY_WAIT`], or the suite stops here naming it (never a login that reads an outage); the
+/// wait is made once, and every later test that asks is refused at once with the same words. With
+/// no directory named (a macOS runner) it is one try and nothing is added; the live arms, skipped
+/// there, would read an outage.
 fn seed_user() {
-    static SEEDED: OnceLock<()> = OnceLock::new();
-    SEEDED.get_or_init(|| {
-        let Ok(mut ldap) = ldap3::LdapConn::new(&format!("ldap://{}", upstream())) else {
-            return;
+    static SEEDED: OnceLock<Result<(), String>> = OnceLock::new();
+    let seeded = SEEDED.get_or_init(|| {
+        let named = std::env::var_os("BUSBAR_TEST_LDAP_URL").is_some();
+        let until = Instant::now()
+            + if named {
+                DIRECTORY_WAIT
+            } else {
+                Duration::ZERO
+            };
+        let mut ldap = match admin_bound(upstream(), until) {
+            Ok(ldap) => ldap,
+            Err(e) if named => return Err(e),
+            Err(_) => return Ok(()),
         };
-        if !ldap
-            .simple_bind(ADMIN_DN, ADMIN_PW)
-            .is_ok_and(|r| r.success().is_ok())
-        {
-            return;
-        }
         let attrs = vec![
             (
                 "objectClass",
@@ -175,14 +214,18 @@ fn seed_user() {
             ("cn", ["conformance"].into()),
             ("userPassword", [USER_PW].into()),
         ];
-        match ldap.add(USER_DN, attrs).and_then(|r| r.success()) {
+        let added = match ldap.add(USER_DN, attrs).and_then(|r| r.success()) {
             // 68 = entryAlreadyExists: a rerun against a warm directory.
-            Ok(_) => {}
-            Err(ldap3::LdapError::LdapResult { result }) if result.rc == 68 => {}
-            Err(e) => panic!("the suite's user {USER_DN} cannot be added: {e}"),
-        }
+            Ok(_) => Ok(()),
+            Err(ldap3::LdapError::LdapResult { result }) if result.rc == 68 => Ok(()),
+            Err(e) => Err(format!("the suite's user {USER_DN} cannot be added: {e}")),
+        };
         let _ = ldap.unbind();
+        added
     });
+    if let Err(e) = seeded {
+        panic!("{e}");
+    }
 }
 
 /// The host the suite binds the module over, with the TLS front its settings name already
@@ -234,6 +277,36 @@ fn silent_directory() -> String {
         }
     });
     at
+}
+
+/// RED: a directory whose port takes the connection and drops it (a service container's port proxy
+/// with no slapd behind it yet, or none at all) takes no administrator's bind: the seed waits it out
+/// to the deadline, then names the directory, instead of leaving the suite's login to read an
+/// outage.
+#[test]
+fn red_a_directory_port_with_no_directory_behind_it_is_named_at_the_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a local listener");
+    let at = listener.local_addr().expect("its address").to_string();
+    std::thread::spawn(move || {
+        for tcp in listener.incoming().flatten() {
+            drop(tcp);
+        }
+    });
+    let started = Instant::now();
+    let Err(refused) = admin_bound(&at, started + Duration::from_secs(2)) else {
+        panic!("a bind was taken where no directory answers");
+    };
+    let took = started.elapsed();
+    assert!(
+        refused.starts_with(&format!(
+            "the live directory at {at} took no bind as {ADMIN_DN}: "
+        )),
+        "{refused}"
+    );
+    assert!(
+        took >= Duration::from_secs(2) && took < Duration::from_secs(15),
+        "the refusal comes at the deadline: {took:?}"
+    );
 }
 
 /// THE MEMORY ONE `complete_login` LENDS THE PLUGIN: the submitted form fields and the host's
