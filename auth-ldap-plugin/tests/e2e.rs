@@ -72,7 +72,16 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
     // `busbar-plugin-loader` package (`--features pack`), not a package of its own, and building it
     // separately keeps the `pack` feature out of the `busbar` build.
     for args in [
-        &["build", "--release", "-p", "busbar", "--bin", "busbar"][..],
+        &[
+            "build",
+            "--release",
+            "--manifest-path",
+            "dist/default/Cargo.toml",
+            "--target-dir",
+            "target",
+            "--bin",
+            "busbar",
+        ][..],
         &[
             "build",
             "--release",
