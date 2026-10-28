@@ -4,7 +4,7 @@
 //! BER, the subset LDAP speaks (RFC 4511 §5.1: definite lengths, one-byte tags), as pure functions
 //! over bytes. No I/O: the LDAP codec ([`crate::codec`]) builds and reads its messages with these.
 //!
-//! Reading is fail-closed (the three OWNER-SIGNED differences from 1.5.5, 2026-09-28):
+//! Reading is fail-closed:
 //!
 //! * a malformed element is an [`BerError`], never a panic;
 //! * a nested element whose length overruns its parent fails at once ([`BerError::Overrun`]): the
@@ -59,8 +59,6 @@ impl fmt::Display for BerError {
 
 impl std::error::Error for BerError {}
 
-// ── writing ─────────────────────────────────────────────────────────────────────────────────────
-
 /// Append a definite length in its minimal form.
 fn push_len(out: &mut Vec<u8>, len: usize) {
     if len < 0x80 {
@@ -109,12 +107,10 @@ pub fn int(out: &mut Vec<u8>, tag: u8, v: i64) {
     tlv(out, tag, &int_content(v));
 }
 
-/// Append a BOOLEAN-shaped element: TRUE is `0xff`, as 1.5.5's encoder wrote it.
+/// Append a BOOLEAN-shaped element: TRUE is `0xff`.
 pub fn boolean(out: &mut Vec<u8>, tag: u8, v: bool) {
     tlv(out, tag, &[if v { 0xff } else { 0x00 }]);
 }
-
-// ── reading ─────────────────────────────────────────────────────────────────────────────────────
 
 /// One element read off bytes: its tag and its content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

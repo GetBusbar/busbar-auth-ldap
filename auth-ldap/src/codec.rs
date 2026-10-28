@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE LDAP CODEC (RFC 4511), sans-IO: the requests the module sends as bytes, and the replies it
-//! reads back from bytes, as pure functions (BUSBAR-1.6.0.md R5 / Q82: "a sans-IO codec over the
-//! host stream ... never a blocking driver"). What crosses the host's stream is exactly these
+//! The LDAP codec (RFC 4511), sans-IO: the requests the module sends as bytes, and the replies it
+//! reads back from bytes, as pure functions. What crosses the host's stream is exactly these
 //! bytes; nothing here opens a socket or does TLS.
 //!
-//! Requests carry the encoding 1.5.5's client (ldap3 0.11) wrote: a simple BIND (version 3), a
+//! Requests carry the encoding ldap3 writes: a simple BIND (version 3), a
 //! SEARCH (never dereferencing aliases, no size or time limit, types and values), an UNBIND, and
 //! the StartTLS extended request. Replies decode fail-closed ([`crate::ber`]): a malformed message,
 //! an overrunning nested length or a message past the 16 MiB cap is an error, never a panic.
@@ -67,7 +66,7 @@ pub fn bind(id: i32, dn: &str, password: &str) -> Zeroizing<Vec<u8>> {
 /// A SEARCH under `base` at `scope` (`SCOPE_*`) for `filter`, asking for `attrs`.
 ///
 /// # Errors
-/// The filter does not parse: [`filter::PARSE_ERROR`], 1.5.5's words.
+/// The filter does not parse: [`filter::PARSE_ERROR`].
 pub fn search(
     id: i32,
     base: &str,
@@ -122,7 +121,7 @@ pub struct LdapResult {
     pub text: String,
 }
 
-/// RFC 4511's name for a result code, as 1.5.5's client spelled it in its error text.
+/// RFC 4511's name for a result code, as it is spelled in error text.
 #[must_use]
 pub const fn rc_name(rc: u32) -> &'static str {
     match rc {
@@ -172,7 +171,7 @@ pub const fn rc_name(rc: u32) -> &'static str {
 }
 
 impl std::fmt::Display for LdapResult {
-    /// 1.5.5's words for an operation that did not succeed (`LdapError::LdapResult`).
+    /// The words for an operation that did not succeed (as `LdapError::LdapResult` words it).
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -186,7 +185,7 @@ impl std::fmt::Display for LdapResult {
 }
 
 /// A directory entry as a search answers it: its DN and its text-valued attributes. An attribute
-/// with any value that is not UTF-8 is left out, as 1.5.5's client left it out of `attrs`.
+/// with any value that is not UTF-8 is left out of `attrs`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Entry {
     /// The entry's DN.
