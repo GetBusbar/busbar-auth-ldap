@@ -29,9 +29,9 @@ pub fn roles_from_group_dns(group_dns: &[String], mode: RoleFrom) -> Vec<String>
     let mut seen: HashSet<String> = HashSet::with_capacity(group_dns.len());
     for dn in group_dns {
         let role = match mode {
-            // The CN keeps the directory's own case, as it did in v1.0.3 (the busbar 1.5.5
-            // release): a working config keys `role_bindings` by that exact spelling (`Engineers:`
-            // for `CN=Engineers`), so folding the case here would silently unbind every such role.
+            // The CN keeps the directory's own case: a working config keys `role_bindings` by that
+            // exact spelling (`Engineers:` for `CN=Engineers`), so folding the case here would
+            // silently unbind every such role.
             RoleFrom::Cn => match first_cn(dn) {
                 Some(cn) => cn,
                 // A memberOf value with no CN RDN (unusual) falls back to the whole trimmed value so
