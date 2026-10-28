@@ -4,9 +4,8 @@
 //! The **AD/LDAP auth module** for busbar.
 //!
 //! LDAP is a DIRECT CREDENTIAL flow: the module speaks the directory's own wire protocol, as a
-//! sans-IO codec over a byte stream the HOST owns (BUSBAR-1.6.0.md THE DESIGN §5: "No plugin opens
-//! a socket, dials, binds or does TLS"; the host connector: "a database or directory wire protocol
-//! is plugin logic over the generic connection table"; R5/Q82):
+//! sans-IO codec over a byte stream the HOST owns (no plugin opens a socket, dials, binds or does
+//! TLS; a directory wire protocol is plugin logic over the generic connection table):
 //!
 //! 1. A dev types username + password on the hosted login page.
 //! 2. The core calls the door's `complete_login` ([`door`]) with those credentials.
@@ -170,12 +169,12 @@ pub struct LdapConfig {
 
     /// Service-account password. The Statement names this key in its `secret_refs`, so the kernel
     /// resolves it into `OpenIn.secrets[0]`, which wins over this value
-    /// ([`LdapModule::from_settings_with`]); a 1.5.5 literal here is still accepted.
+    /// ([`LdapModule::from_settings_with`]); a literal here is still accepted.
     #[serde(default)]
     pub bind_service_password: Option<SecretString>,
 
     /// PEM CA bundle to trust for LDAPS/STARTTLS (private AD CA). The need states no
-    /// `trust_from`, and as in 1.5.5 [`LdapModule::new`] refuses a config that sets it at boot
+    /// `trust_from`, and [`LdapModule::new`] refuses a config that sets it at boot
     /// (fail-closed) rather than silently ignoring it, so the connector's default roots are the
     /// ones trusted.
     #[serde(default)]
@@ -194,7 +193,7 @@ pub struct LdapConfig {
     pub allow_insecure_transport: bool,
 
     /// How long each directory operation (the connect, each bind, each search) may wait, in
-    /// seconds, as 1.5.5 applied it (the host bounds each stream service by its own). Default 10.
+    /// seconds (the host bounds each stream service by its own). Default 10.
     #[serde(default = "default_timeout_secs")]
     pub timeout_secs: u64,
 }
@@ -252,9 +251,8 @@ impl LdapModule {
         // deployment with nothing anywhere saying so — the setting is a one-line boolean and the
         // consequence is invisible.
         //
-        // This is a `tracing` call, which used to go nowhere from inside a cdylib (its own
-        // dispatcher, unjoined to the host's). The SDK now forwards this plugin's dispatcher into
-        // the host log sink, so it genuinely reaches the operator's logs.
+        // This is a `tracing` call; the SDK forwards this plugin's dispatcher into the host log
+        // sink, so it reaches the operator's logs.
         if is_insecure_transport(&cfg.url, cfg.start_tls) {
             tracing::warn!(
                 module = "ldap",
@@ -345,7 +343,7 @@ fn check_settings(cfg: &LdapConfig) -> Result<(), String> {
     // service-account AND every end-user password in cleartext. Reject unless the operator
     // explicitly opts out. `ldaps://`, STARTTLS, or a loopback host are already secure/local.
     if is_insecure_transport(&cfg.url, cfg.start_tls) && !cfg.allow_insecure_transport {
-        // The URL is quoted with any userinfo cut: the words are 1.5.5's otherwise (H5).
+        // The URL is quoted with any userinfo cut, so no credential reaches the message.
         return Err(format!(
             "ldap url {:?} uses plaintext ldap:// to a non-loopback host with no STARTTLS, \
              which sends the service and end-user credentials in cleartext; use an ldaps:// \
@@ -453,7 +451,7 @@ impl LdapModule {
     /// [`Poll::Pending`] = a wire service pends: call again on the wake with the same `conv` (what
     /// completed answers from it; nothing is sent twice). `now_ns` is the caller's monotonic clock
     /// (`None` = none): each operation (the connect, each bind, each search) gives up `timeout_secs`
-    /// after it begins, as 1.5.5 timed them.
+    /// after it begins.
     pub fn login_over<W: Wire>(
         &self,
         conv: &mut Conversation,
@@ -556,7 +554,7 @@ fn json_err(what: &'static str) -> impl FnOnce(serde_json::Error) -> String {
 /// LDAP result code 49, invalidCredentials (RFC 4511 §4.1.9).
 const LDAP_INVALID_CREDENTIALS: u32 = 49;
 
-/// OWNER RULING (non-49 user bind): is a user-bind result code a SERVER or SESSION condition, one
+/// Is a (non-49) user-bind result code a SERVER or SESSION condition, one
 /// that fails the bind for every user alike (an outage), rather than a refusal of this one bind?
 /// An explicit list (RFC 4511 §4.1.9 names); every code not on it (48 inappropriateAuthentication,
 /// 50 insufficientAccessRights, 53 unwillingToPerform, 32 noSuchObject, 19 constraintViolation,
@@ -615,7 +613,7 @@ impl From<String> for Io {
     }
 }
 
-/// `<ctx>: <text>` for a failed operation (1.5.5's prefixes); a pending one stays pending.
+/// `<ctx>: <text>` for a failed operation; a pending one stays pending.
 fn at(ctx: &str) -> impl FnOnce(Io) -> BindError + '_ {
     move |e| match e {
         Io::Pending => BindError::Pending,
@@ -677,8 +675,8 @@ fn principal_id(user_dn: &str) -> String {
 
 impl LdapModule {
     /// Connect to the directory, BIND with the credentials, read the user's groups, and build a
-    /// [`Principal`]. The connect comes first, as in 1.5.5 (whose client connected when it was
-    /// built), so a username the DN template refuses is refused after it (the order is kept).
+    /// [`Principal`]. The connect comes first, so a username the DN template refuses is refused
+    /// after it.
     /// Generic over [`LdapBackend`] so the reject paths are unit-testable: a non-zero user-bind result
     /// code, an empty or AMBIGUOUS (>1 match) search, and an over-long group list are all refused or
     /// capped here.
@@ -756,7 +754,7 @@ impl LdapModule {
         };
 
         // The credential check: BIND as the user with the presented password. Result code 49
-        // (invalidCredentials) is a credential rejection. OWNER RULING (non-49): a code naming a
+        // (invalidCredentials) is a credential rejection. For any other code: one naming a
         // server/session condition that fails every user alike (51 busy, 52 unavailable, ...:
         // [`is_outage`]) is a directory-side failure, an outage logged by `login_over`; every other
         // non-zero code (48, 50, 53, ...) refuses this credential, the same bad credential as a

@@ -23,8 +23,8 @@
 //! * a login with no host clock answers `LOGIN_OUTAGE` ([`LdapModule::login_over`]): every
 //!   directory operation is bounded on that clock, and none runs untimed.
 //!
-//! No call blocks: the Statement states no `MARK_BLOCKS` (BUSBAR-1.6.0.md THE DESIGN §5: no plugin
-//! opens a socket, dials, binds or does TLS; the plugin ABI: Ready or Pending(wake)).
+//! No call blocks: the Statement states no `MARK_BLOCKS` (no plugin opens a socket, dials, binds or does
+//! TLS; the plugin ABI: Ready or Pending(wake)).
 
 use std::collections::HashMap;
 use std::ffi::c_void;
@@ -83,11 +83,11 @@ const TAIL: AuthTail = {
 /// The need every login's stream is established on.
 pub const NEED: u32 = 0;
 
-/// THE ONE NEED: outbound, a raw byte stream over the host's `tcp` carrier (the plugin frames LDAP
+/// The one need: outbound, a raw byte stream over the host's `tcp` carrier (the plugin frames LDAP
 /// itself), under the `operator-infrastructure` egress class (directories: private, loopback and
-/// plaintext allowed; pinned; cloud metadata hosts refused; BUSBAR-1.6.0.md §5). The plugin names
+/// plaintext allowed; pinned; cloud metadata hosts refused). The plugin names
 /// the target per login (`host:port`, read off the `url` setting), so no `target_from`: the
-/// carrier's target is `host:port`, never an `ldap://` URL. No `trust_from`: as in 1.5.5 the module
+/// carrier's target is `host:port`, never an `ldap://` URL. No `trust_from`: the module
 /// refuses a `ca_cert_pem` setting, so the connector's own trust is the one used (a need whose
 /// `trust_from` names a setting the configuration leaves unset is not declared, so naming it would
 /// leave the module no stream at all). The timeout is the module's own, per operation (`timeout_secs`).
@@ -103,8 +103,7 @@ pub const NEEDS: &[Need] = &[{
 }];
 
 /// The settings keys whose values are secret references, resolved in this order into
-/// `OpenIn.secrets` (the spec's ruling: "LDAP: secret via OpenIn.secrets (1.5.5 literal accepted
-/// by host)").
+/// `OpenIn.secrets` (a literal value is accepted by the host).
 pub const SECRET_REFS: &[AbiStr] = &[abi_str("bind_service_password")];
 
 /// This plugin's Statement.
@@ -391,8 +390,7 @@ fn drive(
         }
         Poll::Ready(login) => {
             if run.conv.opened() {
-                // Best effort, as 1.5.5 dropped its connection: what the close answers changes
-                // nothing.
+                // Best effort: what the close answers changes nothing.
                 let _ = wire.serve(|c, s| c.close(s));
             }
             Poll::Ready(login)
