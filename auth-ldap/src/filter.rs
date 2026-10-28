@@ -1,9 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE SEARCH FILTER: an RFC 4515 string filter to its RFC 4511 BER `Filter`, as a pure function.
-//! The grammar is 1.5.5's (ldap3 0.11's `filter::parse`), alternative for alternative, so every
-//! filter 1.5.5 accepted encodes to the same bytes and every filter it refused is refused:
+//! The search filter: an RFC 4515 string filter to its RFC 4511 BER `Filter`, as a pure function.
+//! The grammar is ldap3's `filter::parse`, alternative for alternative:
 //!
 //! * a filter is `(` and, or, not or an item `)`, or a bare item;
 //! * an item is equality / presence / substrings (`attr=...`), `>=` `<=` `~=`, or an extensible
@@ -26,13 +25,13 @@ const PRESENT: u8 = 0x87;
 const APPROX: u8 = 0xa8;
 const EXTENSIBLE: u8 = 0xa9;
 
-/// The words 1.5.5 answered for a filter it could not parse.
+/// The words answered for a filter that does not parse.
 pub const PARSE_ERROR: &str = "filter parse error";
 
 /// `filter` as BER, or [`PARSE_ERROR`].
 ///
 /// # Errors
-/// The filter is not one 1.5.5 would parse.
+/// The filter does not parse.
 pub fn encode(filter: &str) -> Result<Vec<u8>, &'static str> {
     match filtexpr(filter.as_bytes()) {
         Some((ber, [])) => Ok(ber),

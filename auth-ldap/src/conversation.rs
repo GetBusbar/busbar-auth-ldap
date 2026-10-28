@@ -1,10 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! ONE LOGIN'S CONVERSATION WITH THE DIRECTORY, resumable: the codec's bytes ([`crate::codec`])
+//! One login's conversation with the directory, resumable: the codec's bytes ([`crate::codec`])
 //! over a byte stream someone else owns ([`Wire`]: in the plugin, the host connector's raw stream
-//! on the declared need; BUSBAR-1.6.0.md THE DESIGN §5, "No plugin opens a socket, dials, binds or
-//! does TLS").
+//! on the declared need; the plugin opens no socket, dials, binds or does TLS).
 //!
 //! A wire service may answer PENDING. The module's bind/search logic ([`crate::LdapModule`]) then
 //! stops, the op answers PENDING, and on the wake the logic runs again from the top. The
@@ -64,11 +63,10 @@ pub struct Endpoint {
 
 impl Endpoint {
     /// Read an `ldap://` or `ldaps://` URL (the port defaults to 389 and 636; userinfo, a path
-    /// and a query are ignored, as 1.5.5's client ignored them). A URL that names no host is
-    /// refused: 1.5.5 panicked on it (OWNER-SIGNED difference, 2026-09-28).
+    /// and a query are ignored). A URL that names no host is refused.
     ///
     /// # Errors
-    /// Another scheme (1.5.5's words), no host, or a bad port.
+    /// Another scheme, no host, or a bad port.
     pub fn parse(url: &str, start_tls: bool) -> Result<Self, String> {
         let url = url.trim();
         let (scheme, rest) = url
@@ -172,7 +170,7 @@ impl fmt::Debug for Doing {
 }
 
 /// What an operation that passed its deadline answers, after its operation's prefix (`bind: `, ...):
-/// 1.5.5's words for an ldap3 operation timeout (`LdapError::Timeout`, whose `Elapsed` reads
+/// The words for an operation timeout (as ldap3's `LdapError::Timeout`, whose `Elapsed` reads
 /// "deadline has elapsed").
 pub const TIMEOUT: &str = "timeout: deadline has elapsed";
 
@@ -509,7 +507,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
             SearchScope::Base => codec::SCOPE_BASE,
             SearchScope::Subtree => codec::SCOPE_SUBTREE,
         };
-        // A filter that does not parse fails before any byte is sent, in 1.5.5's words.
+        // A filter that does not parse fails before any byte is sent.
         if self.conv.doing.is_none() {
             codec::search(0, base, scope, filter, attrs).map_err(|e| Io::Failed(e.to_string()))?;
         }
@@ -540,7 +538,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                     return Ok(entries);
                 }
                 Reply::Done(r) => return self.fail(r.to_string()),
-                // 1.5.5 panicked reading a referral as an entry: fail closed instead.
+                // A referral is never read as an entry: fail closed.
                 Reply::Reference => {
                     return self
                         .fail("malformed reply: a search reference (referrals are not followed)")
