@@ -42,14 +42,13 @@ busbar-auth-ldap-plugin = { path = ".", features = ["dropped-in"] }
 # binary + an OpenLDAP service container, and SEED that directory over plaintext LDAP (ldap3, a
 # dev-only client: `sync` and no TLS feature, so no rustls 0.21 / ring 0.16 enters the lock; the
 # plugin itself speaks its own sans-IO codec).
-busbar-plugin-loader = { workspace = true, features = ["conformance"] }
+busbar-plugin-loader = { workspace = true }
+busbar-test-kit = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true, features = ["json", "blocking"] }
 ldap3 = { workspace = true }
 serde_json = { workspace = true }
-# THE SUITE'S HOST CONNECTOR (tests/support/conformance_host.rs, rendered by the fleet template for a
-# repo whose declares state network needs): busbar's connector and its TLS test kit, and the
-# framer the plugin's need names. Dev-only.
+# THE SUITE'S HOST (tests/support/conformance_host.rs, the test kit's stream form): busbar's
+# connector and its TLS test kit. No transport framer: the test kit's stream table serves the
+# plugin's plain `tcp` need. Dev-only.
 busbar-core-connector = { workspace = true }
-busbar-transport-tcp = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }

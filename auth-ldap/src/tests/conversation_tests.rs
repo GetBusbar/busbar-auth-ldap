@@ -895,7 +895,7 @@ fn a_failed_secure_is_an_outage_and_never_binds() {
 /// (its code and RFC 4511 name), never the password and never the DN.
 #[test]
 fn a_non_49_user_bind_is_a_bad_credential_unless_the_server_is_failing() {
-    use busbar_contract::testkit::WarnCapture;
+    use busbar_test_kit::warn_capture::WarnCapture;
     const PW: &str = "hunter2-s3cret";
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
     for rc in [48_u32, 50, 53, 32, 19, 999] {

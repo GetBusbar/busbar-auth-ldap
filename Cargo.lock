@@ -203,6 +203,7 @@ name = "busbar-auth-ldap"
 version = "1.6.0"
 dependencies = [
  "busbar-contract",
+ "busbar-test-kit",
  "serde",
  "serde_json",
  "tracing",
@@ -219,26 +220,29 @@ dependencies = [
  "busbar-contract",
  "busbar-core-connector",
  "busbar-plugin-loader",
- "busbar-transport-tcp",
+ "busbar-test-kit",
  "ldap3",
  "reqwest",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
 name = "busbar-contract"
 version = "1.6.0"
-source = "git+https://www.github.com/GetBusbar/busbar?rev=71b70e487bebe5ae2feb1fabf32d8906edf4ccad#71b70e487bebe5ae2feb1fabf32d8906edf4ccad"
+source = "git+https://github.com/GetBusbar/busbar?rev=e171ea95260a76ba3cd7156dab480fe4cae60747#e171ea95260a76ba3cd7156dab480fe4cae60747"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
+ "bytes",
  "futures",
+ "getrandom 0.3.4",
  "hex",
  "http",
  "idna",
  "indexmap",
  "memchr",
+ "num-bigint",
+ "ring",
  "serde",
  "serde_json",
  "serde_yaml_ng",
@@ -253,7 +257,7 @@ dependencies = [
 [[package]]
 name = "busbar-core-connector"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=71b70e487bebe5ae2feb1fabf32d8906edf4ccad#71b70e487bebe5ae2feb1fabf32d8906edf4ccad"
+source = "git+https://github.com/GetBusbar/busbar?rev=e171ea95260a76ba3cd7156dab480fe4cae60747#e171ea95260a76ba3cd7156dab480fe4cae60747"
 dependencies = [
  "arc-swap",
  "base64 0.22.1",
@@ -282,7 +286,7 @@ dependencies = [
 [[package]]
 name = "busbar-kernel"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=71b70e487bebe5ae2feb1fabf32d8906edf4ccad#71b70e487bebe5ae2feb1fabf32d8906edf4ccad"
+source = "git+https://github.com/GetBusbar/busbar?rev=e171ea95260a76ba3cd7156dab480fe4cae60747#e171ea95260a76ba3cd7156dab480fe4cae60747"
 dependencies = [
  "arc-swap",
  "async-trait",
@@ -295,9 +299,7 @@ dependencies = [
  "busbar-kernel-egress",
  "busbar-kernel-identity",
  "busbar-kernel-ledger",
- "busbar-kernel-scope",
  "busbar-kernel-wal",
- "busbar-plugin-loader",
  "bytes",
  "crc32fast",
  "ed25519-dalek",
@@ -308,8 +310,6 @@ dependencies = [
  "http-body",
  "http-body-util",
  "httpdate",
- "hyper",
- "hyper-util",
  "indexmap",
  "metrics",
  "metrics-util",
@@ -331,7 +331,7 @@ dependencies = [
 [[package]]
 name = "busbar-kernel-audit"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=71b70e487bebe5ae2feb1fabf32d8906edf4ccad#71b70e487bebe5ae2feb1fabf32d8906edf4ccad"
+source = "git+https://github.com/GetBusbar/busbar?rev=e171ea95260a76ba3cd7156dab480fe4cae60747#e171ea95260a76ba3cd7156dab480fe4cae60747"
 dependencies = [
  "busbar-contract",
  "ed25519-dalek",
@@ -342,26 +342,23 @@ dependencies = [
 [[package]]
 name = "busbar-kernel-breaker"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=71b70e487bebe5ae2feb1fabf32d8906edf4ccad#71b70e487bebe5ae2feb1fabf32d8906edf4ccad"
+source = "git+https://github.com/GetBusbar/busbar?rev=e171ea95260a76ba3cd7156dab480fe4cae60747#e171ea95260a76ba3cd7156dab480fe4cae60747"
 dependencies = [
  "busbar-contract",
- "httpdate",
 ]
 
 [[package]]
 name = "busbar-kernel-egress"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=71b70e487bebe5ae2feb1fabf32d8906edf4ccad#71b70e487bebe5ae2feb1fabf32d8906edf4ccad"
+source = "git+https://github.com/GetBusbar/busbar?rev=e171ea95260a76ba3cd7156dab480fe4cae60747#e171ea95260a76ba3cd7156dab480fe4cae60747"
 dependencies = [
  "busbar-contract",
- "bytes",
- "futures",
 ]
 
 [[package]]
 name = "busbar-kernel-identity"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=71b70e487bebe5ae2feb1fabf32d8906edf4ccad#71b70e487bebe5ae2feb1fabf32d8906edf4ccad"
+source = "git+https://github.com/GetBusbar/busbar?rev=e171ea95260a76ba3cd7156dab480fe4cae60747#e171ea95260a76ba3cd7156dab480fe4cae60747"
 dependencies = [
  "busbar-contract",
  "hex",
@@ -371,7 +368,7 @@ dependencies = [
 [[package]]
 name = "busbar-kernel-ledger"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=71b70e487bebe5ae2feb1fabf32d8906edf4ccad#71b70e487bebe5ae2feb1fabf32d8906edf4ccad"
+source = "git+https://github.com/GetBusbar/busbar?rev=e171ea95260a76ba3cd7156dab480fe4cae60747#e171ea95260a76ba3cd7156dab480fe4cae60747"
 dependencies = [
  "busbar-contract",
  "ring",
@@ -379,17 +376,9 @@ dependencies = [
 ]
 
 [[package]]
-name = "busbar-kernel-scope"
-version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=71b70e487bebe5ae2feb1fabf32d8906edf4ccad#71b70e487bebe5ae2feb1fabf32d8906edf4ccad"
-dependencies = [
- "busbar-contract",
-]
-
-[[package]]
 name = "busbar-kernel-wal"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=71b70e487bebe5ae2feb1fabf32d8906edf4ccad#71b70e487bebe5ae2feb1fabf32d8906edf4ccad"
+source = "git+https://github.com/GetBusbar/busbar?rev=e171ea95260a76ba3cd7156dab480fe4cae60747#e171ea95260a76ba3cd7156dab480fe4cae60747"
 dependencies = [
  "busbar-contract",
  "ring",
@@ -398,7 +387,7 @@ dependencies = [
 [[package]]
 name = "busbar-plugin-loader"
 version = "1.5.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=71b70e487bebe5ae2feb1fabf32d8906edf4ccad#71b70e487bebe5ae2feb1fabf32d8906edf4ccad"
+source = "git+https://github.com/GetBusbar/busbar?rev=e171ea95260a76ba3cd7156dab480fe4cae60747#e171ea95260a76ba3cd7156dab480fe4cae60747"
 dependencies = [
  "busbar-contract",
  "ed25519-dalek",
@@ -416,11 +405,20 @@ dependencies = [
 ]
 
 [[package]]
-name = "busbar-transport-tcp"
+name = "busbar-test-kit"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar-transport-tcp?rev=223ec3f02000de94089a1752635b9e206f7492e5#223ec3f02000de94089a1752635b9e206f7492e5"
+source = "git+https://github.com/GetBusbar/busbar?rev=e171ea95260a76ba3cd7156dab480fe4cae60747#e171ea95260a76ba3cd7156dab480fe4cae60747"
 dependencies = [
+ "base64 0.22.1",
  "busbar-contract",
+ "busbar-core-connector",
+ "busbar-plugin-loader",
+ "hex",
+ "ring",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -704,12 +702,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fnv"
-version = "1.0.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3f9eec918d3f24069decb9af1554cad7c880e2da24a9afd88aca000531ab82c1"
-
-[[package]]
 name = "foldhash"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -862,25 +854,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "h2"
-version = "0.4.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "839c0e8a181239723652be9062bb56ca5bf5f64011f73b623f6f4fc59086a228"
-dependencies = [
- "atomic-waker",
- "bytes",
- "fnv",
- "futures-core",
- "futures-sink",
- "http",
- "indexmap",
- "slab",
- "tokio",
- "tokio-util",
- "tracing",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -956,7 +929,6 @@ dependencies = [
  "bytes",
  "futures-channel",
  "futures-core",
- "h2",
  "http",
  "http-body",
  "httparse",
