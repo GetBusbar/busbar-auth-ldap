@@ -177,8 +177,10 @@ and for a loopback host.
   certificate until this lands.
 - **The service-account password is a secret reference.** The Statement
   names `bind_service_password` in its `secret_refs`, so the kernel
-  resolves it into `OpenIn.secrets`, which wins; a 1.5.5 literal in the
-  settings is still accepted. Either way the plugin holds it in a
+  resolves it into `OpenIn.secrets`. It must be a reference (for example
+  `bind_service_password: { env: LDAP_BIND_PASSWORD }`): from busbar
+  1.6.0 a literal there (accepted by 1.5.5) refuses boot, naming
+  `settings.bind_service_password` and never the value. The plugin holds it in a
   redacting newtype (`Debug` prints `[REDACTED]`; there is no `Display`;
   plaintext reachable only through an explicit `expose()`) whose buffer is
   wiped on drop. The submitted end-user password and the encoded BIND
