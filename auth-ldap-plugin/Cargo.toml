@@ -48,9 +48,7 @@ base64 = { workspace = true }
 reqwest = { workspace = true, features = ["json", "blocking"] }
 ldap3 = { workspace = true }
 serde_json = { workspace = true }
-# THE SUITE'S HOST CONNECTOR (tests/support/conformance_host.rs, rendered by the fleet template for a
-# repo whose declares state network needs): busbar's connector and its TLS test kit, and the
-# framer the plugin's need names. Dev-only.
+# THE SUITE'S HOST (tests/support/conformance_host.rs, the test kit's stream form): busbar's
+# connector and its TLS test kit. No transport framer: the test kit's stream table serves the
+# plugin's plain `tcp` need. Dev-only.
 busbar-core-connector = { workspace = true }
-busbar-transport-tcp = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
