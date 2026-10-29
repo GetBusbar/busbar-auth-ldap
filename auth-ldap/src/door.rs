@@ -42,11 +42,11 @@ use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
 use busbar_contract::abi::mechanism::call::{AbiStr, Outcome, Span, BLOB_ABSENT};
-use busbar_contract::abi::mechanism::door::{Rewrite, Statement, REWRITE_ALIAS};
+use busbar_contract::abi::mechanism::door::{Rewrite, Statement};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::with_tail;
 use busbar_contract::abi::sdk::conn::{Answer, Connector, Host};
-use busbar_contract::abi::sdk::door::{abi_str, statement, AbiIn, AbiOut, Slot};
+use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut, Slot};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 use busbar_contract::auth::Principal;
@@ -64,12 +64,7 @@ pub const ALIAS: &str = "ldap";
 const MAX_INFLIGHT: u32 = 64;
 
 /// The other name config may call it by.
-const REWRITES: &[Rewrite] = &[Rewrite {
-    class: REWRITE_ALIAS,
-    _reserved: 0,
-    from: abi_str(ALIAS),
-    to: AbiStr::ABSENT,
-}];
+const REWRITES: &[Rewrite] = &[alias(ALIAS)];
 
 /// The auth tail: the credential login alone. LDAP judges no bearer credential on the data plane,
 /// so it states no inbound family (`verify` is never called) and no fact about verify answers.
