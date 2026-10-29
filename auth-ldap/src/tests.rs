@@ -1246,7 +1246,7 @@ fn debug_of_the_config_never_prints_the_url_password() {
 
 mod logging {
     use super::*;
-    use busbar_contract::testkit::WarnCapture;
+    use busbar_test_kit::warn_capture::WarnCapture;
 
     /// Run `f` under an INFO-and-above capture: what it answered, and the capture.
     fn captured<T>(f: impl FnOnce() -> T) -> (T, WarnCapture) {

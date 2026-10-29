@@ -24,6 +24,6 @@ zeroize = { workspace = true }
 # THE DESIGN §5; R5/Q82).
 
 [dev-dependencies]
-# The contract's in-memory log double (WarnCapture), the test-seal edge a plugin's own tests take.
-busbar-contract = { workspace = true, features = ["test-seal"] }
+# The test kit's in-memory log double (`busbar_test_kit::warn_capture::WarnCapture`).
+busbar-test-kit = { workspace = true }
 serde_json = { workspace = true }
