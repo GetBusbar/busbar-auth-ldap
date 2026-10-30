@@ -16,14 +16,17 @@ busbar-contract = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }
-# The bind passwords (the end user's and the service account's) and the encoded BIND request that
-# carries one are held in buffers wiped on drop.
+# The bytes a credential is captured from (a resolved secret, a submitted password) are moved into
+# the chip's `Cred` in a buffer wiped on drop.
 zeroize = { workspace = true }
 # No LDAP client crate and no socket or TLS stack: the module speaks LDAP through its own sans-IO
 # codec (src/ber.rs, src/filter.rs, src/codec.rs) over the host connector's stream (BUSBAR-1.6.0.md
 # THE DESIGN §5; R5/Q82).
 
 [dev-dependencies]
+# The chip's dev-only test support (`abi::sdk::test_support::chip`): a test's own wire writes the
+# sealed BIND it is handed.
+busbar-contract = { workspace = true, features = ["test-seal"] }
 # The test kit's in-memory log double (`busbar_test_kit::warn_capture::WarnCapture`).
 busbar-test-kit = { workspace = true }
 serde_json = { workspace = true }

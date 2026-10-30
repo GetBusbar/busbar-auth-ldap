@@ -12,6 +12,7 @@ use std::task::Poll;
 
 use super::{Conversation, Endpoint, Security, Wire};
 use crate::{ber, codec, LdapConfig, LdapModule, Login};
+use busbar_contract::abi::sdk::cred::SealedWrite;
 
 /// What the scripted directory saw, in order.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,6 +102,10 @@ impl Wire for Directory {
         Poll::Ready(Ok(n))
     }
 
+    fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>> {
+        busbar_contract::abi::sdk::test_support::chip::drive_sealed(w, |b| self.write(b))
+    }
+
     fn read(&mut self, buf: &mut [u8]) -> Poll<Result<usize, String>> {
         if self.wait() {
             return Poll::Pending;
@@ -186,7 +191,7 @@ fn module(url: &str, extra: serde_json::Value) -> LdapModule {
 fn login(m: &LdapModule, dir: &mut Directory, password: &str) -> (Login, u32) {
     let mut conv = Conversation::new();
     for entries in 1..=200 {
-        if let Poll::Ready(l) = m.login_over(&mut conv, dir, Some("alice"), Some(password), Some(0))
+        if let Poll::Ready(l) = m.login_text(&mut conv, dir, Some("alice"), Some(password), Some(0))
         {
             return (l, entries);
         }
@@ -196,7 +201,7 @@ fn login(m: &LdapModule, dir: &mut Directory, password: &str) -> (Login, u32) {
 
 fn direct_bytes(group_attr: &str) -> Vec<u8> {
     [
-        codec::bind(1, ALICE, "pw").to_vec(),
+        chip_bind(1, ALICE, "pw").to_vec(),
         codec::search(
             2,
             ALICE,
@@ -299,7 +304,7 @@ fn start_tls_sends_the_extended_request_then_secures() {
     );
     let want = [
         codec::start_tls(1),
-        codec::bind(2, ALICE, "pw").to_vec(),
+        chip_bind(2, ALICE, "pw").to_vec(),
         codec::search(
             3,
             ALICE,
@@ -376,7 +381,7 @@ fn search_then_bind_speaks_in_1_5_5s_order() {
     };
     assert_eq!(p.roles, vec!["admins".to_string()]);
     let want = [
-        codec::bind(1, "cn=svc,dc=corp,dc=example", "svc-pw").to_vec(),
+        chip_bind(1, "cn=svc,dc=corp,dc=example", "svc-pw").to_vec(),
         codec::search(
             2,
             "dc=corp,dc=example",
@@ -385,7 +390,7 @@ fn search_then_bind_speaks_in_1_5_5s_order() {
             &["dn"],
         )
         .unwrap(),
-        codec::bind(3, ALICE, "pw").to_vec(),
+        chip_bind(3, ALICE, "pw").to_vec(),
         codec::search(
             4,
             ALICE,
@@ -417,7 +422,8 @@ fn a_search_keeps_at_most_two_entries() {
     let mut conv = Conversation::new();
     let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, None, 10);
     over.connect().expect("connects");
-    over.simple_bind("cn=svc,dc=x", "pw").expect("binds");
+    over.simple_bind("cn=svc,dc=x", &crate::tests::cred("pw"))
+        .expect("binds");
     let got = over
         .search("dc=x", SearchScope::Subtree, "(uid=alice)", &["dn"])
         .expect("searches");
@@ -569,12 +575,12 @@ fn a_directory_that_never_answers_is_an_outage_after_the_timeout() {
     let mut conv = Conversation::new();
     let start = 5_000_000_000_u64;
     assert_eq!(
-        m.login_over(&mut conv, &mut Mute, Some("alice"), Some("pw"), Some(start)),
+        m.login_text(&mut conv, &mut Mute, Some("alice"), Some("pw"), Some(start)),
         Poll::Pending
     );
     assert_eq!(conv.deadline_ns(), Some(start + 2_000_000_000));
     assert_eq!(
-        m.login_over(
+        m.login_text(
             &mut conv,
             &mut Mute,
             Some("alice"),
@@ -585,7 +591,7 @@ fn a_directory_that_never_answers_is_an_outage_after_the_timeout() {
         "not before the deadline"
     );
     assert_eq!(
-        m.login_over(
+        m.login_text(
             &mut conv,
             &mut Mute,
             Some("alice"),
@@ -617,6 +623,10 @@ impl Wire for Slow {
     fn write(&mut self, bytes: &[u8]) -> Poll<Result<usize, String>> {
         self.dir.write(bytes)
     }
+    fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>> {
+        busbar_contract::abi::sdk::test_support::chip::drive_sealed(w, |b| self.write(b))
+    }
+
     fn read(&mut self, buf: &mut [u8]) -> Poll<Result<usize, String>> {
         self.owed = !self.owed;
         if self.owed {
@@ -646,7 +656,7 @@ fn the_timeout_bounds_each_operation_not_the_whole_login() {
     let mut now = 1_000_000_000_u64;
     let mut got = None;
     for _ in 0..20 {
-        match m.login_over(&mut conv, &mut slow, Some("alice"), Some("pw"), Some(now)) {
+        match m.login_text(&mut conv, &mut slow, Some("alice"), Some("pw"), Some(now)) {
             Poll::Ready(l) => {
                 got = Some(l);
                 break;
@@ -671,7 +681,7 @@ fn a_username_the_dn_template_refuses_is_refused_after_the_dial() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
     let mut dir = Directory::new(Vec::new());
     let mut conv = Conversation::new();
-    let got = m.login_over(&mut conv, &mut dir, Some("admin,dc=x"), Some("pw"), Some(0));
+    let got = m.login_text(&mut conv, &mut dir, Some("admin,dc=x"), Some("pw"), Some(0));
     assert_eq!(got, Poll::Ready(Login::BadCredential));
     assert_eq!(dir.seen, vec![Seen::Establish("127.0.0.1:389".into())]);
     assert!(dir.written.is_empty(), "no bind is sent for it");
@@ -680,7 +690,7 @@ fn a_username_the_dn_template_refuses_is_refused_after_the_dial() {
     let mut dir = Directory::new(Vec::new());
     dir.refuse_establish = Some("the connection was refused".into());
     let mut conv = Conversation::new();
-    let got = m.login_over(&mut conv, &mut dir, Some("alice"), Some("pw"), Some(0));
+    let got = m.login_text(&mut conv, &mut dir, Some("alice"), Some("pw"), Some(0));
     assert_eq!(got, Poll::Ready(Login::Outage));
     assert!(!conv.opened());
 }
@@ -698,6 +708,10 @@ impl Wire for Mute {
     fn write(&mut self, b: &[u8]) -> Poll<Result<usize, String>> {
         Poll::Ready(Ok(b.len()))
     }
+    fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>> {
+        busbar_contract::abi::sdk::test_support::chip::drive_sealed(w, |b| self.write(b))
+    }
+
     fn read(&mut self, _: &mut [u8]) -> Poll<Result<usize, String>> {
         Poll::Pending
     }
@@ -720,7 +734,7 @@ fn a_timeout_reads_in_1_5_5s_words() {
         10,
     );
     assert!(matches!(
-        m.bind_and_identify(&mut over, "alice", "pw"),
+        m.bind_and_identify_on(&mut over, "alice", "pw"),
         Err(crate::BindError::Pending)
     ));
     let mut over = super::Over::new(
@@ -731,7 +745,7 @@ fn a_timeout_reads_in_1_5_5s_words() {
         Some(late),
         10,
     );
-    match m.bind_and_identify(&mut over, "alice", "pw") {
+    match m.bind_and_identify_on(&mut over, "alice", "pw") {
         Err(crate::BindError::Directory(e)) => assert_eq!(e, "bind: timeout: deadline has elapsed"),
         other => panic!("{other:?}"),
     }
@@ -747,6 +761,10 @@ fn a_timeout_reads_in_1_5_5s_words() {
         fn write(&mut self, _: &[u8]) -> Poll<Result<usize, String>> {
             Poll::Pending
         }
+        fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>> {
+            busbar_contract::abi::sdk::test_support::chip::drive_sealed(w, |b| self.write(b))
+        }
+
         fn read(&mut self, _: &mut [u8]) -> Poll<Result<usize, String>> {
             Poll::Pending
         }
@@ -762,7 +780,7 @@ fn a_timeout_reads_in_1_5_5s_words() {
         10,
     );
     assert!(matches!(
-        m.bind_and_identify(&mut over, "alice", "pw"),
+        m.bind_and_identify_on(&mut over, "alice", "pw"),
         Err(crate::BindError::Pending)
     ));
     let mut over = super::Over::new(
@@ -773,7 +791,7 @@ fn a_timeout_reads_in_1_5_5s_words() {
         Some(late),
         10,
     );
-    match m.bind_and_identify(&mut over, "alice", "pw") {
+    match m.bind_and_identify_on(&mut over, "alice", "pw") {
         Err(crate::BindError::Directory(e)) => {
             assert_eq!(e, "connect ldap://127.0.0.1: timeout: deadline has elapsed");
         }
@@ -804,13 +822,13 @@ fn the_resolved_service_secret_reaches_only_the_bind() {
         let mut dir = Directory::new(replies);
         let mut conv = Conversation::new();
         let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, None, 10);
-        match m.bind_and_identify(&mut over, "alice", "pw") {
+        match m.bind_and_identify_on(&mut over, "alice", "pw") {
             Err(crate::BindError::Directory(e)) => assert!(!e.contains(SECRET), "{e}"),
             other => panic!("{other:?}"),
         }
         assert_eq!(
             dir.written,
-            codec::bind(1, "cn=svc,dc=x", SECRET).to_vec(),
+            chip_bind(1, "cn=svc,dc=x", SECRET).to_vec(),
             "the bind sends it"
         );
     }
@@ -826,11 +844,8 @@ fn a_conversation_in_flight_never_debug_prints_the_password() {
     let mut conv = Conversation::new();
     let mut held = false;
     for _ in 0..200 {
-        let answer = m.login_over(&mut conv, &mut dir, Some("alice"), Some(PW), Some(0));
-        held |= conv
-            .doing
-            .as_ref()
-            .is_some_and(|d| d.out.windows(PW.len()).any(|w| w == PW.as_bytes()));
+        let answer = m.login_text(&mut conv, &mut dir, Some("alice"), Some(PW), Some(0));
+        held |= conv.doing.as_ref().is_some_and(|d| d.sealed.is_some());
         let shown = format!("{conv:?}");
         assert!(!shown.contains(PW), "the password is in: {shown}");
         // `Debug` of a byte slice prints its bytes as decimals: the password's, too, is a leak.
@@ -931,23 +946,35 @@ fn a_non_49_user_bind_is_a_bad_credential_unless_the_server_is_failing() {
     }
 }
 
-/// The BIND request in flight is held in a buffer wiped on drop.
+/// The BIND in flight is the chip's sealed message: the plugin holds no password bytes of its own.
 #[test]
-fn the_request_in_flight_is_wiped_on_drop() {
-    fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+fn the_bind_in_flight_is_the_chips_sealed_message() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
     let mut dir = Directory::new(vec![bind_response(1, 0), done(2, 0)]).pending();
     let mut conv = Conversation::new();
     let mut held = false;
     for _ in 0..200 {
-        let answer = m.login_over(&mut conv, &mut dir, Some("alice"), Some("pw"), Some(0));
-        if let Some(d) = conv.doing.as_ref() {
-            wipes(&d.out);
+        let answer = m.login_text(&mut conv, &mut dir, Some("alice"), Some("pw"), Some(0));
+        if let Some(d) = conv.doing.as_ref().filter(|d| d.sealed.is_some()) {
+            assert!(d.out.is_empty(), "a BIND carries no public bytes");
             held = true;
         }
         if answer.is_ready() {
             break;
         }
     }
-    assert!(held, "a request was held in flight");
+    assert!(held, "a BIND was held in flight");
+}
+
+/// The chip's BIND message for `dn` with `password`, as the wire carries it.
+fn chip_bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
+    let mut w = SealedWrite::message(crate::tests::cred(password).ldap_simple_bind(id, dn));
+    let mut bytes = Vec::new();
+    let sent: Poll<Result<(), ()>> =
+        busbar_contract::abi::sdk::test_support::chip::drive_sealed(&mut w, |b| {
+            bytes.extend_from_slice(b);
+            Poll::Ready(Ok(b.len()))
+        });
+    assert!(sent.is_ready(), "the BIND is written whole");
+    bytes
 }

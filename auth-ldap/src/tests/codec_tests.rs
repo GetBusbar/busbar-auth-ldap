@@ -8,8 +8,7 @@
 use std::collections::HashMap;
 
 use super::{
-    bind, decode, search, start_tls, unbind, Entry, LdapResult, Message, Reply, SCOPE_BASE,
-    SCOPE_SUBTREE,
+    decode, search, start_tls, unbind, Entry, LdapResult, Message, Reply, SCOPE_BASE, SCOPE_SUBTREE,
 };
 use crate::ber::{self, BerError};
 
@@ -320,4 +319,20 @@ fn a_reply_past_the_cap_is_refused_from_its_header() {
     let len = (ber::INBOUND_CAP as u32).to_be_bytes();
     let head = [&[0x30, 0x84][..], &len[..]].concat();
     assert!(matches!(ber::frame(&head), Err(BerError::TooLarge(_))));
+}
+
+/// The chip's BIND message (`Cred::ldap_simple_bind`), as the wire carries it: the bytes above are
+/// 1.5.5's, so the chip's BIND is held to them.
+fn bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
+    let mut w = busbar_contract::abi::sdk::cred::SealedWrite::message(
+        crate::tests::cred(password).ldap_simple_bind(id, dn),
+    );
+    let mut bytes = Vec::new();
+    let sent: std::task::Poll<Result<(), ()>> =
+        busbar_contract::abi::sdk::test_support::chip::drive_sealed(&mut w, |b| {
+            bytes.extend_from_slice(b);
+            std::task::Poll::Ready(Ok(b.len()))
+        });
+    assert!(sent.is_ready(), "the BIND is written whole");
+    bytes
 }

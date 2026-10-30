@@ -311,6 +311,12 @@ impl busbar_auth_ldap::conversation::Wire for TestStream {
         let s = self.0.as_mut().expect("established");
         std::task::Poll::Ready(s.read(buf).map_err(|e| e.to_string()))
     }
+    fn write_sealed(
+        &mut self,
+        w: &mut busbar_contract::abi::sdk::cred::SealedWrite,
+    ) -> std::task::Poll<Result<(), String>> {
+        busbar_contract::abi::sdk::test_support::chip::drive_sealed(w, |b| self.write(b))
+    }
 }
 
 /// Run one credential login on the library module directly (no busbar boot): the module's codec
@@ -326,7 +332,9 @@ fn live_login(settings: serde_json::Value, username: &str, password: &str) -> Lo
         &mut conv,
         &mut stream,
         Some(username),
-        Some(password),
+        Some(&busbar_contract::abi::sdk::test_support::chip::cred(
+            password,
+        )),
         Some(0),
     ) {
         std::task::Poll::Ready(login) => login,

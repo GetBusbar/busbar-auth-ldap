@@ -180,11 +180,13 @@ and for a loopback host.
   resolves it into `OpenIn.secrets`. It must be a reference (for example
   `bind_service_password: { env: LDAP_BIND_PASSWORD }`): from busbar
   1.6.0 a literal there (accepted by 1.5.5) refuses boot, naming
-  `settings.bind_service_password` and never the value. The plugin holds it in a
-  redacting newtype (`Debug` prints `[REDACTED]`; there is no `Display`;
-  plaintext reachable only through an explicit `expose()`) whose buffer is
-  wiped on drop. The submitted end-user password and the encoded BIND
-  request are held in wiped buffers too. Because the password is resolved
+  `settings.bind_service_password` and never the value. The plugin holds it, and
+  the submitted end-user password, as the SDK chip's credential
+  (`abi::sdk::cred::Cred`: no getter, no `Debug`, no `Display`, wiped on
+  drop). Every BIND is the chip's sealed message
+  (`Cred::ldap_simple_bind`), written to the host's stream without the
+  plugin reading it; for an `ldaps://` URL or `start_tls` it goes out
+  only on a stream the host connector reports secured. Because the password is resolved
   only at `open`, `validate` runs the settings-only checks: a
   search-then-bind config with no literal password validates, and `open`
   refuses it if no password resolves (an explicit empty literal is
