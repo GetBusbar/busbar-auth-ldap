@@ -11,6 +11,7 @@ use crate::{
     principal_id, BindError, DirEntry, Io, LdapBackend, LdapConfig, LdapModule, Login, RoleFrom,
     SearchScope,
 };
+use busbar_contract::abi::sdk::cred::{Cred, SealedWrite};
 use std::collections::HashMap;
 
 impl LdapModule {
@@ -26,8 +27,53 @@ impl LdapModule {
         username: &str,
         password: &str,
     ) -> Result<busbar_contract::auth::Principal, BindError> {
-        self.bind_and_identify(ldap, username, password)
+        self.bind_and_identify(ldap, username, &cred(password))
     }
+
+    /// [`LdapModule::login_over`] with the submitted password as text, held as the door holds it.
+    pub(crate) fn login_text<W: crate::conversation::Wire>(
+        &self,
+        conv: &mut crate::conversation::Conversation,
+        wire: &mut W,
+        username: Option<&str>,
+        password: Option<&str>,
+        now_ns: Option<u64>,
+    ) -> std::task::Poll<Login> {
+        let password = password.map(cred);
+        self.login_over(conv, wire, username, password.as_ref(), now_ns)
+    }
+}
+
+/// A credential holding `text`, as the door holds a submitted password.
+pub(crate) fn cred(text: &str) -> Cred {
+    busbar_contract::abi::sdk::test_support::chip::cred(text)
+}
+
+/// The text a credential carries, read back off the chip's BIND message as the wire takes it.
+pub(crate) fn cred_text(c: &Cred) -> String {
+    let mut w = SealedWrite::message(c.ldap_simple_bind(1, ""));
+    let mut bytes = Vec::new();
+    let sent: std::task::Poll<Result<(), ()>> =
+        busbar_contract::abi::sdk::test_support::chip::drive_sealed(&mut w, |b| {
+            bytes.extend_from_slice(b);
+            std::task::Poll::Ready(Ok(b.len()))
+        });
+    assert!(sent.is_ready(), "the BIND is written whole");
+    // `... 04 00 80 <len> <password>`: the empty DN, then the simple credential, last.
+    let at = bytes
+        .windows(3)
+        .position(|w| w == [0x04, 0x00, 0x80])
+        .expect("a simple BIND")
+        + 3;
+    let (len, from) = match bytes[at] {
+        n if n < 0x80 => (usize::from(n), at + 1),
+        0x81 => (usize::from(bytes[at + 1]), at + 2),
+        _ => (
+            usize::from(bytes[at + 1]) << 8 | usize::from(bytes[at + 2]),
+            at + 3,
+        ),
+    };
+    String::from_utf8(bytes[from..from + len].to_vec()).expect("a test password is text")
 }
 
 fn base_cfg() -> LdapConfig {
@@ -283,15 +329,14 @@ fn insecure_transport_check_does_not_panic_on_multibyte_url() {
     );
 }
 
-/// `ca_cert_pem` is documented but never wired into TLS. `new()` must FAIL CLOSED rather
-/// than accept-and-ignore it (which would silently fall back to system roots).
+/// `ca_cert_pem` must hold a certificate: a fragment is refused at boot, never accepted and ignored.
 #[test]
-fn new_rejects_ca_cert_pem() {
+fn new_rejects_a_ca_cert_pem_with_no_certificate() {
     let mut cfg = base_cfg();
     cfg.ca_cert_pem = Some("-----BEGIN CERTIFICATE-----\n...".to_string());
     assert!(
         LdapModule::new(cfg).is_err(),
-        "an unsupported ca_cert_pem must be rejected, not silently ignored"
+        "a ca_cert_pem holding no certificate must be rejected, not silently ignored"
     );
 }
 
@@ -483,6 +528,9 @@ impl crate::conversation::Wire for Untouched {
     fn read(&mut self, _: &mut [u8]) -> std::task::Poll<Result<usize, String>> {
         panic!("a refused credential never reaches the wire")
     }
+    fn write_sealed(&mut self, _: &mut SealedWrite) -> std::task::Poll<Result<(), String>> {
+        panic!("a refused credential never reaches the wire")
+    }
 }
 
 /// `login_over` refuses absent credentials and an empty (anonymous-bind) password without ever
@@ -492,7 +540,7 @@ fn login_refuses_missing_or_empty_credentials() {
     let m = LdapModule::new(base_cfg()).unwrap();
     let login = |u: Option<&str>, p: Option<&str>| {
         let mut conv = crate::conversation::Conversation::new();
-        m.login_over(&mut conv, &mut Untouched, u, p, None)
+        m.login_text(&mut conv, &mut Untouched, u, p, None)
     };
     use std::task::Poll::Ready;
     assert_eq!(login(None, None), Ready(Login::BadCredential));
@@ -536,12 +584,8 @@ struct FakeLdap {
     group_attr: String,
     /// Every bind DN attempted, in order.
     binds: Vec<String>,
-    /// Every search filter the module actually sent, in order.
-    ///
-    /// The fake used to discard the filter argument, which meant the RFC 4515 escaping was tested
-    /// only as a pure function and never AS APPLIED — deleting the `escape_filter` call at the call
-    /// site left every test green while opening LDAP filter injection. See
-    /// `the_user_search_filter_is_escaped_as_applied_not_just_in_isolation`.
+    /// Every search filter the module actually sent, in order, so the RFC 4515 escaping is tested
+    /// AS APPLIED (`the_user_search_filter_is_escaped_as_applied_not_just_in_isolation`).
     filters: Vec<String>,
     /// Every bind attempted as `(dn, password)`, in order.
     ///
@@ -564,10 +608,15 @@ struct FakeLdap {
     subtree_err: bool,
     /// Inject a TRANSPORT failure (`Err`) from the Base (group read) search.
     base_err: bool,
+    /// The Base (group read) search answers no entry at all (an ACL hiding the bound user's own
+    /// entry).
+    base_empty: bool,
 }
 
 impl LdapBackend for FakeLdap {
-    fn simple_bind(&mut self, dn: &str, password: &str) -> Result<u32, Io> {
+    fn simple_bind(&mut self, dn: &str, password: &Cred) -> Result<u32, Io> {
+        let password = cred_text(password);
+        let password = password.as_str();
         self.binds.push(dn.to_string());
         self.bind_pairs.push((dn.to_string(), password.to_string()));
         if self.bind_err_on.as_deref() == Some(dn) {
@@ -610,6 +659,9 @@ impl LdapBackend for FakeLdap {
             SearchScope::Base => {
                 if self.base_err {
                     return Err("transport failure on group read".to_string().into());
+                }
+                if self.base_empty {
+                    return Ok(Vec::new());
                 }
                 let mut attrs = HashMap::new();
                 if !self.group_values.is_empty() {
@@ -882,8 +934,8 @@ fn group_values_are_capped() {
 }
 
 // ── every Directory→Reject branch actually rejects ───────────────────────────────────────────────
-// The fake now injects transport errors, so each operational-failure branch is exercised and proven
-// to yield `Directory` (which `login` answers as `Outage`) — never `Identify`.
+// The fake injects transport errors, so each operational-failure branch yields `Directory` (which
+// `login` answers as `Outage`), never `Identify`.
 
 /// A transport failure on the SERVICE bind is Directory→Reject.
 #[test]
@@ -1017,12 +1069,9 @@ fn unicode_username_casing_yields_same_principal_id() {
 
 /// On the search-then-bind path, the USER bind must present the SUBMITTED password.
 ///
-/// This is the sharpest failure this module could have and it was untested. The service account
-/// binds first, to find the user's entry; if the second bind reused the SERVICE password instead of
-/// the end user's, every bind would succeed for anyone who merely exists in the directory — a full
-/// authentication bypass, with the correct DN, the correct groups, and a completely normal-looking
-/// principal coming back. The old fake recorded only bind DNs, so that substitution was invisible to
-/// every existing test: they all still passed.
+/// The service account binds first, to find the user's entry; if the second bind reused the
+/// SERVICE password instead of the end user's, every bind would succeed for anyone who merely exists
+/// in the directory: a full authentication bypass with a normal-looking principal.
 ///
 /// Asserts the ORDER and the CREDENTIALS of both binds, so neither "the service bind was skipped"
 /// nor "the user bind used the wrong secret" can slip through.
@@ -1109,7 +1158,7 @@ fn the_user_search_filter_is_escaped_as_applied_not_just_in_isolation() {
     }
 }
 
-// ── Credential-echo canaries (CREDENTIAL-LOCKDOWN H5) ────────────────────────────────────────────
+// ── Credential-echo canaries ────────────────────────────────────────────
 
 const CANARY: &str = "CANARYa6d215";
 
@@ -1167,7 +1216,7 @@ impl LdapBackend for Unreachable {
     fn connect(&mut self) -> Result<(), Io> {
         Err(Io::Failed("connection refused".to_string()))
     }
-    fn simple_bind(&mut self, _: &str, _: &str) -> Result<u32, Io> {
+    fn simple_bind(&mut self, _: &str, _: &Cred) -> Result<u32, Io> {
         unreachable!("no bind without a connection")
     }
     fn search(
@@ -1184,7 +1233,7 @@ impl LdapBackend for Unreachable {
     }
 }
 
-/// H5: the plaintext-transport refusal quoted the URL with its userinfo (`{:?}` of it).
+/// The plaintext-transport refusal never carries the URL's userinfo.
 #[test]
 fn the_plaintext_refusal_never_quotes_the_url_password() {
     let url = format!("ldap://svc:{CANARY}@ad.corp.example:389");
@@ -1192,10 +1241,10 @@ fn the_plaintext_refusal_never_quotes_the_url_password() {
         panic!("plaintext is refused");
     };
     assert!(!e.contains(CANARY), "the refusal carried the password: {e}");
-    assert!(e.contains("ad.corp.example:389"), "the host is kept: {e}");
+    assert!(e.starts_with("settings.url: "), "the key is named: {e}");
 }
 
-/// H5: `allow_insecure_transport` logged `url = %cfg.url` with its userinfo, on every boot.
+/// The `allow_insecure_transport` warning never logs the URL's userinfo.
 #[test]
 fn the_insecure_transport_warning_never_logs_the_url_password() {
     let url = format!("ldap://svc:{CANARY}@ad.corp.example:389");
@@ -1215,14 +1264,14 @@ fn the_insecure_transport_warning_never_logs_the_url_password() {
     );
 }
 
-/// H5: a failed connect said `connect {url}` with the userinfo, into the logged directory failure.
+/// A failed connect's logged directory failure never carries the URL's userinfo.
 #[test]
 fn a_connect_failure_never_carries_the_url_password() {
     let url = format!("ldaps://svc:{CANARY}@ad.corp.example:636");
     let Ok(m) = LdapModule::new(userinfo_cfg(&url, false)) else {
         panic!("ldaps opens");
     };
-    match m.bind_and_identify(&mut Unreachable, "alice", "pw") {
+    match m.bind_and_identify_on(&mut Unreachable, "alice", "pw") {
         Err(BindError::Directory(e)) => {
             assert!(!e.contains(CANARY), "the failure carried the password: {e}");
             assert!(e.starts_with("connect "), "1.5.5's prefix is kept: {e}");
@@ -1275,6 +1324,54 @@ mod logging {
         assert!(!cap.contains("ghost"), "{:?}", cap.messages());
     }
 
+    /// LDO D10: the bound user's own entry read back as NO entry (an ACL hides it) is not silent:
+    /// the login still answers the identity with no roles, and warns that the groups were unread.
+    #[test]
+    fn a_group_read_with_no_entry_is_logged_at_warn() {
+        let m = LdapModule::new(base_cfg()).unwrap();
+        let mut fake = FakeLdap {
+            group_attr: "memberOf".to_string(),
+            base_empty: true,
+            ..Default::default()
+        };
+        let cap = WarnCapture::default();
+        let r = tracing::subscriber::with_default(cap.clone(), || {
+            m.bind_and_identify_on(&mut fake, "alice", "pw-s3cret")
+        });
+        let p = r.expect("the bind identifies");
+        assert!(p.roles.is_empty());
+        assert!(
+            cap.contains("group read returned no entry"),
+            "{:?}",
+            cap.messages()
+        );
+        assert!(cap.contains("module=ldap"), "{:?}", cap.messages());
+        assert!(
+            !cap.contains("alice"),
+            "the DN leaked: {:?}",
+            cap.messages()
+        );
+    }
+
+    /// An ambiguous user search is a refusal: logged once at info, nothing at warn.
+    #[test]
+    fn an_ambiguous_search_is_logged_at_info() {
+        let m = LdapModule::new(search_cfg()).unwrap();
+        let fake = || FakeLdap {
+            search_entries: vec![entry("uid=a,dc=x"), entry("uid=b,dc=x")],
+            ..Default::default()
+        };
+        let (r, cap) = captured(|| m.bind_and_identify_on(&mut fake(), "alice", "pw-s3cret"));
+        assert!(matches!(r, Err(BindError::InvalidCredentials)), "{r:?}");
+        assert_eq!(cap.count("ambiguous"), 1, "{:?}", cap.messages());
+        let warn = WarnCapture::default();
+        tracing::subscriber::with_default(warn.clone(), || {
+            m.bind_and_identify_on(&mut fake(), "alice", "pw-s3cret")
+        })
+        .ok();
+        assert!(warn.messages().is_empty(), "{:?}", warn.messages());
+    }
+
     /// A search that resolves to an empty DN is refused before any bind, and says so.
     #[test]
     fn an_empty_dn_is_logged() {
@@ -1316,7 +1413,7 @@ mod logging {
         let m = LdapModule::new(base_cfg()).unwrap();
         let login = |u: Option<&str>, p: Option<&str>| {
             let mut conv = crate::conversation::Conversation::new();
-            m.login_over(&mut conv, &mut Untouched, u, p, Some(0))
+            m.login_text(&mut conv, &mut Untouched, u, p, Some(0))
         };
         let (r, cap) = captured(|| login(Some("alice"), None));
         assert_eq!(r, std::task::Poll::Ready(Login::BadCredential));
@@ -1348,7 +1445,7 @@ mod logging {
         let cap = WarnCapture::default();
         let got = tracing::subscriber::with_default(cap.clone(), || {
             let mut conv = crate::conversation::Conversation::new();
-            m.login_over(&mut conv, &mut Untouched, Some("alice"), Some("pw"), None)
+            m.login_text(&mut conv, &mut Untouched, Some("alice"), Some("pw"), None)
         });
         assert_eq!(got, std::task::Poll::Ready(Login::Outage));
         assert!(
@@ -1359,19 +1456,10 @@ mod logging {
     }
 }
 
-/// Every credential holder wipes on drop.
-fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
-
+/// The service password is the chip's credential, holding exactly the configured text.
 #[test]
-fn the_service_password_and_the_bind_request_are_wiped_on_drop() {
+fn the_service_password_is_held_by_the_chip() {
     let m = LdapModule::new(search_cfg()).unwrap();
     let pw = m.cfg.bind_service_password.as_ref().expect("set");
-    wipes(pw);
-    let req = crate::codec::bind(1, "cn=svc,dc=x", "s3cret");
-    wipes(&req);
-    assert_eq!(
-        &req[..],
-        &crate::codec::bind(1, "cn=svc,dc=x", "s3cret")[..],
-        "deterministic"
-    );
+    assert_eq!(cred_text(pw), "svc-secret");
 }
