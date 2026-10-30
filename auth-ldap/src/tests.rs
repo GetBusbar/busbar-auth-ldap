@@ -584,12 +584,8 @@ struct FakeLdap {
     group_attr: String,
     /// Every bind DN attempted, in order.
     binds: Vec<String>,
-    /// Every search filter the module actually sent, in order.
-    ///
-    /// The fake used to discard the filter argument, which meant the RFC 4515 escaping was tested
-    /// only as a pure function and never AS APPLIED — deleting the `escape_filter` call at the call
-    /// site left every test green while opening LDAP filter injection. See
-    /// `the_user_search_filter_is_escaped_as_applied_not_just_in_isolation`.
+    /// Every search filter the module actually sent, in order, so the RFC 4515 escaping is tested
+    /// AS APPLIED (`the_user_search_filter_is_escaped_as_applied_not_just_in_isolation`).
     filters: Vec<String>,
     /// Every bind attempted as `(dn, password)`, in order.
     ///
@@ -938,8 +934,8 @@ fn group_values_are_capped() {
 }
 
 // ── every Directory→Reject branch actually rejects ───────────────────────────────────────────────
-// The fake now injects transport errors, so each operational-failure branch is exercised and proven
-// to yield `Directory` (which `login` answers as `Outage`) — never `Identify`.
+// The fake injects transport errors, so each operational-failure branch yields `Directory` (which
+// `login` answers as `Outage`), never `Identify`.
 
 /// A transport failure on the SERVICE bind is Directory→Reject.
 #[test]
@@ -1073,12 +1069,9 @@ fn unicode_username_casing_yields_same_principal_id() {
 
 /// On the search-then-bind path, the USER bind must present the SUBMITTED password.
 ///
-/// This is the sharpest failure this module could have and it was untested. The service account
-/// binds first, to find the user's entry; if the second bind reused the SERVICE password instead of
-/// the end user's, every bind would succeed for anyone who merely exists in the directory — a full
-/// authentication bypass, with the correct DN, the correct groups, and a completely normal-looking
-/// principal coming back. The old fake recorded only bind DNs, so that substitution was invisible to
-/// every existing test: they all still passed.
+/// The service account binds first, to find the user's entry; if the second bind reused the
+/// SERVICE password instead of the end user's, every bind would succeed for anyone who merely exists
+/// in the directory: a full authentication bypass with a normal-looking principal.
 ///
 /// Asserts the ORDER and the CREDENTIALS of both binds, so neither "the service bind was skipped"
 /// nor "the user bind used the wrong secret" can slip through.
@@ -1165,7 +1158,7 @@ fn the_user_search_filter_is_escaped_as_applied_not_just_in_isolation() {
     }
 }
 
-// ── Credential-echo canaries (CREDENTIAL-LOCKDOWN H5) ────────────────────────────────────────────
+// ── Credential-echo canaries ────────────────────────────────────────────
 
 const CANARY: &str = "CANARYa6d215";
 
@@ -1240,7 +1233,7 @@ impl LdapBackend for Unreachable {
     }
 }
 
-/// H5: the plaintext-transport refusal quoted the URL with its userinfo (`{:?}` of it).
+/// The plaintext-transport refusal never carries the URL's userinfo.
 #[test]
 fn the_plaintext_refusal_never_quotes_the_url_password() {
     let url = format!("ldap://svc:{CANARY}@ad.corp.example:389");
@@ -1251,7 +1244,7 @@ fn the_plaintext_refusal_never_quotes_the_url_password() {
     assert!(e.starts_with("settings.url: "), "the key is named: {e}");
 }
 
-/// H5: `allow_insecure_transport` logged `url = %cfg.url` with its userinfo, on every boot.
+/// The `allow_insecure_transport` warning never logs the URL's userinfo.
 #[test]
 fn the_insecure_transport_warning_never_logs_the_url_password() {
     let url = format!("ldap://svc:{CANARY}@ad.corp.example:389");
@@ -1271,7 +1264,7 @@ fn the_insecure_transport_warning_never_logs_the_url_password() {
     );
 }
 
-/// H5: a failed connect said `connect {url}` with the userinfo, into the logged directory failure.
+/// A failed connect's logged directory failure never carries the URL's userinfo.
 #[test]
 fn a_connect_failure_never_carries_the_url_password() {
     let url = format!("ldaps://svc:{CANARY}@ad.corp.example:636");
