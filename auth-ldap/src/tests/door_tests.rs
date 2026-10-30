@@ -16,7 +16,6 @@ use busbar_contract::abi::auth::{
 use busbar_contract::abi::host::conn::connector::{
     DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE,
 };
-use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::door::MARK_BLOCKS;
 use busbar_contract::abi::sdk::life::Life;
 
@@ -90,16 +89,6 @@ fn a_field_is_found_by_its_declared_name_and_must_be_text() {
     assert_eq!(field(&fields, "missing"), None);
 }
 
-fn text(s: AbiStr) -> &'static str {
-    if s.is_absent() {
-        return "";
-    }
-    // SAFETY: every string in the Statement is `'static` UTF-8 (`abi_str`).
-    #[allow(unsafe_code, unused_unsafe)]
-    let bytes = unsafe { s.bytes() };
-    std::str::from_utf8(bytes).expect("UTF-8")
-}
-
 /// The Statement states a credential login that never blocks (no `MARK_BLOCKS`: every call is
 /// Ready or Pending), its ONE need (outbound, a raw `tcp` stream, operator-infrastructure, the
 /// target named per login), and the service password as its one secret reference.
@@ -120,21 +109,25 @@ fn the_statement_states_a_non_blocking_credential_login_over_one_need() {
     for need in NEEDS {
         assert_eq!(need.direction, DIRECTION_OUTBOUND);
         assert_eq!(need.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE);
-        assert_eq!(text(need.transport), "tcp");
-        assert_eq!(text(need.target_from), "", "the target is named per login");
+        assert!(!need.transport.is_absent());
+        assert!(
+            need.target_from.is_absent(),
+            "the target is named per login"
+        );
     }
+    // The strings themselves (`tcp`, `settings.ca_cert_pem`, the secret reference) are read off
+    // the rendered Statement in the plugin crate's conformance test, without `unsafe`.
     assert!(
-        text(NEEDS[NEED as usize].trust_from).is_empty(),
+        NEEDS[NEED as usize].trust_from.is_absent(),
         "the public need: the connector's own trust"
     );
-    assert_eq!(
-        text(NEEDS[NEED_ANCHORED as usize].trust_from),
-        "settings.ca_cert_pem",
+    assert!(
+        !NEEDS[NEED_ANCHORED as usize].trust_from.is_absent(),
         "the anchored need: the operator's private CA on top of the public roots"
     );
 
     assert_eq!(STATEMENT.secret_refs_len(), 1);
-    assert_eq!(text(SECRET_REFS[0]), "bind_service_password");
+    assert!(!SECRET_REFS[0].is_absent());
 }
 
 /// The secret the kernel resolved for `bind_service_password` wins over the settings' literal; an
