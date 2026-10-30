@@ -88,7 +88,8 @@ library crate and registers `door::door` as a compiled-in row.
 
 LDAP work is done by the plugin's own sans-IO codec (`ber.rs`,
 `filter.rs`, `codec.rs`: the requests 1.5.5's `ldap3` client wrote, byte
-for byte, and the replies read fail-closed), driven over the host's stream
+for byte, and the replies read fail-closed; the BIND, which carries a
+password, is the SDK chip's sealed message, held to the same bytes), driven over the host's stream
 by `conversation.rs`. No call blocks, so the Statement states no `blocks`
 mark, and the plugin carries no LDAP client, socket or TLS crate.
 
@@ -126,7 +127,7 @@ identity-providers:
       base_dn: "dc=corp,dc=example"
       user_search_filter: "(userPrincipalName={username}@corp.example)"
       bind_service_dn: "cn=busbar-svc,cn=users,dc=corp,dc=example"
-      bind_service_password: "<service account password>"
+      bind_service_password: { env: LDAP_BIND_PASSWORD }   # a secret reference, never a literal
       role_from: cn
 
 auth:
@@ -151,14 +152,22 @@ auth:
 | `role_from` | no | `cn` | How a group DN becomes a role string: `cn` takes the value of the first `CN=` RDN in the directory's own case (a value with no `CN=` RDN is used whole, trimmed); `dn` uses the full DN, trimmed and lowercased. `role_bindings` keys must match that spelling exactly. |
 | `user_search_filter` | no | — | Enables search-then-bind. Must contain `{username}`; requires `bind_service_dn`. |
 | `bind_service_dn` | no | — | Service-account DN used for the search-then-bind lookup. |
-| `bind_service_password` | no | — | Service-account password. Held in a redacting wrapper; see [Limitations](#limitations). |
-| `ca_cert_pem` | no | — | Reserved. A config that sets it is **rejected at boot** — see [Limitations](#limitations). |
+| `bind_service_password` | no | — | Service-account password, a secret reference. Held by the SDK chip; see [Limitations](#limitations). |
+| `ca_cert_pem` | no | — | PEM of a private CA (an AD enterprise CA) the directory's certificate chains to. Trusted on top of the public roots for `ldaps://` and STARTTLS. A value that holds no certificate is refused at boot. |
 | `start_tls` | no | `false` | Use STARTTLS over an `ldap://` connection instead of implicit LDAPS. |
 | `allow_insecure_transport` | no | `false` | Override the plaintext-transport guard. See below. |
 | `timeout_secs` | no | `10` | Connect and operation timeout, in seconds. Must be at least 1. |
 
 Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
 stray key fails loudly at boot instead of being silently ignored.
+
+Every settings refusal, at `validate` and at boot alike, is one line per
+problem in the contract's instance-relative form, which busbar prints
+under the instance (`identity-providers.corp-ldap.settings.timeout_secs:
+must be at least 1`). No line quotes a value. A `url` that is empty or
+that names no host is refused here rather than failing every login. A
+missing or non-UTF-8 resolved service password reads
+``secrets: `bind_service_password` is not set`` / `is not UTF-8`.
 
 A plaintext `ldap://` URL pointing at a **non-loopback** host with no
 STARTTLS is rejected at config time: it would put the service-account
@@ -169,22 +178,27 @@ and for a loopback host.
 
 ### Limitations
 
-- **`ca_cert_pem` is not wired.** The field deserializes for forward
-  compatibility, but the custom-CA TLS path is not implemented, so
-  `LdapModule::new` **rejects** a config that sets it. Accepting and
-  ignoring it would silently fall back to the system trust roots while
-  the operator believed a private CA was in use. Use a system-trusted
-  certificate until this lands.
+- **A private CA rides its own need.** The Statement declares two `tcp`
+  needs: one on the connector's own trust, and one whose `trust_from` is
+  `settings.ca_cert_pem`, which the connector adds to the public roots for
+  that need's connections. An instance with `ca_cert_pem` dials the
+  second; one without dials the first. At busbar 1.6.0-dev.2 the
+  connector refuses a need whose `trust_from` names an unset setting, so
+  an instance without `ca_cert_pem` has its anchored need refused at
+  declaration, and busbar records that refusal (`need.1`) in its audit
+  log at each open and reload. Nothing else is affected.
 - **The service-account password is a secret reference.** The Statement
   names `bind_service_password` in its `secret_refs`, so the kernel
   resolves it into `OpenIn.secrets`. It must be a reference (for example
   `bind_service_password: { env: LDAP_BIND_PASSWORD }`): from busbar
   1.6.0 a literal there (accepted by 1.5.5) refuses boot, naming
-  `settings.bind_service_password` and never the value. The plugin holds it in a
-  redacting newtype (`Debug` prints `[REDACTED]`; there is no `Display`;
-  plaintext reachable only through an explicit `expose()`) whose buffer is
-  wiped on drop. The submitted end-user password and the encoded BIND
-  request are held in wiped buffers too. Because the password is resolved
+  `settings.bind_service_password` and never the value. The plugin holds it, and
+  the submitted end-user password, as the SDK chip's credential
+  (`abi::sdk::cred::Cred`: no getter, no `Debug`, no `Display`, wiped on
+  drop). Every BIND is the chip's sealed message
+  (`Cred::ldap_simple_bind`), written to the host's stream without the
+  plugin reading it; for an `ldaps://` URL or `start_tls` it goes out
+  only on a stream the host connector reports secured. Because the password is resolved
   only at `open`, `validate` runs the settings-only checks: a
   search-then-bind config with no literal password validates, and `open`
   refuses it if no password resolves (an explicit empty literal is
@@ -192,7 +206,7 @@ and for a loopback host.
   quoting it (it may be a secret in the wrong key); a missing or unknown
   key is named.
 - **Fail-closed differences from 1.5.5 (owner-signed, 2026-09-28).** A
-  malformed reply or a URL that names no host is an outage instead of a
+  malformed reply is an outage and a URL that names no host is refused at boot, instead of a
   panic; a nested BER length that overruns its parent fails at once
   instead of waiting for bytes that never come; an inbound message past
   16 MiB is refused from its header.
@@ -204,11 +218,16 @@ and for a loopback host.
   52 unavailable, 54, 71, 80), or the transport failed. Result 49
   (invalidCredentials) is a bad credential, logged at `info`; every other
   non-zero code (48, 50, 53 unwillingToPerform, 32, 19, an unnamed code,
-  ...) is the same bad credential, logged at `warn` with the directory's
-  real result code and name (never the password, never the DN). Every
-  other refusal (a missing field, an empty password, no search match, an
-  empty DN, a username the DN template refuses) is logged at `info` with
-  its reason.
+  ...) is the same bad credential as a wrong password (busbar 1.5.5
+  answered every failed user bind, outages included, as a bad
+  credential), logged once at `info` with the directory's real result
+  code and name (never the password, never the DN). Every other refusal
+  (a missing field, an empty password, no search match, an ambiguous
+  search, an empty DN, a username the DN template refuses) is logged once
+  at `info` with its reason. A group read that answers no entry for the
+  bound user (an ACL hiding it) logs a `warn`: the login stands, with no
+  roles. One operation reads at most 1024 directory messages; past that it
+  is an outage.
 - **Group DNs are normalized by the plugin, not the engine.** LDAP and
   AD groups are DNs (`CN=engineers,OU=Groups,DC=corp,DC=example`), which
   make hostile `role_bindings` keys: commas and `=` are awkward in YAML,
@@ -288,7 +307,10 @@ spawned busbar binary over real HTTP, and seeds a real OpenLDAP instance
 over plaintext LDAP with a dev-only `ldap3` client. A second live test
 drives the library module's codec (over the test's own stream) straight
 against that directory in both
-direct-bind and search-then-bind mode and checks the mapped role. Point
+direct-bind and search-then-bind mode and checks the mapped role. A third
+puts the test kit's TLS front, whose CA no public store holds, in front of
+that directory as an `ldaps://` endpoint: busbar with `ca_cert_pem`
+naming that CA mints a key over it, and without it does not. Point
 `BUSBAR_TEST_LDAP_URL` at that directory to run them; with the variable
 unset they skip loudly, and under CI (`CI` set) they fail instead.
 

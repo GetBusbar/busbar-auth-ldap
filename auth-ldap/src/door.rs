@@ -34,18 +34,20 @@ use std::task::Poll;
 
 use busbar_contract::abi::auth::{
     AuthTail, BeginLoginIn, BeginLoginOut, CompleteLoginIn, FieldsIn, FieldsOut, IdentifyOut,
-    IdentityBuf, LoginField, OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut,
-    VerifyIn, BEGIN_FORM, CANCEL_ABANDONED, CAP_LOGIN, FORM_PASSWORD, FORM_TEXT, IDENTITY_HAS_TTL,
-    LOGIN_BAD_CREDENTIAL, LOGIN_IDENTITY, LOGIN_KIND_CREDENTIAL, LOGIN_OUTAGE, SPAN_ABSENT,
+    LoginField, OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut, VerifyIn,
+    BEGIN_FORM, CANCEL_ABANDONED, CAP_LOGIN, FORM_PASSWORD, FORM_TEXT, LOGIN_BAD_CREDENTIAL,
+    LOGIN_KIND_CREDENTIAL, LOGIN_OUTAGE,
 };
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Outcome, Span, BLOB_ABSENT};
+use busbar_contract::abi::mechanism::call::{AbiStr, Outcome};
 use busbar_contract::abi::mechanism::door::{Rewrite, Statement};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::with_tail;
+use busbar_contract::abi::sdk::auth_kit::login_identity;
 use busbar_contract::abi::sdk::conn::{Answer, Connector, Host};
+use busbar_contract::abi::sdk::cred::{Cred, SealedWrite};
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut, Slot};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
@@ -77,25 +79,35 @@ const TAIL: AuthTail = {
 
 /// The need every login's stream is established on.
 pub const NEED: u32 = 0;
+/// The need a login dials on when the operator names a private CA (`ca_cert_pem`).
+pub const NEED_ANCHORED: u32 = 1;
 
-/// The one need: outbound, a raw byte stream over the host's `tcp` carrier (the plugin frames LDAP
+/// One need: outbound, a raw byte stream over the host's `tcp` carrier (the plugin frames LDAP
 /// itself), under the `operator-infrastructure` egress class (directories: private, loopback and
-/// plaintext allowed; pinned; cloud metadata hosts refused). The plugin names
-/// the target per login (`host:port`, read off the `url` setting), so no `target_from`: the
-/// carrier's target is `host:port`, never an `ldap://` URL. No `trust_from`: the module
-/// refuses a `ca_cert_pem` setting, so the connector's own trust is the one used (a need whose
-/// `trust_from` names a setting the configuration leaves unset is not declared, so naming it would
-/// leave the module no stream at all). The timeout is the module's own, per operation (`timeout_secs`).
-pub const NEEDS: &[Need] = &[{
+/// plaintext allowed; pinned; cloud metadata hosts refused), trusting `trust_from`. The plugin
+/// names the target per login (`host:port`, read off the `url` setting), so no `target_from`. The
+/// timeout is the module's own, per operation (`timeout_secs`).
+const fn stream(trust_from: AbiStr) -> Need {
     let mut n = Need::EMPTY;
     n.direction = DIRECTION_OUTBOUND;
     n.egress_class = EGRESS_OPERATOR_INFRASTRUCTURE;
     n.transport = abi_str("tcp");
+    n.trust_from = trust_from;
     n.timeout_ms = 0;
     // A raw stream has no response head: the named (empty) list.
     n.keep_mode = KEEP_NAMED;
     n
-}];
+}
+
+/// The two needs, one dialled per instance ([`LdapModule::need`]): [`NEED`] on the connector's own
+/// trust (the public roots), and [`NEED_ANCHORED`], whose connections the connector secures with
+/// the operator's private CA (`ca_cert_pem`) on top of the public roots, for `ldaps://` and
+/// STARTTLS alike. A need whose `trust_from` resolves to nothing is refused at its declaration, so
+/// one need cannot serve both: an instance with no `ca_cert_pem` dials the public need.
+pub const NEEDS: &[Need] = &[
+    stream(AbiStr::ABSENT),
+    stream(abi_str("settings.ca_cert_pem")),
+];
 
 /// The settings keys whose values are secret references, resolved in this order into
 /// `OpenIn.secrets` (a literal value is accepted by the host).
@@ -126,24 +138,51 @@ const FORM: &[LoginField] = &[
     },
 ];
 
+/// The most short answers kept for their re-call at once.
+const REACHED_MAX: usize = 1024;
+
+/// The identities short answers reached, by ticket `(slot, generation)`, each stamped with the
+/// order it was kept in.
+#[derive(Default)]
+struct Reached {
+    map: HashMap<(u32, u32), (u64, Principal)>,
+    next: u64,
+}
+
 /// One instance: the module (swapped whole on `refresh`), and the identity a short answer reached,
 /// by ticket, for its one re-call.
 pub struct Ldap {
     module: RwLock<Arc<LdapModule>>,
-    reached: Mutex<HashMap<(u32, u32), Principal>>,
+    reached: Mutex<Reached>,
+}
+
+/// Keep `p` for `key`'s re-call, at most `max` at once: at the cap the OLDEST entry goes, never
+/// the rest (an in-flight short answer awaiting its re-call must survive).
+fn keep_reached(reached: &mut Reached, max: usize, key: (u32, u32), p: Principal) {
+    if reached.map.len() >= max && !reached.map.contains_key(&key) {
+        let oldest = reached
+            .map
+            .iter()
+            .min_by_key(|(_, (at, _))| *at)
+            .map(|(k, _)| *k);
+        if let Some(oldest) = oldest {
+            reached.map.remove(&oldest);
+        }
+    }
+    reached.next += 1;
+    reached.map.insert(key, (reached.next, p));
 }
 
 /// The identity a short answer kept for `key`'s re-call, taken. Nothing else is left behind for
 /// that ticket SLOT: an op on the slot under another generation proves the earlier op is over. A
 /// call on no ticket (generation `0`, never minted) proves nothing and drops nothing.
-fn take_reached(
-    reached: &mut HashMap<(u32, u32), Principal>,
-    key: (u32, u32),
-) -> Option<Principal> {
+fn take_reached(reached: &mut Reached, key: (u32, u32)) -> Option<Principal> {
     if key.1 != 0 {
-        reached.retain(|&(slot, generation), _| slot != key.0 || generation == key.1);
+        reached
+            .map
+            .retain(|&(slot, generation), _| slot != key.0 || generation == key.1);
     }
-    reached.remove(&key)
+    reached.map.remove(&key).map(|(_, p)| p)
 }
 
 impl Ldap {
@@ -210,63 +249,14 @@ fn field<'a>(fields: &[(&[u8], &'a [u8])], name: &str) -> Option<&'a str> {
         .and_then(|(_, v)| std::str::from_utf8(v).ok())
 }
 
-const ABSENT: Span = Span {
-    offset: SPAN_ABSENT,
-    len: 0,
-};
-
-/// Write `p` into the host's identity buffer and answer READY, or the short FAILED (every
-/// `needed_*` at its full size, nothing written) when it does not fit.
-fn write_identity(
-    p: &Principal,
-    buf: Lent<'_, IdentityBuf>,
-    out: &mut Out<'_, IdentifyOut>,
-) -> Outcome {
-    let (mut bytes, mut groups) = (buf.buf(), buf.groups());
-    let need_bytes = p.id.len()
-        + p.name.as_ref().map_or(0, String::len)
-        + p.roles.iter().map(String::len).sum::<usize>();
-    if need_bytes > bytes.cap() || p.roles.len() > groups.cap() {
-        out.set(|o| &o.needed_bytes, need_bytes as u64);
-        out.set(
-            |o| &o.needed_groups,
-            u32::try_from(p.roles.len()).unwrap_or(u32::MAX),
-        );
-        return Outcome::Failed;
-    }
-    let subject = bytes.span(p.id.as_bytes());
-    let name = p.name.as_ref().map_or(ABSENT, |n| bytes.span(n.as_bytes()));
-    for role in &p.roles {
-        let s = bytes.span(role.as_bytes());
-        groups.push(s);
-    }
-    let (flags, ttl) = p.ttl_secs.map_or((0, 0), |t| (IDENTITY_HAS_TTL, t));
-    out.set(|o| &o.identity.subject, subject);
-    out.set(|o| &o.identity.key_id, ABSENT);
-    out.set(|o| &o.identity.key_name, ABSENT);
-    out.set(|o| &o.identity.user, ABSENT);
-    out.set(|o| &o.identity.provider, ABSENT);
-    out.set(|o| &o.identity.name, name);
-    out.set(|o| &o.identity.claims, ABSENT);
-    out.set(|o| &o.identity.claims_fmt, BLOB_ABSENT);
-    out.set(|o| &o.identity.flags, flags);
-    out.set(|o| &o.identity.ttl_secs, ttl);
-    out.set(
-        |o| &o.identity.groups_len,
-        u32::try_from(groups.written()).unwrap_or(u32::MAX),
-    );
-    out.set(|o| &o.verdict, LOGIN_IDENTITY);
-    Outcome::Ready
-}
-
 /// One login in flight, parked on its ticket across its PENDING answers: the module it began with
-/// (a `refresh` meanwhile does not change it), the submitted credential (the password in a buffer
-/// wiped on drop), the conversation, the stream once established, and the handle of the first
+/// (a `refresh` meanwhile does not change it), the submitted credential (the password held by the
+/// chip, `Cred`), the conversation, the stream once established, and the handle of the first
 /// connector service not yet completed.
 struct Run {
     module: Arc<LdapModule>,
     username: Option<String>,
-    password: Option<Zeroizing<String>>,
+    password: Option<Cred>,
     conv: Conversation,
     stream: Option<u64>,
     at: u32,
@@ -277,6 +267,7 @@ struct Run {
 /// replay re-issues exactly that one and the host answers its result.
 struct HostWire<'h> {
     conn: Option<Connector<'h>>,
+    need: u32,
     stream: Option<u64>,
     at: u32,
 }
@@ -306,7 +297,8 @@ impl HostWire<'_> {
 
 impl Wire for HostWire<'_> {
     fn establish(&mut self, target: &str) -> Poll<Result<(), String>> {
-        let opened = self.serve(|c, _| c.establish(NEED, Some(target), ""));
+        let need = self.need;
+        let opened = self.serve(|c, _| c.establish(need, Some(target), ""));
         opened.map(|r| {
             r.map(|stream| {
                 self.stream = Some(stream);
@@ -324,6 +316,10 @@ impl Wire for HostWire<'_> {
 
     fn read(&mut self, buf: &mut [u8]) -> Poll<Result<usize, String>> {
         self.serve(|c, s| c.read(s, buf))
+    }
+
+    fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>> {
+        self.serve(|c, s| w.poll(c, s))
     }
 }
 
@@ -352,7 +348,8 @@ fn drive(
             Run {
                 module: h.life().module(),
                 username: field(&fields, USERNAME.0).map(str::to_owned),
-                password: field(&fields, PASSWORD.0).map(|p| Zeroizing::new(p.to_owned())),
+                password: field(&fields, PASSWORD.0)
+                    .map(|p| Cred::captured(Zeroizing::new(p.as_bytes().to_vec()))),
                 conv: Conversation::new(),
                 stream: None,
                 at: 0,
@@ -363,6 +360,7 @@ fn drive(
     let now = now(host, ticket);
     let mut wire = HostWire {
         conn: host.map(|host| host.connector_from(ticket, run.at)),
+        need: run.module.need(),
         stream: run.stream,
         at: run.at,
     };
@@ -370,7 +368,7 @@ fn drive(
         &mut run.conv,
         &mut wire,
         run.username.as_deref(),
-        run.password.as_ref().map(|p| p.as_str()),
+        run.password.as_ref(),
         now,
     );
     match answer {
@@ -433,13 +431,15 @@ impl SafeSlot for CompleteLogin {
                 Outcome::Ready
             }
             Login::Identity(p) => {
-                let answer = write_identity(&p, input.out_buf(), &mut out);
+                let answer = login_identity(&p, input.out_buf(), &mut out);
                 // `0` is never a minted generation: a ticket-less call gets no re-call.
                 if answer == Outcome::Failed && ticket.generation != 0 {
-                    ldap.reached
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .insert(key, p);
+                    keep_reached(
+                        &mut ldap.reached.lock().unwrap_or_else(PoisonError::into_inner),
+                        REACHED_MAX,
+                        key,
+                        p,
+                    );
                 }
                 answer
             }
