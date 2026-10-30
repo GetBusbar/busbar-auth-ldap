@@ -912,15 +912,16 @@ fn a_failed_secure_is_an_outage_and_never_binds() {
 
 /// OWNER RULING (non-49 user bind), through `login_over` so the verdict is the one the door
 /// answers: a code naming a server/session condition is an outage; every other non-zero code is
-/// the same bad credential as a wrong password, logged at warn with the directory's real result
-/// (its code and RFC 4511 name), never the password and never the DN.
+/// the same bad credential as a wrong password, logged ONCE at info (a refusal, auth standard S5;
+/// nothing at warn) with the directory's real result (its code and RFC 4511 name), never the
+/// password and never the DN. An outage code is logged at warn.
 #[test]
 fn a_non_49_user_bind_is_a_bad_credential_unless_the_server_is_failing() {
     use busbar_test_kit::warn_capture::WarnCapture;
     const PW: &str = "hunter2-s3cret";
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
     for rc in [48_u32, 50, 53, 32, 19, 999] {
-        let cap = WarnCapture::default();
+        let cap = WarnCapture::capturing_debug();
         let mut dir = Directory::new(vec![bind_response(1, i64::from(rc))]);
         let (got, _) = tracing::subscriber::with_default(cap.clone(), || login(&m, &mut dir, PW));
         assert_eq!(got, Login::BadCredential, "rc {rc}");
@@ -941,14 +942,35 @@ fn a_non_49_user_bind_is_a_bad_credential_unless_the_server_is_failing() {
             cap.messages()
         );
         assert!(!cap.contains(ALICE), "the DN leaked: {:?}", cap.messages());
+        assert_eq!(
+            cap.count(&format!("rc={rc}")),
+            1,
+            "logged once: {:?}",
+            cap.messages()
+        );
+        let warn = WarnCapture::default();
+        let mut dir = Directory::new(vec![bind_response(1, i64::from(rc))]);
+        tracing::subscriber::with_default(warn.clone(), || login(&m, &mut dir, PW));
+        assert!(
+            warn.messages().is_empty(),
+            "rc {rc} at warn: {:?}",
+            warn.messages()
+        );
     }
-    let cap = WarnCapture::default();
+    let cap = WarnCapture::capturing_debug();
     let mut dir = Directory::new(vec![bind_response(1, 53)]);
     tracing::subscriber::with_default(cap.clone(), || login(&m, &mut dir, PW));
     assert!(cap.contains("unwillingToPerform"), "{:?}", cap.messages());
     for rc in [51_i64, 52, 80, 8] {
+        let warn = WarnCapture::default();
         let mut dir = Directory::new(vec![bind_response(1, rc)]);
-        assert_eq!(login(&m, &mut dir, PW).0, Login::Outage, "rc {rc}");
+        let (got, _) = tracing::subscriber::with_default(warn.clone(), || login(&m, &mut dir, PW));
+        assert_eq!(got, Login::Outage, "rc {rc}");
+        assert!(
+            warn.contains(&format!("rc={rc}")),
+            "an outage at warn: {:?}",
+            warn.messages()
+        );
     }
 }
 

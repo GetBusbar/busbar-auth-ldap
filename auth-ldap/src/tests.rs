@@ -613,6 +613,9 @@ struct FakeLdap {
     subtree_err: bool,
     /// Inject a TRANSPORT failure (`Err`) from the Base (group read) search.
     base_err: bool,
+    /// The Base (group read) search answers no entry at all (an ACL hiding the bound user's own
+    /// entry).
+    base_empty: bool,
 }
 
 impl LdapBackend for FakeLdap {
@@ -661,6 +664,9 @@ impl LdapBackend for FakeLdap {
             SearchScope::Base => {
                 if self.base_err {
                     return Err("transport failure on group read".to_string().into());
+                }
+                if self.base_empty {
+                    return Ok(Vec::new());
                 }
                 let mut attrs = HashMap::new();
                 if !self.group_values.is_empty() {
@@ -1324,6 +1330,54 @@ mod logging {
         assert!(cap.contains("module=ldap"), "{:?}", cap.messages());
         assert!(!cap.contains("pw-s3cret"), "{:?}", cap.messages());
         assert!(!cap.contains("ghost"), "{:?}", cap.messages());
+    }
+
+    /// LDO D10: the bound user's own entry read back as NO entry (an ACL hides it) is not silent:
+    /// the login still answers the identity with no roles, and warns that the groups were unread.
+    #[test]
+    fn a_group_read_with_no_entry_is_logged_at_warn() {
+        let m = LdapModule::new(base_cfg()).unwrap();
+        let mut fake = FakeLdap {
+            group_attr: "memberOf".to_string(),
+            base_empty: true,
+            ..Default::default()
+        };
+        let cap = WarnCapture::default();
+        let r = tracing::subscriber::with_default(cap.clone(), || {
+            m.bind_and_identify_on(&mut fake, "alice", "pw-s3cret")
+        });
+        let p = r.expect("the bind identifies");
+        assert!(p.roles.is_empty());
+        assert!(
+            cap.contains("group read returned no entry"),
+            "{:?}",
+            cap.messages()
+        );
+        assert!(cap.contains("module=ldap"), "{:?}", cap.messages());
+        assert!(
+            !cap.contains("alice"),
+            "the DN leaked: {:?}",
+            cap.messages()
+        );
+    }
+
+    /// An ambiguous user search is a refusal: logged once at info, nothing at warn.
+    #[test]
+    fn an_ambiguous_search_is_logged_at_info() {
+        let m = LdapModule::new(search_cfg()).unwrap();
+        let fake = || FakeLdap {
+            search_entries: vec![entry("uid=a,dc=x"), entry("uid=b,dc=x")],
+            ..Default::default()
+        };
+        let (r, cap) = captured(|| m.bind_and_identify_on(&mut fake(), "alice", "pw-s3cret"));
+        assert!(matches!(r, Err(BindError::InvalidCredentials)), "{r:?}");
+        assert_eq!(cap.count("ambiguous"), 1, "{:?}", cap.messages());
+        let warn = WarnCapture::default();
+        tracing::subscriber::with_default(warn.clone(), || {
+            m.bind_and_identify_on(&mut fake(), "alice", "pw-s3cret")
+        })
+        .ok();
+        assert!(warn.messages().is_empty(), "{:?}", warn.messages());
     }
 
     /// A search that resolves to an empty DN is refused before any bind, and says so.
