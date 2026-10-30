@@ -31,7 +31,7 @@ fn settings_refuse_an_empty_blob() {
         let e = LdapModule::from_settings(blob.as_bytes())
             .err()
             .expect("an empty blob is refused");
-        assert!(e.contains("requires config"), "{e}");
+        assert!(e.starts_with("settings: "), "{e}");
     }
 }
 
@@ -40,7 +40,7 @@ fn settings_refuse_malformed_json() {
     let e = LdapModule::from_settings(b"{ not json")
         .err()
         .expect("malformed JSON is refused");
-    assert!(e.starts_with("invalid ldap plugin config:"), "{e}");
+    assert!(e.starts_with("settings: "), "{e}");
 }
 
 #[test]
@@ -261,8 +261,7 @@ fn a_mistyped_setting_is_refused_without_echoing_its_value() {
             .err()
             .expect("refused");
         assert!(!e.contains("hunter2"), "the value is echoed: {e}");
-        assert!(e.starts_with("invalid ldap plugin config:"), "{e}");
-        assert!(e.contains("line 1, column"), "{e}");
+        assert!(e.starts_with("settings."), "{e}");
         let r = Ldap::validate(blob.as_bytes()).expect_err("refused");
         assert!(!format!("{r:?}").contains("hunter2"), "{r:?}");
     }
@@ -298,4 +297,154 @@ fn a_parked_logins_password_is_the_chips() {
             .as_deref(),
         Some("pw")
     );
+}
+
+/// THE REFUSAL LINES (auth standard S2): every settings refusal is one or more lines in the
+/// contract's instance-relative form (`settings[.<key>]: <reason>`, joined by `\n`, holding
+/// `check_validate_refusal`), the same at `validate` and `open`, and never a value.
+mod refusal_lines {
+    use super::*;
+    use busbar_contract::abi::mechanism::lifecycle::check_validate_refusal;
+    use serde_json::{json, Value};
+
+    fn base() -> Value {
+        json!({
+            "url": "ldaps://ad.corp.example:636",
+            "bind_dn_template": "uid={username},ou=people,dc=corp,dc=example",
+            "base_dn": "dc=corp,dc=example"
+        })
+    }
+
+    fn with(changes: Value) -> Vec<u8> {
+        let mut v = base();
+        for (k, x) in changes.as_object().expect("an object") {
+            v[k] = x.clone();
+        }
+        serde_json::to_vec(&v).expect("json")
+    }
+
+    /// `validate`'s refusal text for `blob`, held to the contract's shape and equal to `open`'s.
+    fn refused(blob: &[u8]) -> String {
+        let r = Ldap::validate(blob).expect_err("refused");
+        let text = r.text().expect("a reason").to_string();
+        assert!(check_validate_refusal(text.as_bytes()).is_ok(), "{text:?}");
+        for line in text.split('\n') {
+            assert!(
+                line.starts_with("settings"),
+                "not instance-relative: {line:?}"
+            );
+        }
+        let o = Ldap::open(blob, &[], 1).err().expect("open refuses too");
+        assert_eq!(
+            o.text(),
+            Some(text.as_str()),
+            "validate and open say the same"
+        );
+        text
+    }
+
+    #[test]
+    fn every_settings_refusal_is_an_instance_relative_line() {
+        let cases: Vec<(Vec<u8>, &str)> = vec![
+            (b"".to_vec(), "settings: "),
+            (b"{ not json".to_vec(), "settings: "),
+            (
+                br#"{"url":"ldaps://x"}"#.to_vec(),
+                "settings: missing field `bind_dn_template`",
+            ),
+            (
+                with(json!({"bogus": "hunter2"})),
+                "settings: unknown field `bogus`",
+            ),
+            (
+                with(json!({"timeout_secs": "hunter2"})),
+                "settings.timeout_secs: invalid type",
+            ),
+            (
+                with(json!({"bind_dn_template": "uid=fixed,dc=x"})),
+                "settings.bind_dn_template: must contain the `{username}` placeholder",
+            ),
+            (
+                with(json!({"bind_dn_template": "{username}@corp.example"})),
+                "settings.bind_dn_template: is not a DN",
+            ),
+            (
+                with(json!({"timeout_secs": 0})),
+                "settings.timeout_secs: must be at least 1",
+            ),
+            (
+                with(json!({"group_attr": " "})),
+                "settings.group_attr: must not be empty",
+            ),
+            (with(json!({"url": ""})), "settings.url: must not be empty"),
+            (
+                with(json!({"base_dn": ""})),
+                "settings.base_dn: must not be empty",
+            ),
+            (
+                with(json!({"url": "https://ad.corp.example"})),
+                "settings.url: ",
+            ),
+            (with(json!({"url": "ldaps://"})), "settings.url: "),
+            (
+                with(json!({"url": "ldap://ad.corp.example:389"})),
+                "settings.url: plaintext ldap://",
+            ),
+            (
+                with(json!({"user_search_filter": "(uid=fixed)", "bind_service_dn": "cn=svc"})),
+                "settings.user_search_filter: must contain the `{username}` placeholder",
+            ),
+            (
+                with(json!({"user_search_filter": "(uid={username})"})),
+                "settings.bind_service_dn: ",
+            ),
+            (
+                with(json!({
+                    "user_search_filter": "(uid={username})",
+                    "bind_service_dn": "cn=svc",
+                    "bind_service_password": ""
+                })),
+                "settings.bind_service_password: must not be empty",
+            ),
+        ];
+        for (blob, want) in cases {
+            let text = refused(&blob);
+            assert!(text.contains(want), "want {want:?} in {text:?}");
+            assert!(!text.contains("hunter2"), "a value is echoed: {text:?}");
+        }
+    }
+
+    #[test]
+    fn several_refusals_are_several_lines() {
+        let text = refused(&with(json!({"timeout_secs": 0, "group_attr": ""})));
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(
+            lines,
+            [
+                "settings.timeout_secs: must be at least 1",
+                "settings.group_attr: must not be empty"
+            ],
+            "{text:?}"
+        );
+    }
+
+    #[test]
+    fn a_missing_or_non_utf8_service_secret_names_the_secret() {
+        let blob = with(json!({
+            "user_search_filter": "(uid={username})",
+            "bind_service_dn": "cn=svc,dc=corp,dc=example"
+        }));
+        let e = Ldap::open(&blob, &[], 1).err().expect("no password");
+        assert_eq!(
+            e.text(),
+            Some("secrets: `bind_service_password` is not set")
+        );
+        let e = Ldap::open(&blob, &[b"\xff".as_slice()], 1)
+            .err()
+            .expect("not UTF-8");
+        assert_eq!(
+            e.text(),
+            Some("secrets: `bind_service_password` is not UTF-8")
+        );
+    }
 }
