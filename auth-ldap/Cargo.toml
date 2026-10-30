@@ -13,6 +13,8 @@ description = "The AD/LDAP auth module for busbar: BIND a username/password agai
 # `.busbar-ref`; a busbar build that links this crate `[patch]`es the busbar git source to its own
 # tree, so ONE copy of the contract links.
 busbar-contract = { workspace = true }
+# Reads a `ca_cert_pem` certificate block's body, to refuse one that holds no certificate.
+base64 = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 tracing = { workspace = true }

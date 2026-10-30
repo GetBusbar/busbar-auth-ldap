@@ -82,24 +82,32 @@ pub const NEED: u32 = 0;
 /// The need a login dials on when the operator names a private CA (`ca_cert_pem`).
 pub const NEED_ANCHORED: u32 = 1;
 
-/// The one need: outbound, a raw byte stream over the host's `tcp` carrier (the plugin frames LDAP
+/// One need: outbound, a raw byte stream over the host's `tcp` carrier (the plugin frames LDAP
 /// itself), under the `operator-infrastructure` egress class (directories: private, loopback and
-/// plaintext allowed; pinned; cloud metadata hosts refused). The plugin names
-/// the target per login (`host:port`, read off the `url` setting), so no `target_from`: the
-/// carrier's target is `host:port`, never an `ldap://` URL. No `trust_from`: the module
-/// refuses a `ca_cert_pem` setting, so the connector's own trust is the one used (a need whose
-/// `trust_from` names a setting the configuration leaves unset is not declared, so naming it would
-/// leave the module no stream at all). The timeout is the module's own, per operation (`timeout_secs`).
-pub const NEEDS: &[Need] = &[{
+/// plaintext allowed; pinned; cloud metadata hosts refused), trusting `trust_from`. The plugin
+/// names the target per login (`host:port`, read off the `url` setting), so no `target_from`. The
+/// timeout is the module's own, per operation (`timeout_secs`).
+const fn stream(trust_from: AbiStr) -> Need {
     let mut n = Need::EMPTY;
     n.direction = DIRECTION_OUTBOUND;
     n.egress_class = EGRESS_OPERATOR_INFRASTRUCTURE;
     n.transport = abi_str("tcp");
+    n.trust_from = trust_from;
     n.timeout_ms = 0;
     // A raw stream has no response head: the named (empty) list.
     n.keep_mode = KEEP_NAMED;
     n
-}];
+}
+
+/// The two needs, one dialled per instance ([`LdapModule::need`]): [`NEED`] on the connector's own
+/// trust (the public roots), and [`NEED_ANCHORED`], whose connections the connector secures with
+/// the operator's private CA (`ca_cert_pem`) on top of the public roots, for `ldaps://` and
+/// STARTTLS alike. A need whose `trust_from` resolves to nothing is refused at its declaration, so
+/// one need cannot serve both: an instance with no `ca_cert_pem` dials the public need.
+pub const NEEDS: &[Need] = &[
+    stream(AbiStr::ABSENT),
+    stream(abi_str("settings.ca_cert_pem")),
+];
 
 /// The settings keys whose values are secret references, resolved in this order into
 /// `OpenIn.secrets` (a literal value is accepted by the host).
@@ -259,6 +267,7 @@ struct Run {
 /// replay re-issues exactly that one and the host answers its result.
 struct HostWire<'h> {
     conn: Option<Connector<'h>>,
+    need: u32,
     stream: Option<u64>,
     at: u32,
 }
@@ -288,7 +297,8 @@ impl HostWire<'_> {
 
 impl Wire for HostWire<'_> {
     fn establish(&mut self, target: &str) -> Poll<Result<(), String>> {
-        let opened = self.serve(|c, _| c.establish(NEED, Some(target), ""));
+        let need = self.need;
+        let opened = self.serve(|c, _| c.establish(need, Some(target), ""));
         opened.map(|r| {
             r.map(|stream| {
                 self.stream = Some(stream);
@@ -350,6 +360,7 @@ fn drive(
     let now = now(host, ticket);
     let mut wire = HostWire {
         conn: host.map(|host| host.connector_from(ticket, run.at)),
+        need: run.module.need(),
         stream: run.stream,
         at: run.at,
     };
