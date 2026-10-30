@@ -494,7 +494,7 @@ impl LdapModule {
             Err(BindError::Pending) => Poll::Pending,
             Err(BindError::InvalidCredentials) => Poll::Ready(Login::BadCredential),
             Err(BindError::Rejected { rc }) => {
-                tracing::warn!(
+                tracing::info!(
                     module = "ldap",
                     rc,
                     result = codec::rc_name(rc),
@@ -699,10 +699,10 @@ impl LdapModule {
             // Ambiguous: more than one entry matched. Fail CLOSED rather than silently binding the
             // first — we cannot establish a single, unambiguous identity for the credential.
             if entries.len() > 1 {
-                tracing::warn!(
+                tracing::info!(
                     module = "ldap",
                     matches = entries.len(),
-                    "ldap user_search_filter matched multiple entries; rejecting as ambiguous"
+                    "ldap login refused: user_search_filter matched multiple entries (ambiguous)"
                 );
                 return Err(BindError::InvalidCredentials);
             }
@@ -736,7 +736,7 @@ impl LdapModule {
         // server/session condition that fails every user alike (51 busy, 52 unavailable, ...:
         // [`is_outage`]) is a directory-side failure, an outage logged by `login_over`; every other
         // non-zero code (48, 50, 53, ...) refuses this credential, the same bad credential as a
-        // wrong password, its real result logged at warn by `login_over` (never the password or
+        // wrong password, its real result logged at info by `login_over` (never the password or
         // the DN).
         let rc = ldap
             .simple_bind(&user_dn, &self.guarded(password))
@@ -771,6 +771,16 @@ impl LdapModule {
             .map_err(at("group read"))?;
 
         let mut group_dns: Vec<String> = Vec::new();
+        if entries.is_empty() {
+            // The bound user's own entry read back as nothing: an ACL hides it from the user, so
+            // the groups were never read. The login stands with no roles, never silently.
+            tracing::warn!(
+                module = "ldap",
+                group_attr = %self.cfg.group_attr,
+                "ldap group read returned no entry for the bound user (an ACL may hide it); \
+                 the login carries no roles"
+            );
+        }
         if let Some(entry) = entries.into_iter().next() {
             // LDAP attribute descriptions are case-insensitive (RFC 4512 §2.5) and the entry is keyed
             // by the server's spelling, so `group_attr: memberof` must find the server's `memberOf`.
