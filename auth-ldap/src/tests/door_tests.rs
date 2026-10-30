@@ -7,7 +7,7 @@
 
 use super::{
     field, keep_reached, take_reached, Ldap, Reached, Run, ALIAS, FORM, NAME, NEED, NEEDS,
-    SECRET_REFS, STATEMENT, TAIL,
+    NEED_ANCHORED, SECRET_REFS, STATEMENT, TAIL,
 };
 use crate::LdapModule;
 use busbar_contract::abi::auth::{
@@ -115,16 +115,22 @@ fn the_statement_states_a_non_blocking_credential_login_over_one_need() {
 
     assert_eq!(
         (STATEMENT.needs_ptr(), STATEMENT.needs_len()),
-        (NEEDS.as_ptr(), 1)
+        (NEEDS.as_ptr(), 2)
     );
-    let need = &NEEDS[NEED as usize];
-    assert_eq!(need.direction, DIRECTION_OUTBOUND);
-    assert_eq!(need.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE);
-    assert_eq!(text(need.transport), "tcp");
-    assert_eq!(text(need.target_from), "", "the target is named per login");
+    for need in NEEDS {
+        assert_eq!(need.direction, DIRECTION_OUTBOUND);
+        assert_eq!(need.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE);
+        assert_eq!(text(need.transport), "tcp");
+        assert_eq!(text(need.target_from), "", "the target is named per login");
+    }
     assert!(
-        text(need.trust_from).is_empty(),
-        "the connector's own trust"
+        text(NEEDS[NEED as usize].trust_from).is_empty(),
+        "the public need: the connector's own trust"
+    );
+    assert_eq!(
+        text(NEEDS[NEED_ANCHORED as usize].trust_from),
+        "settings.ca_cert_pem",
+        "the anchored need: the operator's private CA on top of the public roots"
     );
 
     assert_eq!(STATEMENT.secret_refs_len(), 1);
@@ -480,5 +486,70 @@ mod refusal_lines {
             e.text(),
             Some("secrets: `bind_service_password` is not UTF-8")
         );
+    }
+}
+
+/// CA-1 / SEC-LDAPCA: a private directory CA (`ca_cert_pem`) is SUPPORTED. A blob that holds a
+/// certificate validates, and the module dials on the ANCHORED need (whose `trust_from` hands the
+/// connector that CA, on top of the public roots, for both `ldaps://` and STARTTLS); without it,
+/// the public need. A `ca_cert_pem` that holds no certificate is refused by name, never accepted
+/// and ignored.
+mod private_ca {
+    use super::*;
+    use busbar_contract::abi::sdk::life::Life;
+
+    fn blob(extra: serde_json::Value) -> Vec<u8> {
+        let mut v: serde_json::Value = serde_json::from_str(MINIMAL).expect("json");
+        for (k, x) in extra.as_object().expect("object") {
+            v[k] = x.clone();
+        }
+        serde_json::to_vec(&v).expect("json")
+    }
+
+    fn pem() -> &'static str {
+        busbar_test_kit::conformance_host::anchors()
+    }
+
+    #[test]
+    fn a_private_ca_is_accepted_and_anchors_the_dial() {
+        let with_ca = blob(serde_json::json!({"ca_cert_pem": pem()}));
+        assert!(
+            Ldap::validate(&with_ca).is_ok(),
+            "{:?}",
+            Ldap::validate(&with_ca).err()
+        );
+        let m = LdapModule::from_settings(&with_ca).expect("opens");
+        assert_eq!(m.need(), NEED_ANCHORED);
+        let m = LdapModule::from_settings(MINIMAL.as_bytes()).expect("opens");
+        assert_eq!(m.need(), NEED);
+        let starttls = blob(serde_json::json!({
+            "url": "ldap://ad.corp.example:389",
+            "start_tls": true,
+            "ca_cert_pem": pem()
+        }));
+        assert_eq!(
+            LdapModule::from_settings(&starttls).expect("opens").need(),
+            NEED_ANCHORED
+        );
+    }
+
+    #[test]
+    fn a_ca_cert_pem_with_no_certificate_is_refused_by_name() {
+        for bad in [
+            "",
+            "-----BEGIN CERTIFICATE-----",
+            "-----BEGIN CERTIFICATE-----\n!!!not base64!!!\n-----END CERTIFICATE-----\n",
+            "-----BEGIN PRIVATE KEY-----\nAAAA\n-----END PRIVATE KEY-----\n",
+            "hunter2",
+        ] {
+            let r = Ldap::validate(&blob(serde_json::json!({"ca_cert_pem": bad})))
+                .expect_err("refused");
+            let text = r.text().expect("a reason");
+            assert!(
+                text.starts_with("settings.ca_cert_pem: "),
+                "{bad:?}: {text}"
+            );
+            assert!(!text.contains("hunter2"), "{text}");
+        }
     }
 }

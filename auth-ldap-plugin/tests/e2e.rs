@@ -452,21 +452,24 @@ fn wait_for_health(
     panic!("busbar did not become healthy at {url}");
 }
 
-/// THE plugin-side proof: a REAL busbar boot drives the ldap credential-form flow; the plugin BINDs
-/// alice against OpenLDAP, reads her group DN (→ role `admins` → group eng-team), a key is minted, and
-/// it authenticates on the data plane. A WRONG password is REJECTED 401 — the real bind gates.
-#[test]
-fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
-    let Some(url) = live_ldap_url() else {
-        return;
-    };
-    let Some(so_path) = plugin_path() else {
-        eprintln!("skip: busbar_auth_ldap_plugin cdylib not built");
-        return;
-    };
-    seed_directory(&url);
-    let (busbar_bin, pack_bin) = build_real_binaries();
+/// A real busbar booted with the packed plugin as `identity-providers.ldap` over `url`, its settings
+/// carrying `extra` (whole YAML lines, indented as settings keys) after the test's own; healthy.
+struct Booted {
+    child: Busbar,
+    base: String,
+    work: std::path::PathBuf,
+}
 
+impl Drop for Booted {
+    fn drop(&mut self) {
+        let _ = self.child.0.kill();
+        let _ = self.child.0.wait();
+        let _ = std::fs::remove_dir_all(&self.work);
+    }
+}
+
+fn boot(so_path: &std::path::Path, url: &str, extra: &str) -> Booted {
+    let (busbar_bin, pack_bin) = build_real_binaries();
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
@@ -488,7 +491,7 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
         // shares): busbar-plugin-pack refuses any other. A fresh deployment holds no high-water mark
         // for the name, so no first-party floor applies.
         env!("CARGO_PKG_VERSION"),
-        &so_path,
+        so_path,
         &plugins_dir.join("busbar-auth-ldap.tar.gz"),
     );
 
@@ -524,7 +527,7 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
              \x20 ldap:\n    module: ldap\n    browser_login: {{}}\n\
              \x20   settings:\n      url: \"{url}\"\n\
              \x20     bind_dn_template: \"uid={{username}},ou=people,dc=example,dc=org\"\n\
-             \x20     base_dn: \"dc=example,dc=org\"\n      group_attr: \"seeAlso\"\n      role_from: cn\n\
+             \x20     base_dn: \"dc=example,dc=org\"\n      group_attr: \"seeAlso\"\n      role_from: cn\n{extra}\
              auth:\n  key_ttl: \"7d\"\n  signing_key: {{ file: \"{signing}\" }}\n  chain:\n    - keys\n\
              \x20 admin_auth: [admin-tokens]\n\
              \x20 role_bindings:\n    ldap:\n      admins:\n        group: eng-team\n\
@@ -559,6 +562,29 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
         &mut child.0,
         &stderr_log,
     );
+
+    Booted { child, base, work }
+}
+
+/// THE plugin-side proof: a REAL busbar boot drives the ldap credential-form flow; the plugin BINDs
+/// alice against OpenLDAP, reads her group DN (→ role `admins` → group eng-team), a key is minted, and
+/// it authenticates on the data plane. A WRONG password is REJECTED 401 — the real bind gates.
+#[test]
+fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
+    let Some(url) = live_ldap_url() else {
+        return;
+    };
+    let Some(so_path) = plugin_path() else {
+        eprintln!("skip: busbar_auth_ldap_plugin cdylib not built");
+        return;
+    };
+    seed_directory(&url);
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+    let booted = boot(&so_path, &url, "");
+    let base = booted.base.clone();
 
     // begin: GET ?method=ldap → 200 credential form + cookie.
     let begin = client
@@ -644,6 +670,86 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
         "a wrong password must be rejected 401 (bind gates)"
     );
 
-    drop(child);
-    let _ = std::fs::remove_dir_all(&work);
+    drop(booted);
+}
+
+/// One credential-form login on a booted busbar: begin, then POST `username`/`password`; the
+/// response to the POST.
+fn form_login(
+    client: &reqwest::blocking::Client,
+    base: &str,
+    username: &str,
+    password: &str,
+) -> reqwest::blocking::Response {
+    let begin = client
+        .get(format!("{base}/auth/token?method=ldap"))
+        .send()
+        .expect("GET begin");
+    assert!(begin.status().is_success(), "begin: {}", begin.status());
+    let cookie = login_cookie(&begin);
+    let state = cookie_state(&cookie);
+    client
+        .post(format!("{base}/auth/token"))
+        .header(reqwest::header::COOKIE, format!("busbar_login={cookie}"))
+        .form(&[
+            ("__state", state.as_str()),
+            ("username", username),
+            ("password", password),
+        ])
+        .send()
+        .expect("POST creds")
+}
+
+/// CA-1 / SEC-LDAPCA, LIVE: a directory behind LDAPS whose certificate chains to a PRIVATE CA (the
+/// test kit's TLS front, its CA no public root store holds, in front of the OpenLDAP service). With
+/// `ca_cert_pem` naming that CA the real busbar's connector trusts it for this plugin's dials (the
+/// anchored need's `trust_from`), the bind runs over the verified LDAPS stream and the login mints
+/// a key; with no `ca_cert_pem` the same directory is untrusted, and no key is minted.
+#[test]
+fn ldaps_with_a_private_ca_verifies() {
+    let Some(url) = live_ldap_url() else {
+        return;
+    };
+    let Some(so_path) = plugin_path() else {
+        eprintln!("skip: busbar_auth_ldap_plugin cdylib not built");
+        return;
+    };
+    seed_directory(&url);
+    let upstream: &'static str = Box::leak(
+        url.split_once("://")
+            .map_or(url.as_str(), |(_, rest)| rest)
+            .split('/')
+            .next()
+            .unwrap_or_default()
+            .to_owned()
+            .into_boxed_str(),
+    );
+    let front: &'static str = Box::leak(format!("localhost:{}", free_port()).into_boxed_str());
+    busbar_test_kit::conformance_host::tls_front(front, |_| true, upstream);
+    let ldaps = format!("ldaps://{front}");
+    let client = reqwest::blocking::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap();
+
+    let ca = busbar_test_kit::conformance_host::anchors();
+    let anchored = boot(&so_path, &ldaps, &format!("      ca_cert_pem: {ca:?}\n"));
+    let ok = form_login(&client, &anchored.base, "alice", ALICE_PW);
+    assert!(
+        ok.status().is_success(),
+        "the private CA verifies the LDAPS directory: {}",
+        ok.status()
+    );
+    assert!(ok.text().unwrap().contains("ldap:uid=alice"));
+    let bad = form_login(&client, &anchored.base, "alice", "wrong-password");
+    assert_eq!(bad.status().as_u16(), 401, "the bind still gates");
+    drop(anchored);
+
+    let public = boot(&so_path, &ldaps, "");
+    let refused = form_login(&client, &public.base, "alice", ALICE_PW);
+    assert!(
+        !refused.status().is_success(),
+        "no ca_cert_pem: the private CA is untrusted and no key is minted: {}",
+        refused.status()
+    );
 }
