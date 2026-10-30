@@ -146,9 +146,19 @@ pub struct Ldap {
     reached: Mutex<Reached>,
 }
 
-/// Keep `p` for `key`'s re-call, at most `max` at once.
+/// Keep `p` for `key`'s re-call, at most `max` at once: at the cap the OLDEST entry goes, never
+/// the rest (an in-flight short answer awaiting its re-call must survive).
 fn keep_reached(reached: &mut Reached, max: usize, key: (u32, u32), p: Principal) {
-    let _ = max;
+    if reached.map.len() >= max && !reached.map.contains_key(&key) {
+        let oldest = reached
+            .map
+            .iter()
+            .min_by_key(|(_, (at, _))| *at)
+            .map(|(k, _)| *k);
+        if let Some(oldest) = oldest {
+            reached.map.remove(&oldest);
+        }
+    }
     reached.next += 1;
     reached.map.insert(key, (reached.next, p));
 }
