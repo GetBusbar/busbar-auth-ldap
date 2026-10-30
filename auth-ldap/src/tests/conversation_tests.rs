@@ -1006,3 +1006,37 @@ fn chip_bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
     assert!(sent.is_ready(), "the BIND is written whole");
     bytes
 }
+
+/// LDO D4b: one entry of the op never runs unbounded. A directory that streams Ready messages for
+/// one operation without end (entries, or messages for another id) would hold the call past every
+/// deadline, which is only checked between entries: past a cap of messages for one operation, the
+/// operation fails (an outage), whatever the clock says.
+#[test]
+fn an_operation_that_never_ends_its_messages_is_cut_off() {
+    use crate::{Io, LdapBackend, SearchScope};
+    let flood = |entries: bool| -> Vec<Vec<u8>> {
+        let mut r = vec![bind_response(1, 0)];
+        for i in 0..5000 {
+            r.push(if entries {
+                entry(2, &format!("uid=u{i},dc=x"), "dn", &[])
+            } else {
+                done(77, 0)
+            });
+        }
+        r.push(done(2, 0));
+        r
+    };
+    for entries in [true, false] {
+        let mut dir = Directory::new(flood(entries));
+        let mut conv = Conversation::new();
+        let mut over =
+            super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, Some(0), 10);
+        over.connect().expect("connects");
+        over.simple_bind("cn=svc,dc=x", &crate::tests::cred("pw"))
+            .expect("binds");
+        match over.search("dc=x", SearchScope::Subtree, "(uid=alice)", &["dn"]) {
+            Err(Io::Failed(e)) => assert!(e.contains("messages for one operation"), "{e}"),
+            r => panic!("entries={entries}: a flood must be cut off, got {r:?}"),
+        }
+    }
+}
