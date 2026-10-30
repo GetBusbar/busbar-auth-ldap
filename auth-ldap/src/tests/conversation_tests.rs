@@ -480,20 +480,26 @@ fn the_signed_differences_fail_closed_as_an_outage() {
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
 }
 
-/// SIGNED DIFFERENCE 1, the URL half: a hostless URL is an outage before any dial (1.5.5
-/// panicked); an unknown scheme reads in 1.5.5's words.
+/// SIGNED DIFFERENCE 1, the URL half: a hostless URL never dials (1.5.5 panicked). It is refused
+/// at boot, `validate` included, as a `settings.url` line (it was an outage on every login); an
+/// unknown scheme reads in 1.5.5's words.
 #[test]
-fn a_hostless_url_fails_closed_before_any_dial() {
+fn a_hostless_url_is_refused_before_any_dial() {
     for url in [
         "ldap://",
         "ldap:///dc=x",
         "ldaps://:636",
         "ldap://user@:389",
     ] {
-        let m = module(url, serde_json::json!({"allow_insecure_transport": true}));
-        let mut dir = Directory::new(vec![bind_response(1, 0)]);
-        assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage, "{url}");
-        assert!(dir.seen.is_empty() && dir.written.is_empty(), "{url}");
+        let cfg: LdapConfig = serde_json::from_value(serde_json::json!({
+            "url": url,
+            "bind_dn_template": "uid={username},ou=people,dc=corp,dc=example",
+            "base_dn": "dc=corp,dc=example",
+            "allow_insecure_transport": true,
+        }))
+        .expect("config parses");
+        let e = LdapModule::new(cfg).err().expect("refused at boot");
+        assert!(e.starts_with("settings.url: "), "{url}: {e}");
     }
     assert_eq!(
         Endpoint::parse("ldapi://%2fvar%2frun", false),

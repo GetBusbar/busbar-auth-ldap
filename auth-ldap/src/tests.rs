@@ -1243,7 +1243,7 @@ fn the_plaintext_refusal_never_quotes_the_url_password() {
         panic!("plaintext is refused");
     };
     assert!(!e.contains(CANARY), "the refusal carried the password: {e}");
-    assert!(e.contains("ad.corp.example:389"), "the host is kept: {e}");
+    assert!(e.starts_with("settings.url: "), "the key is named: {e}");
 }
 
 /// H5: `allow_insecure_transport` logged `url = %cfg.url` with its userinfo, on every boot.

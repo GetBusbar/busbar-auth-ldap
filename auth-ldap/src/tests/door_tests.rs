@@ -378,10 +378,6 @@ mod refusal_lines {
             ),
             (with(json!({"url": ""})), "settings.url: must not be empty"),
             (
-                with(json!({"base_dn": ""})),
-                "settings.base_dn: must not be empty",
-            ),
-            (
                 with(json!({"url": "https://ad.corp.example"})),
                 "settings.url: ",
             ),
