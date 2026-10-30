@@ -329,15 +329,14 @@ fn insecure_transport_check_does_not_panic_on_multibyte_url() {
     );
 }
 
-/// `ca_cert_pem` is documented but never wired into TLS. `new()` must FAIL CLOSED rather
-/// than accept-and-ignore it (which would silently fall back to system roots).
+/// `ca_cert_pem` must hold a certificate: a fragment is refused at boot, never accepted and ignored.
 #[test]
-fn new_rejects_ca_cert_pem() {
+fn new_rejects_a_ca_cert_pem_with_no_certificate() {
     let mut cfg = base_cfg();
     cfg.ca_cert_pem = Some("-----BEGIN CERTIFICATE-----\n...".to_string());
     assert!(
         LdapModule::new(cfg).is_err(),
-        "an unsupported ca_cert_pem must be rejected, not silently ignored"
+        "a ca_cert_pem holding no certificate must be rejected, not silently ignored"
     );
 }
 

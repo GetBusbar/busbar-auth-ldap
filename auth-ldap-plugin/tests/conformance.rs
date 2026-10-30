@@ -239,25 +239,30 @@ fn host(
     conformance_host::host(wake, anchors)
 }
 
-/// RED: the Statement declares the module's ONE need (an outbound `tcp` stream of the
-/// operator-infrastructure egress class, its target named per login, its trust the connector's
-/// own) and its ONE secret reference, and states no call that blocks; the dropped-in library
+/// RED: the Statement declares the module's TWO needs (each an outbound `tcp` stream of the
+/// operator-infrastructure egress class, its target named per login: the public one on the
+/// connector's own trust, the anchored one on `settings.ca_cert_pem`) and its ONE secret reference, and states no call that blocks; the dropped-in library
 /// states the same Statement.
 #[test]
-fn red_the_statement_declares_one_operator_infrastructure_stream_and_never_blocks() {
+fn red_the_statement_declares_a_public_and_an_anchored_stream_and_never_blocks() {
     let stated = LinkedRow::of_macro(MACRO_DOOR)
         .expect("the linked door renders")
         .statement;
     let read = rendering::read(&stated).expect("the rendering reads");
-    assert_eq!(read.needs.len(), 1);
-    let need = &read.needs[0];
-    assert_eq!(need.direction, DIRECTION_OUTBOUND);
-    assert_eq!(need.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE);
-    assert_eq!(need.transport, "tcp");
-    assert!(need.target_from.is_empty());
+    assert_eq!(read.needs.len(), 2);
+    for need in &read.needs {
+        assert_eq!(need.direction, DIRECTION_OUTBOUND);
+        assert_eq!(need.egress_class, EGRESS_OPERATOR_INFRASTRUCTURE);
+        assert_eq!(need.transport, "tcp");
+        assert!(need.target_from.is_empty());
+    }
     assert!(
-        need.trust_from.is_empty(),
-        "the connector's own trust: the module refuses ca_cert_pem"
+        read.needs[0].trust_from.is_empty(),
+        "the connector's own trust"
+    );
+    assert_eq!(
+        read.needs[1].trust_from, "settings.ca_cert_pem",
+        "the private CA"
     );
     assert_eq!(read.secret_refs, vec!["bind_service_password".to_string()]);
     assert_eq!(read.marks & MARK_BLOCKS, 0, "no call blocks");

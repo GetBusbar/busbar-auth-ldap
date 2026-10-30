@@ -240,6 +240,12 @@ impl LdapModule {
         Ok(self.cfg.bind_dn_template.replace("{username}", safe))
     }
 
+    /// The declared need this module's logins dial on.
+    #[must_use]
+    pub fn need(&self) -> u32 {
+        door::NEED
+    }
+
     /// `password` as a BIND carries it: an `ldaps://` URL, or STARTTLS, lets it go out only on a
     /// connection the host connector reports secured ([`Cred::secure_required`]).
     fn guarded(&self, password: &Cred) -> Cred {

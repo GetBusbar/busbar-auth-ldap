@@ -79,6 +79,8 @@ const TAIL: AuthTail = {
 
 /// The need every login's stream is established on.
 pub const NEED: u32 = 0;
+/// The need a login dials on when the operator names a private CA (`ca_cert_pem`).
+pub const NEED_ANCHORED: u32 = 1;
 
 /// The one need: outbound, a raw byte stream over the host's `tcp` carrier (the plugin frames LDAP
 /// itself), under the `operator-infrastructure` egress class (directories: private, loopback and
