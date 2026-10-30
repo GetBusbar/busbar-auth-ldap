@@ -142,10 +142,9 @@ pub struct LdapConfig {
     #[serde(default)]
     pub bind_service_password: Option<Cred>,
 
-    /// PEM CA bundle to trust for LDAPS/STARTTLS (private AD CA). The need states no
-    /// `trust_from`, and [`LdapModule::new`] refuses a config that sets it at boot
-    /// (fail-closed) rather than silently ignoring it, so the connector's default roots are the
-    /// ones trusted.
+    /// PEM CA bundle to trust for LDAPS/STARTTLS (a private AD CA), on top of the public roots:
+    /// the module then dials on the anchored need, whose `trust_from` hands it to the host
+    /// connector ([`door::NEEDS`]). A value that holds no certificate is refused at boot.
     #[serde(default)]
     pub ca_cert_pem: Option<String>,
 
@@ -240,10 +239,15 @@ impl LdapModule {
         Ok(self.cfg.bind_dn_template.replace("{username}", safe))
     }
 
-    /// The declared need this module's logins dial on.
+    /// The declared need this module's logins dial on: the anchored one when the operator names a
+    /// private CA (`ca_cert_pem`), else the public one.
     #[must_use]
     pub fn need(&self) -> u32 {
-        door::NEED
+        if self.cfg.ca_cert_pem.is_some() {
+            door::NEED_ANCHORED
+        } else {
+            door::NEED
+        }
     }
 
     /// `password` as a BIND carries it: an `ldaps://` URL, or STARTTLS, lets it go out only on a
@@ -273,12 +277,16 @@ fn check_settings(cfg: &LdapConfig) -> Result<(), String> {
             &format!("is not an ldap:// or ldaps:// URL the dialer can read: {e}"),
         );
     }
-    // Fail CLOSED on an unsupported CA bundle: accepting-and-ignoring it would silently fall back
-    // to the system trust roots while the operator believes their private CA is in use.
-    if cfg.ca_cert_pem.is_some() {
+    // A CA bundle that holds no certificate would leave the anchored need refused by the connector
+    // and every login an outage: refuse it here, by name.
+    if cfg
+        .ca_cert_pem
+        .as_deref()
+        .is_some_and(|pem| !holds_a_certificate(pem))
+    {
         refuse(
             "ca_cert_pem",
-            "is not yet supported; omit it or use a system-trusted certificate",
+            "holds no PEM certificate (-----BEGIN CERTIFICATE----- ... -----END CERTIFICATE-----)",
         );
     }
     if !cfg.bind_dn_template.contains("{username}") {
@@ -355,6 +363,29 @@ fn check_settings(cfg: &LdapConfig) -> Result<(), String> {
     } else {
         Err(lines.join("\n"))
     }
+}
+
+/// Whether `pem` holds at least one certificate: every `CERTIFICATE` block's body is base64 of a
+/// DER SEQUENCE, and there is one. The connector parses it in full when it declares the need.
+fn holds_a_certificate(pem: &str) -> bool {
+    use base64::Engine as _;
+    const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
+    const END: &str = "-----END CERTIFICATE-----";
+    let mut rest = pem;
+    let mut found = false;
+    while let Some(at) = rest.find(BEGIN) {
+        let after = &rest[at + BEGIN.len()..];
+        let Some(end) = after.find(END) else {
+            return false;
+        };
+        let body: String = after[..end].split_whitespace().collect();
+        match base64::engine::general_purpose::STANDARD.decode(body) {
+            Ok(der) if der.first() == Some(&0x30) => found = true,
+            _ => return false,
+        }
+        rest = &after[end + END.len()..];
+    }
+    found
 }
 
 /// Would binding over this URL send credentials in CLEARTEXT on the network? True only for a
