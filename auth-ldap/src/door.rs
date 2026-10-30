@@ -34,17 +34,18 @@ use std::task::Poll;
 
 use busbar_contract::abi::auth::{
     AuthTail, BeginLoginIn, BeginLoginOut, CompleteLoginIn, FieldsIn, FieldsOut, IdentifyOut,
-    IdentityBuf, LoginField, OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut,
-    VerifyIn, BEGIN_FORM, CANCEL_ABANDONED, CAP_LOGIN, FORM_PASSWORD, FORM_TEXT, IDENTITY_HAS_TTL,
-    LOGIN_BAD_CREDENTIAL, LOGIN_IDENTITY, LOGIN_KIND_CREDENTIAL, LOGIN_OUTAGE, SPAN_ABSENT,
+    LoginField, OpenOutboundIn, OpenOutboundOut, OutboundReadyIn, OutboundReadyOut, VerifyIn,
+    BEGIN_FORM, CANCEL_ABANDONED, CAP_LOGIN, FORM_PASSWORD, FORM_TEXT, LOGIN_BAD_CREDENTIAL,
+    LOGIN_KIND_CREDENTIAL, LOGIN_OUTAGE,
 };
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
-use busbar_contract::abi::mechanism::call::{AbiStr, Outcome, Span, BLOB_ABSENT};
+use busbar_contract::abi::mechanism::call::{AbiStr, Outcome};
 use busbar_contract::abi::mechanism::door::{Rewrite, Statement};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::with_tail;
+use busbar_contract::abi::sdk::auth_kit::login_identity;
 use busbar_contract::abi::sdk::conn::{Answer, Connector, Host};
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut, Slot};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
@@ -208,55 +209,6 @@ fn field<'a>(fields: &[(&[u8], &'a [u8])], name: &str) -> Option<&'a str> {
         .iter()
         .find(|(n, _)| *n == name.as_bytes())
         .and_then(|(_, v)| std::str::from_utf8(v).ok())
-}
-
-const ABSENT: Span = Span {
-    offset: SPAN_ABSENT,
-    len: 0,
-};
-
-/// Write `p` into the host's identity buffer and answer READY, or the short FAILED (every
-/// `needed_*` at its full size, nothing written) when it does not fit.
-fn write_identity(
-    p: &Principal,
-    buf: Lent<'_, IdentityBuf>,
-    out: &mut Out<'_, IdentifyOut>,
-) -> Outcome {
-    let (mut bytes, mut groups) = (buf.buf(), buf.groups());
-    let need_bytes = p.id.len()
-        + p.name.as_ref().map_or(0, String::len)
-        + p.roles.iter().map(String::len).sum::<usize>();
-    if need_bytes > bytes.cap() || p.roles.len() > groups.cap() {
-        out.set(|o| &o.needed_bytes, need_bytes as u64);
-        out.set(
-            |o| &o.needed_groups,
-            u32::try_from(p.roles.len()).unwrap_or(u32::MAX),
-        );
-        return Outcome::Failed;
-    }
-    let subject = bytes.span(p.id.as_bytes());
-    let name = p.name.as_ref().map_or(ABSENT, |n| bytes.span(n.as_bytes()));
-    for role in &p.roles {
-        let s = bytes.span(role.as_bytes());
-        groups.push(s);
-    }
-    let (flags, ttl) = p.ttl_secs.map_or((0, 0), |t| (IDENTITY_HAS_TTL, t));
-    out.set(|o| &o.identity.subject, subject);
-    out.set(|o| &o.identity.key_id, ABSENT);
-    out.set(|o| &o.identity.key_name, ABSENT);
-    out.set(|o| &o.identity.user, ABSENT);
-    out.set(|o| &o.identity.provider, ABSENT);
-    out.set(|o| &o.identity.name, name);
-    out.set(|o| &o.identity.claims, ABSENT);
-    out.set(|o| &o.identity.claims_fmt, BLOB_ABSENT);
-    out.set(|o| &o.identity.flags, flags);
-    out.set(|o| &o.identity.ttl_secs, ttl);
-    out.set(
-        |o| &o.identity.groups_len,
-        u32::try_from(groups.written()).unwrap_or(u32::MAX),
-    );
-    out.set(|o| &o.verdict, LOGIN_IDENTITY);
-    Outcome::Ready
 }
 
 /// One login in flight, parked on its ticket across its PENDING answers: the module it began with
@@ -433,7 +385,7 @@ impl SafeSlot for CompleteLogin {
                 Outcome::Ready
             }
             Login::Identity(p) => {
-                let answer = write_identity(&p, input.out_buf(), &mut out);
+                let answer = login_identity(&p, input.out_buf(), &mut out);
                 // `0` is never a minted generation: a ticket-less call gets no re-call.
                 if answer == Outcome::Failed && ticket.generation != 0 {
                     ldap.reached

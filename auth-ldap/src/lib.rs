@@ -36,6 +36,7 @@
 #![cfg_attr(not(test), forbid(unsafe_code))]
 #![cfg_attr(test, deny(unsafe_code))]
 
+use busbar_contract::abi::sdk::auth_kit::json_error;
 use busbar_contract::auth::Principal;
 use core::fmt;
 use serde::Deserialize;
@@ -515,7 +516,8 @@ impl LdapModule {
 }
 
 /// The settings blob as an [`LdapConfig`]: an empty blob is refused, and a decode failure is
-/// explained without the decoder's own text where that text could quote a value ([`json_err`]).
+/// explained without the decoder's own text where that text could quote a value
+/// ([`json_error`]).
 fn parse_settings(settings: &[u8]) -> Result<LdapConfig, String> {
     if settings.trim_ascii().is_empty() {
         return Err(
@@ -523,32 +525,7 @@ fn parse_settings(settings: &[u8]) -> Result<LdapConfig, String> {
                 .to_string(),
         );
     }
-    serde_json::from_slice(settings).map_err(json_err("invalid ldap plugin config"))
-}
-
-/// The `map_err` for the settings decode, whose INPUT may carry a secret (a service password, or
-/// one pasted into the wrong key). `serde_json::Error`'s own `Display` is withheld: a data error
-/// quotes the offending value (`invalid type: string "<the value>"`), and this text reaches
-/// `--validate` output and logs. What survives is WHAT failed, the CLASS of failure and WHERE. The
-/// decoder texts kept verbatim are the ones that name a KEY, never a value: a missing field
-/// (spelled from the type's own schema) and an unknown field (busbar-auth-oauth's `json_err`).
-fn json_err(what: &'static str) -> impl FnOnce(serde_json::Error) -> String {
-    move |e: serde_json::Error| {
-        let text = e.to_string();
-        if e.is_data()
-            && (text.starts_with("missing field `") || text.starts_with("unknown field `"))
-        {
-            return format!("{what}: {text}");
-        }
-        let class = match e.classify() {
-            serde_json::error::Category::Io => "the input could not be read",
-            serde_json::error::Category::Syntax => "it is not well-formed JSON",
-            serde_json::error::Category::Data => "a field is missing or has the wrong type",
-            serde_json::error::Category::Eof => "it ends before the JSON does",
-        };
-        let (line, column) = (e.line(), e.column());
-        format!("{what}: {class} (line {line}, column {column}; the decoder's text is withheld)")
-    }
+    serde_json::from_slice(settings).map_err(json_error("invalid ldap plugin config"))
 }
 
 /// LDAP result code 49, invalidCredentials (RFC 4511 §4.1.9).
