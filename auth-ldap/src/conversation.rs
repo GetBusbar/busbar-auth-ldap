@@ -158,6 +158,8 @@ struct Doing {
     sent: usize,
     id: i32,
     entries: Vec<DirEntry>,
+    /// How many messages this operation has read ([`MAX_MESSAGES`]).
+    received: u32,
 }
 
 // By hand: a `SealedWrite` has no `Debug`; only its length shows.
@@ -170,6 +172,7 @@ impl fmt::Debug for Doing {
             .field("sent", &self.sent)
             .field("id", &self.id)
             .field("entries", &self.entries)
+            .field("received", &self.received)
             .finish()
     }
 }
@@ -182,6 +185,11 @@ pub const TIMEOUT: &str = "timeout: deadline has elapsed";
 /// How many entries of one search are kept: the module reads the first entry and needs to know
 /// only whether a second exists. Later entries are read and dropped.
 const MAX_ENTRIES_KEPT: usize = 2;
+
+/// The most messages one operation reads. Its deadline is checked between entries of the op, so a
+/// directory that answers Ready forever (entries, or messages for another id) is cut off here. A
+/// group read answers one entry and a user search is refused past two; 1024 is far above any.
+const MAX_MESSAGES: u32 = 1024;
 
 /// How much one read asks for.
 const READ_CHUNK: usize = 16 * 1024;
@@ -385,6 +393,15 @@ impl<'a, W: Wire> Over<'a, W> {
         let want = self.conv.doing.as_ref().map_or(0, |d| d.id);
         loop {
             let m = self.receive()?;
+            let read = self.conv.doing.as_mut().map_or(0, |d| {
+                d.received += 1;
+                d.received
+            });
+            if read > MAX_MESSAGES {
+                return self.fail(format!(
+                    "the directory sent more than {MAX_MESSAGES} messages for one operation"
+                ));
+            }
             if m.id == want {
                 return Ok(m.reply);
             }
@@ -409,6 +426,7 @@ impl<'a, W: Wire> Over<'a, W> {
                 sent: 0,
                 id,
                 entries: Vec::new(),
+                received: 0,
             }
         })
     }
@@ -438,6 +456,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
             sent: 0,
             id: 0,
             entries: Vec::new(),
+            received: 0,
         })?;
         loop {
             match self.stage() {
@@ -502,6 +521,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                 sent: 0,
                 id,
                 entries: Vec::new(),
+                received: 0,
             }
         })?;
         if self.stage() == Stage::Send {
