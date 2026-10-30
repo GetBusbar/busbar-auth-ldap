@@ -128,24 +128,41 @@ const FORM: &[LoginField] = &[
     },
 ];
 
+/// The most short answers kept for their re-call at once.
+const REACHED_MAX: usize = 1024;
+
+/// The identities short answers reached, by ticket `(slot, generation)`, each stamped with the
+/// order it was kept in.
+#[derive(Default)]
+struct Reached {
+    map: HashMap<(u32, u32), (u64, Principal)>,
+    next: u64,
+}
+
 /// One instance: the module (swapped whole on `refresh`), and the identity a short answer reached,
 /// by ticket, for its one re-call.
 pub struct Ldap {
     module: RwLock<Arc<LdapModule>>,
-    reached: Mutex<HashMap<(u32, u32), Principal>>,
+    reached: Mutex<Reached>,
+}
+
+/// Keep `p` for `key`'s re-call, at most `max` at once.
+fn keep_reached(reached: &mut Reached, max: usize, key: (u32, u32), p: Principal) {
+    let _ = max;
+    reached.next += 1;
+    reached.map.insert(key, (reached.next, p));
 }
 
 /// The identity a short answer kept for `key`'s re-call, taken. Nothing else is left behind for
 /// that ticket SLOT: an op on the slot under another generation proves the earlier op is over. A
 /// call on no ticket (generation `0`, never minted) proves nothing and drops nothing.
-fn take_reached(
-    reached: &mut HashMap<(u32, u32), Principal>,
-    key: (u32, u32),
-) -> Option<Principal> {
+fn take_reached(reached: &mut Reached, key: (u32, u32)) -> Option<Principal> {
     if key.1 != 0 {
-        reached.retain(|&(slot, generation), _| slot != key.0 || generation == key.1);
+        reached
+            .map
+            .retain(|&(slot, generation), _| slot != key.0 || generation == key.1);
     }
-    reached.remove(&key)
+    reached.map.remove(&key).map(|(_, p)| p)
 }
 
 impl Ldap {
@@ -394,10 +411,12 @@ impl SafeSlot for CompleteLogin {
                 let answer = login_identity(&p, input.out_buf(), &mut out);
                 // `0` is never a minted generation: a ticket-less call gets no re-call.
                 if answer == Outcome::Failed && ticket.generation != 0 {
-                    ldap.reached
-                        .lock()
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .insert(key, p);
+                    keep_reached(
+                        &mut ldap.reached.lock().unwrap_or_else(PoisonError::into_inner),
+                        REACHED_MAX,
+                        key,
+                        p,
+                    );
                 }
                 answer
             }

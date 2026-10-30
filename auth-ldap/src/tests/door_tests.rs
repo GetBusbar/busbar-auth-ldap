@@ -6,7 +6,8 @@
 //! plugin crate's `tests/conformance.rs` (linked and dropped in).
 
 use super::{
-    field, take_reached, Ldap, Run, ALIAS, FORM, NAME, NEED, NEEDS, SECRET_REFS, STATEMENT, TAIL,
+    field, keep_reached, take_reached, Ldap, Reached, Run, ALIAS, FORM, NAME, NEED, NEEDS,
+    SECRET_REFS, STATEMENT, TAIL,
 };
 use crate::LdapModule;
 use busbar_contract::abi::auth::{
@@ -168,29 +169,66 @@ fn who(id: &str) -> busbar_contract::auth::Principal {
 /// call's own key answers its identity.
 #[test]
 fn a_later_generation_on_the_slot_drops_the_abandoned_identity() {
-    let mut reached = std::collections::HashMap::new();
-    reached.insert((3, 1), who("abandoned"));
-    reached.insert((4, 1), who("other-slot"));
-    reached.insert((3, 2), who("mine"));
+    let mut reached = Reached::default();
+    keep_reached(&mut reached, 8, (3, 1), who("abandoned"));
+    keep_reached(&mut reached, 8, (4, 1), who("other-slot"));
+    keep_reached(&mut reached, 8, (3, 2), who("mine"));
     let got = take_reached(&mut reached, (3, 2));
     assert_eq!(got.map(|p| p.id), Some("mine".to_string()));
-    assert!(!reached.contains_key(&(3, 1)), "the abandoned entry stays");
-    assert!(!reached.contains_key(&(3, 2)), "the call's own key stays");
-    assert!(reached.contains_key(&(4, 1)), "another slot's entry went");
-    assert_eq!(reached.len(), 1);
+    assert!(
+        !reached.map.contains_key(&(3, 1)),
+        "the abandoned entry stays"
+    );
+    assert!(
+        !reached.map.contains_key(&(3, 2)),
+        "the call's own key stays"
+    );
+    assert!(
+        reached.map.contains_key(&(4, 1)),
+        "another slot's entry went"
+    );
+    assert_eq!(reached.map.len(), 1);
 }
 
 /// A call on no ticket (generation 0, never minted) proves nothing about slot 0: a kept identity on
 /// that slot stays for its own re-call.
 #[test]
 fn a_ticketless_call_leaves_slot_zeros_kept_identity() {
-    let mut reached = std::collections::HashMap::new();
-    reached.insert((0, 5), who("kept"));
+    let mut reached = Reached::default();
+    keep_reached(&mut reached, 8, (0, 5), who("kept"));
     assert!(take_reached(&mut reached, (0, 0)).is_none());
     assert!(
-        reached.contains_key(&(0, 5)),
+        reached.map.contains_key(&(0, 5)),
         "a ticketless call dropped slot 0's identity"
     );
+}
+
+/// THE REACHED MAP IS BOUNDED (auth standard S3): at the cap the OLDEST kept identity goes, never
+/// the rest and never all of them, so an in-flight short answer awaiting its re-call survives a
+/// flood of abandoned ones.
+#[test]
+fn the_reached_map_is_bounded_and_evicts_the_oldest() {
+    let mut reached = Reached::default();
+    for slot in 0..20 {
+        keep_reached(&mut reached, 16, (slot, 1), who(&format!("u{slot}")));
+    }
+    assert_eq!(reached.map.len(), 16, "bounded at the cap");
+    for slot in 0..4 {
+        assert!(
+            !reached.map.contains_key(&(slot, 1)),
+            "slot {slot}: the oldest go first"
+        );
+    }
+    for slot in 4..20 {
+        assert!(
+            reached.map.contains_key(&(slot, 1)),
+            "slot {slot}: the newest stay"
+        );
+    }
+    // Re-keeping a key already held evicts nothing.
+    keep_reached(&mut reached, 16, (19, 1), who("again"));
+    assert_eq!(reached.map.len(), 16);
+    assert!(reached.map.contains_key(&(4, 1)));
 }
 
 /// LDAP is a login method and judges no bearer credential on the data plane: its tail states the
