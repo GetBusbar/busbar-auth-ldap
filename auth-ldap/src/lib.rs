@@ -37,6 +37,7 @@
 #![cfg_attr(test, deny(unsafe_code))]
 
 use busbar_contract::abi::sdk::auth_kit::json_error;
+use busbar_contract::abi::sdk::cred::Cred;
 use busbar_contract::auth::Principal;
 use core::fmt;
 use serde::Deserialize;
@@ -60,33 +61,6 @@ mod tests;
 /// 4096 is far above any real-world group membership; the module logs when it truncates.
 const MAX_GROUP_VALUES: usize = 4096;
 
-/// A secret string that NEVER reveals itself through `Debug`/`Display`.
-///
-/// The end-user password rides `Redacted` across the wire, but the service-account bind password
-/// lives on the `#[derive(Debug)]` [`LdapConfig`], where a bare `String` could leak into a log line,
-/// a `tracing` field, or a panic/`{:?}` dump. This wrapper makes the redaction STRUCTURAL.
-/// It deserializes from a plain JSON string (moved, not copied, into its buffer), the buffer is
-/// wiped on drop ([`Zeroizing`]), and the plaintext is reachable only through the explicit
-/// [`SecretString::expose`] audit point. It is never serialized.
-#[derive(Clone, Deserialize)]
-#[serde(from = "String")]
-pub struct SecretString(Zeroizing<String>);
-
-impl From<String> for SecretString {
-    fn from(s: String) -> Self {
-        Self(Zeroizing::new(s))
-    }
-}
-
-impl zeroize::ZeroizeOnDrop for SecretString {}
-
-impl SecretString {
-    /// Borrow the underlying secret. AUDIT POINT — the one place the plaintext escapes redaction.
-    pub(crate) fn expose(&self) -> &str {
-        &self.0
-    }
-}
-
 /// `url` with any userinfo cut to `***`, safe for a refusal, a log line or `Debug`
 /// (CREDENTIAL-LOCKDOWN H5). The authority ends where the dialer ends it (`/`, `?` or `#`) and its
 /// userinfo is everything up to its LAST `@`, as [`conversation::Endpoint::parse`] reads it. A URL
@@ -103,12 +77,6 @@ pub(crate) fn shown_url(url: &str) -> String {
     match scheme {
         Some(scheme) => format!("{scheme}://***{}", &rest[at..]),
         None => format!("***{}", &rest[at..]),
-    }
-}
-
-impl fmt::Debug for SecretString {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("[REDACTED]")
     }
 }
 
@@ -170,9 +138,10 @@ pub struct LdapConfig {
 
     /// Service-account password. The Statement names this key in its `secret_refs`, so the kernel
     /// resolves it into `OpenIn.secrets[0]`, which wins over this value
-    /// ([`LdapModule::from_settings_with`]); a literal here is still accepted.
+    /// ([`LdapModule::from_settings_with`]); a literal here is still accepted. Held by the chip
+    /// ([`Cred`]): no getter, no `Debug`; it reaches the wire only inside the chip's BIND message.
     #[serde(default)]
-    pub bind_service_password: Option<SecretString>,
+    pub bind_service_password: Option<Cred>,
 
     /// PEM CA bundle to trust for LDAPS/STARTTLS (private AD CA). The need states no
     /// `trust_from`, and [`LdapModule::new`] refuses a config that sets it at boot
@@ -216,7 +185,10 @@ impl fmt::Debug for LdapConfig {
             .field("role_from", &self.role_from)
             .field("user_search_filter", &self.user_search_filter)
             .field("bind_service_dn", &self.bind_service_dn)
-            .field("bind_service_password", &self.bind_service_password)
+            .field(
+                "bind_service_password",
+                &self.bind_service_password.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("ca_cert_pem", &self.ca_cert_pem.is_some())
             .field("start_tls", &self.start_tls)
             .field("allow_insecure_transport", &self.allow_insecure_transport)
@@ -271,6 +243,17 @@ impl LdapModule {
     pub(crate) fn bind_dn_for(&self, username: &str) -> Result<String, String> {
         let safe = groups::validate_username(username)?;
         Ok(self.cfg.bind_dn_template.replace("{username}", safe))
+    }
+
+    /// `password` as a BIND carries it: an `ldaps://` URL, or STARTTLS, lets it go out only on a
+    /// connection the host connector reports secured ([`Cred::secure_required`]).
+    fn guarded(&self, password: &Cred) -> Cred {
+        let password = password.clone().secure_for(&self.cfg.url);
+        if self.cfg.start_tls {
+            password.require_secure()
+        } else {
+            password
+        }
     }
 }
 
@@ -330,7 +313,7 @@ fn check_settings(cfg: &LdapConfig) -> Result<(), String> {
         if cfg
             .bind_service_password
             .as_ref()
-            .is_some_and(|pw| pw.expose().is_empty())
+            .is_some_and(Cred::is_empty)
         {
             return Err(
                 "ldap bind_service_password must not be empty (an empty password becomes \
@@ -438,9 +421,10 @@ impl LdapModule {
     pub fn from_settings_with(settings: &[u8], secrets: &[&[u8]]) -> Result<Self, String> {
         let mut cfg = parse_settings(settings)?;
         if let Some(secret) = secrets.first().filter(|s| !s.is_empty()) {
-            let secret = std::str::from_utf8(secret)
-                .map_err(|_| "ldap bind_service_password secret is not UTF-8".to_string())?;
-            cfg.bind_service_password = Some(SecretString(Zeroizing::new(secret.to_owned())));
+            if std::str::from_utf8(secret).is_err() {
+                return Err("ldap bind_service_password secret is not UTF-8".to_string());
+            }
+            cfg.bind_service_password = Some(Cred::captured(Zeroizing::new(secret.to_vec())));
         }
         Self::new(cfg)
     }
@@ -458,7 +442,7 @@ impl LdapModule {
         conv: &mut Conversation,
         wire: &mut W,
         username: Option<&str>,
-        password: Option<&str>,
+        password: Option<&Cred>,
         now_ns: Option<u64>,
     ) -> Poll<Login> {
         let (Some(username), Some(password)) = (username, password) else {
@@ -623,7 +607,7 @@ pub(crate) trait LdapBackend {
     /// Bind with the given DN + password. `Ok(rc)` is the LDAP result code (0 = success, e.g. 49 =
     /// invalidCredentials); `Err` is an operational/transport failure (connect/TLS/timeout), NOT a
     /// statement about the credential's validity, or a pending stream.
-    fn simple_bind(&mut self, dn: &str, password: &str) -> Result<u32, Io>;
+    fn simple_bind(&mut self, dn: &str, password: &Cred) -> Result<u32, Io>;
 
     /// Run a search and return the matched entries. `Err` is an operational failure (which includes a
     /// non-success result code), or a pending stream.
@@ -661,7 +645,7 @@ impl LdapModule {
         &self,
         ldap: &mut B,
         username: &str,
-        password: &str,
+        password: &Cred,
     ) -> Result<Principal, BindError> {
         ldap.connect()
             .map_err(at(&format!("connect {}", shown_url(&self.cfg.url))))?;
@@ -681,10 +665,9 @@ impl LdapModule {
                 .cfg
                 .bind_service_password
                 .as_ref()
-                .map(SecretString::expose)
-                .unwrap_or("");
+                .map_or_else(Cred::empty, |pw| self.guarded(pw));
             let rc = ldap
-                .simple_bind(svc_dn, svc_pw)
+                .simple_bind(svc_dn, &svc_pw)
                 .map_err(at("service bind"))?;
             if rc != 0 {
                 return Err(BindError::Directory(format!(
@@ -737,7 +720,9 @@ impl LdapModule {
         // non-zero code (48, 50, 53, ...) refuses this credential, the same bad credential as a
         // wrong password, its real result logged at warn by `login_over` (never the password or
         // the DN).
-        let rc = ldap.simple_bind(&user_dn, password).map_err(at("bind"))?;
+        let rc = ldap
+            .simple_bind(&user_dn, &self.guarded(password))
+            .map_err(at("bind"))?;
         if rc == LDAP_INVALID_CREDENTIALS {
             tracing::info!(
                 module = "ldap",

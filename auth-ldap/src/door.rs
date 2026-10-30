@@ -47,6 +47,7 @@ use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::with_tail;
 use busbar_contract::abi::sdk::auth_kit::login_identity;
 use busbar_contract::abi::sdk::conn::{Answer, Connector, Host};
+use busbar_contract::abi::sdk::cred::{Cred, SealedWrite};
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut, Slot};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
@@ -212,13 +213,13 @@ fn field<'a>(fields: &[(&[u8], &'a [u8])], name: &str) -> Option<&'a str> {
 }
 
 /// One login in flight, parked on its ticket across its PENDING answers: the module it began with
-/// (a `refresh` meanwhile does not change it), the submitted credential (the password in a buffer
-/// wiped on drop), the conversation, the stream once established, and the handle of the first
+/// (a `refresh` meanwhile does not change it), the submitted credential (the password held by the
+/// chip, `Cred`), the conversation, the stream once established, and the handle of the first
 /// connector service not yet completed.
 struct Run {
     module: Arc<LdapModule>,
     username: Option<String>,
-    password: Option<Zeroizing<String>>,
+    password: Option<Cred>,
     conv: Conversation,
     stream: Option<u64>,
     at: u32,
@@ -277,6 +278,10 @@ impl Wire for HostWire<'_> {
     fn read(&mut self, buf: &mut [u8]) -> Poll<Result<usize, String>> {
         self.serve(|c, s| c.read(s, buf))
     }
+
+    fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>> {
+        self.serve(|c, s| w.poll(c, s))
+    }
 }
 
 /// The host's monotonic clock, when it offers one.
@@ -304,7 +309,8 @@ fn drive(
             Run {
                 module: h.life().module(),
                 username: field(&fields, USERNAME.0).map(str::to_owned),
-                password: field(&fields, PASSWORD.0).map(|p| Zeroizing::new(p.to_owned())),
+                password: field(&fields, PASSWORD.0)
+                    .map(|p| Cred::captured(Zeroizing::new(p.as_bytes().to_vec()))),
                 conv: Conversation::new(),
                 stream: None,
                 at: 0,
@@ -322,7 +328,7 @@ fn drive(
         &mut run.conv,
         &mut wire,
         run.username.as_deref(),
-        run.password.as_ref().map(|p| p.as_str()),
+        run.password.as_ref(),
         now,
     );
     match answer {

@@ -146,7 +146,7 @@ fn the_resolved_service_secret_wins_over_the_literal() {
         m.cfg
             .bind_service_password
             .as_ref()
-            .map(|p| p.expose().to_owned())
+            .map(crate::tests::cred_text)
     };
     let m = LdapModule::from_settings_with(blob, &[b"resolved".as_slice()]).expect("opens");
     assert_eq!(pw(&m).as_deref(), Some("resolved"));
@@ -279,20 +279,23 @@ fn a_mistyped_setting_is_refused_without_echoing_its_value() {
     assert!(!e.contains("hunter2"), "{e}");
 }
 
-/// The submitted password a parked login holds wipes on drop.
+/// The submitted password a parked login holds is the chip's credential (wiped on drop, no getter).
 #[test]
-fn a_parked_logins_password_is_wiped_on_drop() {
-    fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
+fn a_parked_logins_password_is_the_chips() {
     let module = std::sync::Arc::new(LdapModule::from_settings(MINIMAL.as_bytes()).unwrap());
     let run = Run {
         module,
         username: Some("alice".to_string()),
-        password: Some(zeroize::Zeroizing::new("pw".to_string())),
+        password: Some(crate::tests::cred("pw")),
         conv: crate::conversation::Conversation::new(),
         stream: None,
         at: 0,
     };
-    if let Some(pw) = run.password.as_ref() {
-        wipes(pw);
-    }
+    assert_eq!(
+        run.password
+            .as_ref()
+            .map(crate::tests::cred_text)
+            .as_deref(),
+        Some("pw")
+    );
 }

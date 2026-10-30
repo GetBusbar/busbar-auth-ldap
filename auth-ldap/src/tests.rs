@@ -11,6 +11,7 @@ use crate::{
     principal_id, BindError, DirEntry, Io, LdapBackend, LdapConfig, LdapModule, Login, RoleFrom,
     SearchScope,
 };
+use busbar_contract::abi::sdk::cred::{Cred, SealedWrite};
 use std::collections::HashMap;
 
 impl LdapModule {
@@ -26,8 +27,53 @@ impl LdapModule {
         username: &str,
         password: &str,
     ) -> Result<busbar_contract::auth::Principal, BindError> {
-        self.bind_and_identify(ldap, username, password)
+        self.bind_and_identify(ldap, username, &cred(password))
     }
+
+    /// [`LdapModule::login_over`] with the submitted password as text, held as the door holds it.
+    pub(crate) fn login_text<W: crate::conversation::Wire>(
+        &self,
+        conv: &mut crate::conversation::Conversation,
+        wire: &mut W,
+        username: Option<&str>,
+        password: Option<&str>,
+        now_ns: Option<u64>,
+    ) -> std::task::Poll<Login> {
+        let password = password.map(cred);
+        self.login_over(conv, wire, username, password.as_ref(), now_ns)
+    }
+}
+
+/// A credential holding `text`, as the door holds a submitted password.
+pub(crate) fn cred(text: &str) -> Cred {
+    busbar_contract::abi::sdk::test_support::chip::cred(text)
+}
+
+/// The text a credential carries, read back off the chip's BIND message as the wire takes it.
+pub(crate) fn cred_text(c: &Cred) -> String {
+    let mut w = SealedWrite::message(c.ldap_simple_bind(1, ""));
+    let mut bytes = Vec::new();
+    let sent: std::task::Poll<Result<(), ()>> =
+        busbar_contract::abi::sdk::test_support::chip::drive_sealed(&mut w, |b| {
+            bytes.extend_from_slice(b);
+            std::task::Poll::Ready(Ok(b.len()))
+        });
+    assert!(sent.is_ready(), "the BIND is written whole");
+    // `... 04 00 80 <len> <password>`: the empty DN, then the simple credential, last.
+    let at = bytes
+        .windows(3)
+        .position(|w| w == [0x04, 0x00, 0x80])
+        .expect("a simple BIND")
+        + 3;
+    let (len, from) = match bytes[at] {
+        n if n < 0x80 => (usize::from(n), at + 1),
+        0x81 => (usize::from(bytes[at + 1]), at + 2),
+        _ => (
+            usize::from(bytes[at + 1]) << 8 | usize::from(bytes[at + 2]),
+            at + 3,
+        ),
+    };
+    String::from_utf8(bytes[from..from + len].to_vec()).expect("a test password is text")
 }
 
 fn base_cfg() -> LdapConfig {
@@ -483,6 +529,9 @@ impl crate::conversation::Wire for Untouched {
     fn read(&mut self, _: &mut [u8]) -> std::task::Poll<Result<usize, String>> {
         panic!("a refused credential never reaches the wire")
     }
+    fn write_sealed(&mut self, _: &mut SealedWrite) -> std::task::Poll<Result<(), String>> {
+        panic!("a refused credential never reaches the wire")
+    }
 }
 
 /// `login_over` refuses absent credentials and an empty (anonymous-bind) password without ever
@@ -492,7 +541,7 @@ fn login_refuses_missing_or_empty_credentials() {
     let m = LdapModule::new(base_cfg()).unwrap();
     let login = |u: Option<&str>, p: Option<&str>| {
         let mut conv = crate::conversation::Conversation::new();
-        m.login_over(&mut conv, &mut Untouched, u, p, None)
+        m.login_text(&mut conv, &mut Untouched, u, p, None)
     };
     use std::task::Poll::Ready;
     assert_eq!(login(None, None), Ready(Login::BadCredential));
@@ -567,7 +616,9 @@ struct FakeLdap {
 }
 
 impl LdapBackend for FakeLdap {
-    fn simple_bind(&mut self, dn: &str, password: &str) -> Result<u32, Io> {
+    fn simple_bind(&mut self, dn: &str, password: &Cred) -> Result<u32, Io> {
+        let password = cred_text(password);
+        let password = password.as_str();
         self.binds.push(dn.to_string());
         self.bind_pairs.push((dn.to_string(), password.to_string()));
         if self.bind_err_on.as_deref() == Some(dn) {
@@ -1167,7 +1218,7 @@ impl LdapBackend for Unreachable {
     fn connect(&mut self) -> Result<(), Io> {
         Err(Io::Failed("connection refused".to_string()))
     }
-    fn simple_bind(&mut self, _: &str, _: &str) -> Result<u32, Io> {
+    fn simple_bind(&mut self, _: &str, _: &Cred) -> Result<u32, Io> {
         unreachable!("no bind without a connection")
     }
     fn search(
@@ -1222,7 +1273,7 @@ fn a_connect_failure_never_carries_the_url_password() {
     let Ok(m) = LdapModule::new(userinfo_cfg(&url, false)) else {
         panic!("ldaps opens");
     };
-    match m.bind_and_identify(&mut Unreachable, "alice", "pw") {
+    match m.bind_and_identify_on(&mut Unreachable, "alice", "pw") {
         Err(BindError::Directory(e)) => {
             assert!(!e.contains(CANARY), "the failure carried the password: {e}");
             assert!(e.starts_with("connect "), "1.5.5's prefix is kept: {e}");
@@ -1316,7 +1367,7 @@ mod logging {
         let m = LdapModule::new(base_cfg()).unwrap();
         let login = |u: Option<&str>, p: Option<&str>| {
             let mut conv = crate::conversation::Conversation::new();
-            m.login_over(&mut conv, &mut Untouched, u, p, Some(0))
+            m.login_text(&mut conv, &mut Untouched, u, p, Some(0))
         };
         let (r, cap) = captured(|| login(Some("alice"), None));
         assert_eq!(r, std::task::Poll::Ready(Login::BadCredential));
@@ -1348,7 +1399,7 @@ mod logging {
         let cap = WarnCapture::default();
         let got = tracing::subscriber::with_default(cap.clone(), || {
             let mut conv = crate::conversation::Conversation::new();
-            m.login_over(&mut conv, &mut Untouched, Some("alice"), Some("pw"), None)
+            m.login_text(&mut conv, &mut Untouched, Some("alice"), Some("pw"), None)
         });
         assert_eq!(got, std::task::Poll::Ready(Login::Outage));
         assert!(
@@ -1359,19 +1410,10 @@ mod logging {
     }
 }
 
-/// Every credential holder wipes on drop.
-fn wipes<T: zeroize::ZeroizeOnDrop>(_: &T) {}
-
+/// The service password is the chip's credential, holding exactly the configured text.
 #[test]
-fn the_service_password_and_the_bind_request_are_wiped_on_drop() {
+fn the_service_password_is_held_by_the_chip() {
     let m = LdapModule::new(search_cfg()).unwrap();
     let pw = m.cfg.bind_service_password.as_ref().expect("set");
-    wipes(pw);
-    let req = crate::codec::bind(1, "cn=svc,dc=x", "s3cret");
-    wipes(&req);
-    assert_eq!(
-        &req[..],
-        &crate::codec::bind(1, "cn=svc,dc=x", "s3cret")[..],
-        "deterministic"
-    );
+    assert_eq!(cred_text(pw), "svc-secret");
 }
