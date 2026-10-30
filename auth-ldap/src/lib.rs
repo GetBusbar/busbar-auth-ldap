@@ -59,8 +59,7 @@ mod tests;
 /// 4096 is far above any real-world group membership; the module logs when it truncates.
 const MAX_GROUP_VALUES: usize = 4096;
 
-/// `url` with any userinfo cut to `***`, safe for a refusal, a log line or `Debug`
-/// (CREDENTIAL-LOCKDOWN H5). The authority ends where the dialer ends it (`/`, `?` or `#`) and its
+/// `url` with any userinfo cut to `***`, safe for a refusal, a log line or `Debug`. The authority ends where the dialer ends it (`/`, `?` or `#`) and its
 /// userinfo is everything up to its LAST `@`, as [`conversation::Endpoint::parse`] reads it. A URL
 /// with no userinfo is unchanged.
 pub(crate) fn shown_url(url: &str) -> String {
