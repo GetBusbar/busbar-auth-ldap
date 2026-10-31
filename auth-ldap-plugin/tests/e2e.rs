@@ -641,10 +641,13 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
         )
         .send()
         .expect("chat with the issued key");
-    assert_ne!(
-        chat.status().as_u16(),
-        401,
-        "the self-scoped ldap key must authenticate"
+    // The key authenticated AND was routed: the only failure left is the dead mock upstream
+    // (127.0.0.1:9), a gateway answer. 401 (not authenticated), 403 (no usable scope), 404 (not
+    // routed) or 429 would each mean the issued key does not work.
+    let status = chat.status().as_u16();
+    assert!(
+        matches!(status, 502..=504),
+        "the self-scoped ldap key must authenticate and reach the (dead) upstream: got {status}"
     );
 
     // WRONG password must be rejected 401 — proving the REAL bind gates. Fresh begin → fresh cookie.

@@ -14,7 +14,7 @@
 //!    with the user's DN + password over it ([`codec`], [`conversation`]).
 //! 4. On a successful bind it reads the user's group memberships (the `group_attr`
 //!    attribute, `memberOf` by default) and answers a [`Principal`] whose `roles` are the group names, mapped to policy downstream by
-//!    the operator's `auth.role_bindings.ldap`.
+//!    the operator's `auth.role_bindings.<provider name>`.
 //!
 //! Every stream service may answer PENDING; `complete_login` then answers PENDING and resumes on
 //! the wake, and the [`conversation::Conversation`] it parks replays what completed without
@@ -42,16 +42,26 @@ use serde::Deserialize;
 use std::task::Poll;
 use zeroize::Zeroizing;
 
-pub mod ber;
-pub mod codec;
+pub(crate) mod ber;
+pub(crate) mod codec;
 pub mod conversation;
 pub mod door;
-pub mod filter;
-pub mod groups;
+pub(crate) mod filter;
+pub(crate) mod groups;
 
 use conversation::{Conversation, Over, Wire};
 
+/// THE COMPILED-IN ENTRY, in the fleet's one form: a busbar build that links this crate as a row
+/// names `busbar_auth_ldap::compiled_in::door` (the same door as [`door::door`]).
+pub mod compiled_in {
+    /// The door and its macro door.
+    pub mod door {
+        pub use crate::door::{door, MACRO_DOOR};
+    }
+}
+
 #[cfg(test)]
+#[path = "tests/lib_tests.rs"]
 mod tests;
 
 /// The maximum number of `memberOf` group values read off a user entry. A hostile or misconfigured
@@ -89,7 +99,8 @@ pub enum RoleFrom {
     Dn,
 }
 
-/// Open-time configuration for the LDAP module — the module's OPAQUE `auth.methods.ldap` settings,
+/// Open-time configuration for the LDAP module — the module's OPAQUE
+/// `identity-providers.<name>.settings`,
 /// deserialized from the JSON the engine passes to `open`. Every LDAP-specific knob (URL, DN
 /// templates, TLS/CA, group attribute) fits here as opaque module settings: the engine never needs
 /// to understand any of these fields. Its `Debug` prints the URL with any userinfo cut
@@ -133,10 +144,11 @@ pub struct LdapConfig {
     #[serde(default)]
     pub bind_service_dn: Option<String>,
 
-    /// Service-account password. The Statement names this key in its `secret_refs`, so the kernel
-    /// resolves it into `OpenIn.secrets[0]`, which wins over this value
-    /// ([`LdapModule::from_settings_with`]); a literal here is still accepted. Held by the chip
-    /// ([`Cred`]): no getter, no `Debug`; it reaches the wire only inside the chip's BIND message.
+    /// Service-account password. The Statement names this key in its `secret_refs`, so busbar
+    /// resolves the reference and hands it to `open` as `OpenIn.secrets[0]`
+    /// ([`LdapModule::from_settings_with`]); a literal in the settings blob refuses `validate` and
+    /// boot. Held by the chip ([`Cred`]): no getter, no `Debug`; it reaches the wire only inside the
+    /// chip's BIND message.
     #[serde(default)]
     pub bind_service_password: Option<Cred>,
 
@@ -167,6 +179,9 @@ pub struct LdapConfig {
 fn default_group_attr() -> String {
     "memberOf".to_string()
 }
+/// The longest `timeout_secs` may be, in seconds.
+const MAX_TIMEOUT_SECS: u64 = 120;
+
 fn default_timeout_secs() -> u64 {
     10
 }
@@ -200,8 +215,9 @@ pub struct LdapModule {
 }
 
 impl LdapModule {
-    /// Build the module from parsed config. Validates the DN template references `{username}` so a
-    /// misconfiguration fails at boot, not on the first login.
+    /// Build the module from parsed config: every settings check ([`check_settings`]) so a
+    /// misconfiguration fails at boot, not on the first login, then the search-then-bind service
+    /// password rule; logs (info) an empty search base and (warn) an opted-out plaintext transport.
     pub fn new(cfg: LdapConfig) -> Result<Self, String> {
         check_settings(&cfg)?;
         // A service DN with NO password would perform `simple_bind(dn, "")`, an UNAUTHENTICATED
@@ -218,14 +234,25 @@ impl LdapModule {
         //
         // This is a `tracing` call; the SDK forwards this plugin's dispatcher into the host log
         // sink, so it reaches the operator's logs.
+        // An empty search base is a valid one (the AD Global Catalog, OpenLDAP's
+        // `olcDefaultSearchBase` serve a search from the root DSE), so it is accepted, but said.
+        if cfg.user_search_filter.is_some() && cfg.base_dn.trim().is_empty() {
+            tracing::info!(
+                module = "ldap",
+                reason = "root-dse-base",
+                "base_dn is empty: the search-then-bind user search runs from the root DSE \
+                 (base \"\")"
+            );
+        }
         if is_insecure_transport(&cfg.url, cfg.start_tls) {
             tracing::warn!(
-                module = "ldap",
-                url = %shown_url(&cfg.url),
-                "allow_insecure_transport is set: binds run over plaintext ldap:// to a \
-                 non-loopback host, so the service-account AND every end-user password cross the \
-                 network in cleartext"
-            );
+                           module = "ldap",
+            reason = "insecure-transport",
+                           url = %shown_url(&cfg.url),
+                           "allow_insecure_transport is set: binds run over plaintext ldap:// to a \
+                            non-loopback host, so the service-account AND every end-user password cross the \
+                            network in cleartext"
+                       );
         }
         Ok(Self { cfg })
     }
@@ -308,6 +335,10 @@ fn check_settings(cfg: &LdapConfig) -> Result<(), String> {
     // A zero timeout expires every connect and operation at once, so every login would fail.
     if cfg.timeout_secs == 0 {
         refuse("timeout_secs", "must be at least 1");
+    } else if cfg.timeout_secs > MAX_TIMEOUT_SECS {
+        // Each operation of a login waits up to this long, and a login runs several: unbounded,
+        // a hung directory pins every in-flight login slot for as long as it is set to.
+        refuse("timeout_secs", "must be at most 120");
     }
     // A blank group attribute is requested and read back as nothing: every login, no roles.
     if cfg.group_attr.trim().is_empty() {
@@ -318,6 +349,18 @@ fn check_settings(cfg: &LdapConfig) -> Result<(), String> {
             refuse(
                 "user_search_filter",
                 "must contain the `{username}` placeholder",
+            );
+        } else if filter::encode(&f.replace("{username}", &groups::escape_filter("username")))
+            .is_err()
+        {
+            // A template that does not parse would fail every login as an outage: refuse it
+            // here, as it is applied (a sample username, escaped, in its place).
+            refuse(
+                "user_search_filter",
+                &format!(
+                    "is not an RFC 4515 search filter (or nests deeper than {} levels)",
+                    filter::MAX_DEPTH
+                ),
             );
         }
         if cfg
@@ -400,33 +443,11 @@ fn is_insecure_transport(url: &str, start_tls: bool) -> bool {
     if start_tls {
         return false;
     }
-    // Anything else here is a plaintext `ldap://` (or scheme-less) connection: only safe to a
-    // loopback host, which never puts the credential on the wire.
-    !is_loopback_host(host_of(url))
-}
-
-/// Extract the host from an `ldap://host:port` / `ldaps://host:port` URL, tolerating an `[::1]`
-/// bracketed IPv6 literal and an absent scheme. Returns the raw host with no port or path.
-fn host_of(url: &str) -> &str {
-    let after = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    // The authority ends at the first '/', '?' or '#', as the dialer's `Endpoint::parse` ends it:
-    // a different split lets `ldap://evil.example?x@127.0.0.1` read as loopback here.
-    let authority = after.split(['/', '?', '#']).next().unwrap_or("");
-    // Strip any userinfo: everything up to and including the LAST '@'. WITHOUT this, a URL like
-    // `ldap://127.0.0.1:389@evil.com` reads as loopback here while the dial actually lands on `evil.com`
-    // in cleartext — a fail-OPEN bypass of the plaintext guard.
-    let hostport = authority
-        .rsplit_once('@')
-        .map(|(_, h)| h)
-        .unwrap_or(authority);
-    if let Some(rest) = hostport.strip_prefix('[') {
-        // Bracketed IPv6 literal: the host is everything up to the closing bracket.
-        if let Some(end) = rest.find(']') {
-            return &rest[..end];
-        }
-    }
-    // Otherwise the host ends at the first ':' (port).
-    hostport.split(':').next().unwrap_or("")
+    // Anything else here is a plaintext `ldap://` connection: only safe to a loopback host, which
+    // never puts the credential on the wire. The host is the one the dialer dials: ONE split of the
+    // URL ([`conversation::Endpoint::parse`]), so the guard and the dial cannot drift. A URL the
+    // dialer cannot read is refused by name anyway, and reads as insecure here.
+    !conversation::Endpoint::parse(url, false).is_ok_and(|e| is_loopback_host(&e.host))
 }
 
 /// Is this host a loopback address that never leaves the machine? Matches the canonical trio only —
@@ -459,14 +480,17 @@ impl LdapModule {
     /// resolves only at `open`, so its PRESENCE is `open`'s rule ([`LdapModule::new`]), not this
     /// one's; an explicit empty literal is still refused here.
     pub fn validate_settings(settings: &[u8]) -> Result<(), String> {
-        check_settings(&parse_settings(settings)?)
+        let cfg = parse_settings(settings)?;
+        refuse_a_literal_secret(&cfg)?;
+        check_settings(&cfg)
     }
 
-    /// [`LdapModule::from_settings`], with the secrets the kernel resolved for the Statement's
+    /// The module from a settings blob, with the secrets the kernel resolved for the Statement's
     /// `secret_refs` (`bind_service_password`): a non-empty first secret is the service-account
-    /// password, over any literal in the settings.
+    /// password (a literal in the settings refuses).
     pub fn from_settings_with(settings: &[u8], secrets: &[&[u8]]) -> Result<Self, String> {
         let mut cfg = parse_settings(settings)?;
+        refuse_a_literal_secret(&cfg)?;
         if let Some(secret) = secrets.first().filter(|s| !s.is_empty()) {
             if std::str::from_utf8(secret).is_err() {
                 return Err("secrets: `bind_service_password` is not UTF-8".to_string());
@@ -495,6 +519,7 @@ impl LdapModule {
         let (Some(username), Some(password)) = (username, password) else {
             tracing::info!(
                 module = "ldap",
+                reason = "missing-field",
                 "ldap login refused: the username or password field was not submitted"
             );
             return Poll::Ready(Login::BadCredential);
@@ -502,6 +527,7 @@ impl LdapModule {
         if password.is_empty() {
             tracing::info!(
                 module = "ldap",
+                reason = "empty-password",
                 "ldap login refused: empty password (an anonymous bind is never attempted)"
             );
             return Poll::Ready(Login::BadCredential);
@@ -512,6 +538,7 @@ impl LdapModule {
         if now_ns.is_none() {
             tracing::warn!(
                 module = "ldap",
+                reason = "no-clock",
                 "no host clock: refusing an untimed directory call"
             );
             return Poll::Ready(Login::Outage);
@@ -531,6 +558,7 @@ impl LdapModule {
             Err(BindError::Rejected { rc }) => {
                 tracing::info!(
                     module = "ldap",
+                    reason = "bind-refused",
                     rc,
                     result = codec::rc_name(rc),
                     "ldap user bind refused by the directory (not invalidCredentials); \
@@ -539,11 +567,27 @@ impl LdapModule {
                 Poll::Ready(Login::BadCredential)
             }
             Err(BindError::Directory(e)) => {
-                tracing::warn!(module = "ldap", error = %e, "ldap bind/search failed (not a credential rejection)");
+                tracing::warn!(module = "ldap",
+ reason = "directory-error", error = %e, "ldap bind/search failed (not a credential rejection)");
                 Poll::Ready(Login::Outage)
             }
         }
     }
+}
+
+/// The service password is a secret REFERENCE, never a literal (auth standard S1): busbar resolves
+/// it and lifts the key out of the settings into `OpenIn.secrets` before `validate` and `open`, so a
+/// `bind_service_password` still IN the settings blob is a literal. It refuses, naming the key and
+/// never the value.
+fn refuse_a_literal_secret(cfg: &LdapConfig) -> Result<(), String> {
+    if cfg.bind_service_password.is_some() {
+        return Err(
+            "settings.bind_service_password: must be a secret reference (for example \
+             `{ env: LDAP_BIND_PASSWORD }`), never a literal"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// The settings blob as an [`LdapConfig`], parsed by the chip ([`cred::settings`]): the service
@@ -551,9 +595,7 @@ impl LdapModule {
 /// line naming the key and the type, never a value.
 fn parse_settings(settings: &[u8]) -> Result<LdapConfig, String> {
     if settings.trim_ascii().is_empty() {
-        return Err(
-            "settings: required (url, bind_dn_template, base_dn); none provided".to_string(),
-        );
+        return Err("settings: none provided; requires url, bind_dn_template, base_dn".to_string());
     }
     cred::settings(settings).map_err(|e: cred::SettingsError| {
         let text = e.to_string();
@@ -565,8 +607,31 @@ fn parse_settings(settings: &[u8]) -> Result<LdapConfig, String> {
     })
 }
 
+/// An attribute description's TYPE: what precedes its first `;option` (RFC 4512 §2.5).
+fn attribute_type(description: &str) -> &str {
+    description.split(';').next().unwrap_or(description)
+}
+
+/// The `range=<low>-<high>` option of an attribute description, when it is a PARTIAL range (its
+/// high bound is not `*`): the directory returned only some of the attribute's values.
+fn partial_range(description: &str) -> Option<&str> {
+    description.split(';').skip(1).find(|option| {
+        option.len() > 6
+            && option.as_bytes()[..6].eq_ignore_ascii_case(b"range=")
+            && option.rsplit_once('-').is_some_and(|(_, high)| high != "*")
+    })
+}
+
+/// The attribute list that asks for no attributes (RFC 4511 §4.5.1.8): the user search needs only
+/// the entry's DN, which every SearchResultEntry carries.
+const NO_ATTRIBUTES: &str = "1.1";
+
 /// LDAP result code 49, invalidCredentials (RFC 4511 §4.1.9).
 const LDAP_INVALID_CREDENTIALS: u32 = 49;
+/// LDAP result code 32, noSuchObject (RFC 4511 §4.1.9).
+const LDAP_NO_SUCH_OBJECT: u32 = 32;
+/// LDAP result code 50, insufficientAccessRights (RFC 4511 §4.1.9).
+const LDAP_INSUFFICIENT_ACCESS: u32 = 50;
 
 /// Is a (non-49) user-bind result code a SERVER or SESSION condition, one
 /// that fails the bind for every user alike (an outage), rather than a refusal of this one bind?
@@ -619,6 +684,14 @@ pub(crate) enum Io {
     Pending,
     /// An operational failure, with its text.
     Failed(String),
+    /// A search the directory answered with a non-zero SearchResultDone: its result code, and the
+    /// failure's text.
+    Refused {
+        /// The SearchResultDone's result code.
+        rc: u32,
+        /// The failure's text.
+        text: String,
+    },
 }
 
 impl From<String> for Io {
@@ -631,7 +704,7 @@ impl From<String> for Io {
 fn at(ctx: &str) -> impl FnOnce(Io) -> BindError + '_ {
     move |e| match e {
         Io::Pending => BindError::Pending,
-        Io::Failed(e) => BindError::Directory(format!("{ctx}: {e}")),
+        Io::Failed(e) | Io::Refused { text: e, .. } => BindError::Directory(format!("{ctx}: {e}")),
     }
 }
 
@@ -647,7 +720,7 @@ pub(crate) enum SearchScope {
 /// A directory entry reduced to what the module reads: its DN and requested attributes.
 pub(crate) use codec::Entry as DirEntry;
 
-/// The minimal LDAP operations [`LdapModule::bind_and_identify_on`] needs, abstracted behind a trait
+/// The minimal LDAP operations `LdapModule::bind_and_identify` needs, abstracted behind a trait
 /// so the post-connect bind logic (result-code handling, ambiguity, group cap, roles, principal id)
 /// is UNIT-TESTABLE against a fake in-memory directory. The production impl
 /// ([`conversation::Over`]) speaks the codec over the host's stream; tests drive a fake.
@@ -676,15 +749,34 @@ pub(crate) trait LdapBackend {
     fn unbind(&mut self) -> Result<(), Io>;
 }
 
-/// Build the STABLE principal id from the resolved bind DN. The submitted username is user-controlled
-/// in its CASING (`Alice`/`alice`) and form (`DOMAIN\alice`); using it raw would mint DIFFERENT
-/// identities — and duplicate self-serve keys — for the SAME person. LDAP DNs are case-insensitive,
-/// so we key identity on the resolved DN lowercased: exactly one canonical `ldap:<dn>` per directory
-/// identity, in both direct-template and search-then-bind modes. Lowercasing is Unicode-aware
-/// (`to_lowercase`, not `to_ascii_lowercase`) — `validate_username` allows non-ASCII names, so an
-/// ASCII-only fold would mint two distinct principals for two casings of a non-ASCII username.
+/// Build the STABLE principal id from the user entry's DN: the DN the directory RETURNED for the
+/// bound entry (the group read's objectName) when it returned one, else the DN bound as. The
+/// submitted username is user-controlled in its CASING (`Alice`/`alice`), its spacing
+/// (`John  Smith`/`John Smith`) and form (`DOMAIN\alice`); using it raw would mint DIFFERENT
+/// identities — and duplicate self-serve keys and budgets — for the SAME entry. The DN is normalised
+/// for case-ignore matching (RFC 4518 §2): case folded and every run of spaces collapsed to one, so
+/// there is exactly one canonical `ldap:<dn>` per directory identity, in both direct-template and
+/// search-then-bind modes. Lowercasing is Unicode-aware (`to_lowercase`, not
+/// `to_ascii_lowercase`) — `validate_username` allows non-ASCII names, so an ASCII-only fold would
+/// mint two distinct principals for two casings of a non-ASCII username. (RFC 4518's NFKC step
+/// needs a Unicode normalisation table this crate does not carry; the directory's own spelling of
+/// the DN is preferred for that reason.)
 fn principal_id(user_dn: &str) -> String {
-    format!("ldap:{}", user_dn.to_lowercase())
+    let mut id = String::with_capacity(user_dn.len() + 5);
+    id.push_str("ldap:");
+    let mut space = false;
+    for c in user_dn.trim().to_lowercase().chars() {
+        if c == ' ' {
+            if !space {
+                id.push(' ');
+            }
+            space = true;
+        } else {
+            id.push(c);
+            space = false;
+        }
+    }
+    id
 }
 
 impl LdapModule {
@@ -708,7 +800,11 @@ impl LdapModule {
             // an empty username); the search path must guard it too — an empty username has no
             // identity to resolve. Fail as invalid credentials, never reach the socket.
             if username.is_empty() {
-                tracing::info!(module = "ldap", "ldap login refused: empty username");
+                tracing::info!(
+                    module = "ldap",
+                    reason = "empty-username",
+                    "ldap login refused: empty username"
+                );
                 return Err(BindError::InvalidCredentials);
             }
             // Search-then-bind: bind as the service account, find the user entry, take its DN.
@@ -729,13 +825,19 @@ impl LdapModule {
             }
             let filter = filter_tpl.replace("{username}", groups::escape_filter(username).as_str());
             let entries = ldap
-                .search(&self.cfg.base_dn, SearchScope::Subtree, &filter, &["dn"])
+                .search(
+                    &self.cfg.base_dn,
+                    SearchScope::Subtree,
+                    &filter,
+                    &[NO_ATTRIBUTES],
+                )
                 .map_err(at("user search"))?;
             // Ambiguous: more than one entry matched. Fail CLOSED rather than silently binding the
             // first — we cannot establish a single, unambiguous identity for the credential.
             if entries.len() > 1 {
                 tracing::info!(
                     module = "ldap",
+                    reason = "ambiguous",
                     matches = entries.len(),
                     "ldap login refused: user_search_filter matched multiple entries (ambiguous)"
                 );
@@ -744,6 +846,7 @@ impl LdapModule {
             let Some(entry) = entries.into_iter().next() else {
                 tracing::info!(
                     module = "ldap",
+                    reason = "no-match",
                     "ldap login refused: no search match for the username"
                 );
                 return Err(BindError::InvalidCredentials);
@@ -753,6 +856,7 @@ impl LdapModule {
             if entry.dn.is_empty() {
                 tracing::info!(
                     module = "ldap",
+                    reason = "empty-dn",
                     "ldap login refused: the search matched an entry with an empty DN"
                 );
                 return Err(BindError::InvalidCredentials);
@@ -761,7 +865,7 @@ impl LdapModule {
         } else {
             self.bind_dn_for(username).map_err(|reason| {
                 // `validate_username`'s reasons name no part of the username.
-                tracing::info!(module = "ldap", %reason, "ldap login refused: the DN template refused the username");
+                tracing::info!(module = "ldap", reason = "bad-username", refusal = %reason, "ldap login refused: the DN template refused the username");
                 BindError::InvalidCredentials
             })?
         };
@@ -779,6 +883,7 @@ impl LdapModule {
         if rc == LDAP_INVALID_CREDENTIALS {
             tracing::info!(
                 module = "ldap",
+                reason = "invalid-credentials",
                 rc,
                 result = codec::rc_name(rc),
                 "ldap login refused: the directory rejected the credential"
@@ -795,41 +900,97 @@ impl LdapModule {
             return Err(BindError::Rejected { rc });
         }
 
-        // Read the group-membership attribute off the (now bound) user entry.
-        let entries = ldap
-            .search(
-                &user_dn,
-                SearchScope::Base,
-                "(objectClass=*)",
-                &[self.cfg.group_attr.as_str()],
-            )
-            .map_err(at("group read"))?;
+        // Read the group-membership attribute off the (now bound) user entry. The directory
+        // already bound this user, so a read refused as 32 noSuchObject or 50
+        // insufficientAccessRights (an ACL hiding the user's own entry from them) is the same as
+        // a read that returns no entry: the login stands with no roles, never silently. Every
+        // other failure is an outage.
+        let mut refused = false;
+        let entries = match ldap.search(
+            &user_dn,
+            SearchScope::Base,
+            "(objectClass=*)",
+            &[self.cfg.group_attr.as_str()],
+        ) {
+            Err(Io::Refused { rc, .. })
+                if rc == LDAP_NO_SUCH_OBJECT || rc == LDAP_INSUFFICIENT_ACCESS =>
+            {
+                tracing::warn!(
+                                   module = "ldap",
+                reason = "group-read-refused",
+                                   rc,
+                                   result = codec::rc_name(rc),
+                                   group_attr = %self.cfg.group_attr,
+                                   "ldap group read refused for the bound user (an ACL may hide the entry); \
+                                    the login carries no roles"
+                               );
+                refused = true;
+                Vec::new()
+            }
+            read => read.map_err(at("group read"))?,
+        };
 
         let mut group_dns: Vec<String> = Vec::new();
-        if entries.is_empty() {
+        // The principal is the entry's DN as the directory returns it (its objectName), falling
+        // back to the DN bound as when the read answered no entry ([`principal_id`]).
+        let mut entry_dn: Option<String> = None;
+        if entries.is_empty() && !refused {
             // The bound user's own entry read back as nothing: an ACL hides it from the user, so
             // the groups were never read. The login stands with no roles, never silently.
             tracing::warn!(
-                module = "ldap",
-                group_attr = %self.cfg.group_attr,
-                "ldap group read returned no entry for the bound user (an ACL may hide it); \
-                 the login carries no roles"
-            );
+                           module = "ldap",
+            reason = "no-entry",
+                           group_attr = %self.cfg.group_attr,
+                           "ldap group read returned no entry for the bound user (an ACL may hide it); \
+                            the login carries no roles"
+                       );
         }
         if let Some(entry) = entries.into_iter().next() {
+            if !entry.dn.trim().is_empty() {
+                entry_dn = Some(entry.dn.clone());
+            }
             // LDAP attribute descriptions are case-insensitive (RFC 4512 §2.5) and the entry is keyed
             // by the server's spelling, so `group_attr: memberof` must find the server's `memberOf`.
+            // The description is matched on its attribute TYPE, ignoring options: Active Directory
+            // answers an attribute past its MaxValRange as `memberOf;range=0-1499`.
+            let want = attribute_type(&self.cfg.group_attr);
             let vals = entry
                 .attrs
                 .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(&self.cfg.group_attr))
-                .map(|(_, v)| v);
-            if let Some(vals) = vals {
+                .find(|(k, _)| attribute_type(k).eq_ignore_ascii_case(want));
+            if let Some((description, _)) = vals {
+                if let Some(range) = partial_range(description) {
+                    // Fail-safe: the values returned are read (fewer roles than the user holds);
+                    // paging the rest (`;range=1500-*`) is not done.
+                    tracing::warn!(
+                                           module = "ldap",
+                    reason = "range-truncated",
+                                           attribute = %description,
+                                           range = %range,
+                                           "ldap group attribute truncated by the directory's MaxValRange; only the \
+                                            returned values are mapped to roles"
+                                       );
+                }
+            }
+            if vals.is_none() {
+                // A misnamed `group_attr` would otherwise be a silent no-roles login for every
+                // user (a directory omits an attribute with no values, so a user in no group also
+                // lands here).
+                tracing::warn!(
+                                   module = "ldap",
+                reason = "no-group-attribute",
+                                   group_attr = %self.cfg.group_attr,
+                                   "ldap group attribute is absent from the bound user's entry; the login \
+                                    carries no roles"
+                               );
+            }
+            if let Some((_, vals)) = vals {
                 // Cap the number of group values collected so a hostile/huge memberOf cannot exhaust
                 // memory (see MAX_GROUP_VALUES). Log when truncating so an operator can spot it.
                 if vals.len() > MAX_GROUP_VALUES {
                     tracing::warn!(
                         module = "ldap",
+                        reason = "groups-capped",
                         count = vals.len(),
                         cap = MAX_GROUP_VALUES,
                         "memberOf exceeded cap; truncating group values"
@@ -844,7 +1005,8 @@ impl LdapModule {
         }
 
         let roles = groups::roles_from_group_dns(&group_dns, self.cfg.role_from);
-        let mut principal = Principal::from_id(principal_id(&user_dn));
+        let mut principal =
+            Principal::from_id(principal_id(entry_dn.as_deref().unwrap_or(&user_dn)));
         principal.roles = roles;
         Ok(principal)
     }

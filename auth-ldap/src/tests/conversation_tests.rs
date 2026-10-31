@@ -271,11 +271,49 @@ fn rc_49_is_a_bad_credential_and_another_code_an_outage() {
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
 }
 
+/// M4: the GROUP READ of a user the directory already bound answers 32 noSuchObject or 50
+/// insufficientAccessRights when an ACL hides the user's own entry from them: the same as a read
+/// that returns no entry, the login stands with no roles and a warn naming the code (never the
+/// DN). Every other non-zero code on the group read stays an outage, and so does any non-zero
+/// code on the search-then-bind USER search.
 #[test]
-fn a_failed_group_read_is_an_outage() {
+fn a_group_read_refused_for_access_is_a_login_with_no_roles() {
+    use busbar_test_kit::warn_capture::WarnCapture;
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
-    let mut dir = Directory::new(vec![bind_response(1, 0), done(2, 32)]);
-    assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
+    for rc in [32_i64, 50] {
+        let mut dir = Directory::new(vec![bind_response(1, 0), done(2, rc)]).pending();
+        let cap = WarnCapture::default();
+        let (got, _) = tracing::subscriber::with_default(cap.clone(), || login(&m, &mut dir, "pw"));
+        let Login::Identity(p) = got else {
+            panic!("rc {rc}: the bound user logs in: {got:?}");
+        };
+        assert!(p.roles.is_empty(), "rc {rc}: {:?}", p.roles);
+        assert_eq!(p.id, format!("ldap:{ALICE}"));
+        assert!(cap.contains(&format!("rc={rc}")), "{:?}", cap.messages());
+        assert!(!cap.contains(ALICE), "the DN leaked: {:?}", cap.messages());
+        // Replayed across every PENDING, the group read went out once and the unbind followed.
+        assert_eq!(dir.written, direct_bytes("memberOf"), "rc {rc}");
+    }
+    for rc in [1_i64, 52, 53, 80] {
+        let mut dir = Directory::new(vec![bind_response(1, 0), done(2, rc)]);
+        assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage, "rc {rc}");
+    }
+    let m = module(
+        "ldap://127.0.0.1",
+        serde_json::json!({
+            "user_search_filter": "(uid={username})",
+            "bind_service_dn": "cn=svc,dc=x",
+            "bind_service_password": "svc-pw",
+        }),
+    );
+    for rc in [32_i64, 50] {
+        let mut dir = Directory::new(vec![bind_response(1, 0), done(2, rc)]);
+        assert_eq!(
+            login(&m, &mut dir, "pw").0,
+            Login::Outage,
+            "user search rc {rc}"
+        );
+    }
 }
 
 #[test]
@@ -387,7 +425,7 @@ fn search_then_bind_speaks_in_1_5_5s_order() {
             "dc=corp,dc=example",
             codec::SCOPE_SUBTREE,
             "(uid=alice)",
-            &["dn"],
+            &["1.1"],
         )
         .unwrap(),
         chip_bind(3, ALICE, "pw").to_vec(),
@@ -441,9 +479,14 @@ fn a_search_keeps_at_most_two_entries() {
     assert_eq!(login(&m, &mut dir, "pw").0, Login::BadCredential);
 }
 
-/// 1.5.5 panicked reading a referral as an entry; it is an outage now.
+/// A SearchResultReference (RFC 4511 §4.5.3) is a referral the module does not chase, and a client
+/// that does not chase referrals may ignore them: it is skipped, never read as an entry, and the
+/// search is decided on its entries and its SearchResultDone. Active Directory answers every
+/// domain-root subtree search with ForestDnsZones/DomainDnsZones/Configuration references, so a
+/// reference that failed the search failed every search-then-bind login against AD (1.5.5
+/// panicked reading one as an entry). The group read skips them the same way.
 #[test]
-fn a_search_reference_fails_closed() {
+fn a_search_reference_is_skipped() {
     let m = module(
         "ldap://127.0.0.1",
         serde_json::json!({
@@ -452,12 +495,36 @@ fn a_search_reference_fails_closed() {
             "bind_service_password": "svc-pw",
         }),
     );
-    let reference = message(
-        2,
-        ber::element(0x73, &ber::element(0x04, b"ldap://elsewhere/")),
-    );
-    let mut dir = Directory::new(vec![bind_response(1, 0), reference]).held();
-    assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
+    let reference = |id: i64, url: &[u8]| message(id, ber::element(0x73, &ber::element(0x04, url)));
+    let mut dir = Directory::new(vec![
+        bind_response(1, 0),
+        reference(
+            2,
+            b"ldap://ForestDnsZones.corp.example/DC=ForestDnsZones,DC=corp",
+        ),
+        entry(2, ALICE, "dn", &[]),
+        reference(2, b"ldap://corp.example/CN=Configuration,DC=corp"),
+        done(2, 0),
+        bind_response(3, 0),
+        reference(4, b"ldap://elsewhere/"),
+        entry(4, ALICE, "memberOf", &["cn=admins,dc=corp"]),
+        done(4, 0),
+    ])
+    .pending();
+    let (got, _) = login(&m, &mut dir, "pw");
+    let Login::Identity(p) = got else {
+        panic!("references are skipped: {got:?}");
+    };
+    assert_eq!(p.id, format!("ldap:{ALICE}"));
+    assert_eq!(p.roles, vec!["admins".to_string()]);
+
+    // A search answered by references alone matched no entry: no search match, a bad credential.
+    let mut dir = Directory::new(vec![
+        bind_response(1, 0),
+        reference(2, b"ldap://elsewhere/"),
+        done(2, 0),
+    ]);
+    assert_eq!(login(&m, &mut dir, "pw").0, Login::BadCredential);
 }
 
 /// SIGNED DIFFERENCES 1–3, through the conversation: a malformed reply, an overrunning nested
@@ -817,7 +884,6 @@ fn the_resolved_service_secret_reaches_only_the_bind() {
         "base_dn": "dc=x",
         "user_search_filter": "(uid={username})",
         "bind_service_dn": "cn=svc,dc=x",
-        "bind_service_password": "literal",
     })
     .to_string();
     let m =
@@ -1039,4 +1105,85 @@ fn an_operation_that_never_ends_its_messages_is_cut_off() {
             r => panic!("entries={entries}: a flood must be cut off, got {r:?}"),
         }
     }
+}
+
+/// M6: one operation reads at most 16 MiB from the directory in all, however it is split into
+/// messages: a directory that streams large messages for another id (each under the per-message
+/// cap, fewer than the message cap) is cut off.
+#[test]
+fn an_operation_reads_at_most_16_mib_in_all() {
+    use crate::{Io, LdapBackend, SearchScope};
+    let filler = message(77, ber::element(0x79, &vec![0_u8; 64 * 1024]));
+    let mut replies = vec![bind_response(1, 0)];
+    for _ in 0..300 {
+        replies.push(filler.clone());
+    }
+    replies.push(done(2, 0));
+    let mut dir = Directory::new(replies);
+    let mut conv = Conversation::new();
+    let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, Some(0), 10);
+    over.connect().expect("connects");
+    over.simple_bind("cn=svc,dc=x", &crate::tests::cred("pw"))
+        .expect("binds");
+    match over.search("dc=x", SearchScope::Subtree, "(uid=alice)", &["dn"]) {
+        Err(Io::Failed(e)) => assert!(e.contains("16 MiB"), "{e}"),
+        r => panic!("past 16 MiB the operation fails, got {r:?}"),
+    }
+}
+
+/// A directory that answers Ready forever on a clock that moves: every entry, one second.
+struct Ticking {
+    now: u64,
+    sent: u64,
+}
+
+impl Wire for Ticking {
+    fn establish(&mut self, _: &str) -> Poll<Result<(), String>> {
+        Poll::Ready(Ok(()))
+    }
+    fn secure(&mut self) -> Poll<Result<(), String>> {
+        Poll::Ready(Ok(()))
+    }
+    fn write(&mut self, b: &[u8]) -> Poll<Result<usize, String>> {
+        Poll::Ready(Ok(b.len()))
+    }
+    fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>> {
+        busbar_contract::abi::sdk::test_support::chip::drive_sealed(w, |b| self.write(b))
+    }
+    fn read(&mut self, buf: &mut [u8]) -> Poll<Result<usize, String>> {
+        self.sent += 1;
+        let m = if self.sent == 1 {
+            bind_response(1, 0)
+        } else {
+            entry(2, &format!("uid=u{},dc=x", self.sent), "dn", &[])
+        };
+        buf[..m.len()].copy_from_slice(&m);
+        Poll::Ready(Ok(m.len()))
+    }
+    fn now_ns(&mut self) -> Option<u64> {
+        self.now += 1_000_000_000;
+        Some(self.now)
+    }
+}
+
+/// M6: the deadline is checked on every message of one entry of the op, on the stream owner's
+/// clock: a directory that answers Ready without end meets its timeout, not only the message cap.
+#[test]
+fn the_deadline_is_checked_between_messages() {
+    use crate::{Io, LdapBackend, SearchScope};
+    let mut wire = Ticking { now: 0, sent: 0 };
+    let mut conv = Conversation::new();
+    let mut over = super::Over::new(&mut conv, &mut wire, "ldap://127.0.0.1", false, Some(0), 10);
+    over.connect().expect("connects");
+    over.simple_bind("cn=svc,dc=x", &crate::tests::cred("pw"))
+        .expect("binds");
+    match over.search("dc=x", SearchScope::Subtree, "(uid=alice)", &["dn"]) {
+        Err(Io::Failed(e)) => assert_eq!(e, super::TIMEOUT),
+        r => panic!("the deadline cuts it off, got {r:?}"),
+    }
+    assert!(
+        wire.sent < 100,
+        "cut off at the deadline: {} reads",
+        wire.sent
+    );
 }

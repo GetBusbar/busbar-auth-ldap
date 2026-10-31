@@ -6,8 +6,8 @@
 //! plugin crate's `tests/conformance.rs` (linked and dropped in).
 
 use super::{
-    field, keep_reached, take_reached, Ldap, Reached, Run, ALIAS, FORM, NAME, NEED, NEEDS,
-    NEED_ANCHORED, SECRET_REFS, STATEMENT, TAIL,
+    clock_ns, closed, field, keep_reached, take_reached, unreadable, Ldap, Reached, Release, Run,
+    ALIAS, FORM, NAME, NEED, NEEDS, NEED_ANCHORED, SECRET_REFS, STATEMENT, TAIL,
 };
 use crate::LdapModule;
 use busbar_contract::abi::auth::{
@@ -33,6 +33,16 @@ fn settings_refuse_an_empty_blob() {
             .expect("an empty blob is refused");
         assert!(e.starts_with("settings: "), "{e}");
     }
+}
+
+/// KIND B7: no settings at all read in the fleet's one form, naming what is required.
+#[test]
+fn no_settings_read_in_the_fleet_form() {
+    let e = LdapModule::from_settings(b"").err().expect("refused");
+    assert_eq!(
+        e,
+        "settings: none provided; requires url, bind_dn_template, base_dn"
+    );
 }
 
 #[test]
@@ -89,6 +99,48 @@ fn a_field_is_found_by_its_declared_name_and_must_be_text() {
     assert_eq!(field(&fields, "missing"), None);
 }
 
+/// L5: a field submitted but not UTF-8 is refused in its own words, not as "not submitted" (the
+/// verdict is the same bad credential); a field absent, or text, is not this refusal.
+#[test]
+fn a_field_that_is_not_text_is_refused_in_its_own_words() {
+    let bad_password: [(&[u8], &[u8]); 2] = [(b"username", b"alice"), (b"password", b"\xff")];
+    assert_eq!(
+        unreadable(&bad_password),
+        Some("the password field is not UTF-8")
+    );
+    let bad_username: [(&[u8], &[u8]); 2] = [(b"username", b"\xfe"), (b"password", b"pw")];
+    assert_eq!(
+        unreadable(&bad_username),
+        Some("the username field is not UTF-8")
+    );
+    let fine: [(&[u8], &[u8]); 1] = [(b"username", b"alice")];
+    assert_eq!(
+        unreadable(&fine),
+        None,
+        "an absent field is not this refusal"
+    );
+}
+
+/// L5: a host clock that answers a failure says which, instead of collapsing into "no clock".
+#[test]
+fn a_failing_host_clock_says_why() {
+    use busbar_contract::abi::sdk::conn::ConnFailure;
+    use std::task::Poll;
+    let reading = busbar_contract::abi::host::service::ClockReading {
+        size: 0,
+        _reserved: 0,
+        wall_ns: 1,
+        mono_ns: 42,
+    };
+    assert_eq!(clock_ns(Poll::Ready(Ok(reading))), Ok(42));
+    let e = clock_ns(Poll::Ready(Err(ConnFailure::Failed("clock broke".into())))).unwrap_err();
+    assert!(e.contains("clock broke"), "{e}");
+    let e = clock_ns(Poll::Ready(Err(ConnFailure::Fault))).unwrap_err();
+    assert!(e.contains("faulted"), "{e}");
+    let e = clock_ns(Poll::Pending).unwrap_err();
+    assert!(e.contains("pended"), "{e}");
+}
+
 /// The Statement states a credential login that never blocks (no `MARK_BLOCKS`: every call is
 /// Ready or Pending), its ONE need (outbound, a raw `tcp` stream, operator-infrastructure, the
 /// target named per login), and the service password as its one secret reference.
@@ -130,31 +182,52 @@ fn the_statement_states_a_non_blocking_credential_login_over_one_need() {
     assert!(!SECRET_REFS[0].is_absent());
 }
 
-/// The secret the kernel resolved for `bind_service_password` wins over the settings' literal; an
-/// absent or empty one leaves the literal (1.5.5's config still opens).
+/// L6 (S1): the service password is a secret REFERENCE, never a literal. busbar resolves the
+/// reference and lifts the key out of the settings into `OpenIn.secrets`, so a
+/// `bind_service_password` the plugin finds IN its settings is a literal that bypassed that: it
+/// refuses `validate` and boot, naming the key and never the value. The resolved secret is the
+/// password.
 #[test]
-fn the_resolved_service_secret_wins_over_the_literal() {
-    let blob = br#"{
+fn a_literal_service_password_refuses_boot() {
+    let literal = br#"{
         "url": "ldaps://ad.corp.example:636",
         "bind_dn_template": "uid={username},dc=corp,dc=example",
         "base_dn": "dc=corp,dc=example",
         "user_search_filter": "(uid={username})",
         "bind_service_dn": "cn=svc,dc=corp,dc=example",
-        "bind_service_password": "literal"
+        "bind_service_password": "hunter2"
     }"#;
-    let pw = |m: &LdapModule| {
+    for secrets in [&[b"resolved".as_slice()][..], &[]] {
+        let e = LdapModule::from_settings_with(literal, secrets)
+            .err()
+            .expect("a literal refuses boot");
+        assert!(e.starts_with("settings.bind_service_password: "), "{e}");
+        assert!(!e.contains("hunter2"), "{e}");
+    }
+    let r = Ldap::validate(literal).expect_err("a literal refuses validate");
+    assert!(
+        r.text()
+            .is_some_and(|t| t.contains("settings.bind_service_password: ")),
+        "{r:?}"
+    );
+
+    let referenced = br#"{
+        "url": "ldaps://ad.corp.example:636",
+        "bind_dn_template": "uid={username},dc=corp,dc=example",
+        "base_dn": "dc=corp,dc=example",
+        "user_search_filter": "(uid={username})",
+        "bind_service_dn": "cn=svc,dc=corp,dc=example"
+    }"#;
+    let m = LdapModule::from_settings_with(referenced, &[b"resolved".as_slice()]).expect("opens");
+    assert_eq!(
         m.cfg
             .bind_service_password
             .as_ref()
             .map(crate::tests::cred_text)
-    };
-    let m = LdapModule::from_settings_with(blob, &[b"resolved".as_slice()]).expect("opens");
-    assert_eq!(pw(&m).as_deref(), Some("resolved"));
-    let m = LdapModule::from_settings_with(blob, &[b"".as_slice()]).expect("opens");
-    assert_eq!(pw(&m).as_deref(), Some("literal"));
-    let m = LdapModule::from_settings_with(blob, &[]).expect("opens");
-    assert_eq!(pw(&m).as_deref(), Some("literal"));
-    let e = LdapModule::from_settings_with(blob, &[b"\xff".as_slice()])
+            .as_deref(),
+        Some("resolved")
+    );
+    let e = LdapModule::from_settings_with(referenced, &[b"\xff".as_slice()])
         .err()
         .expect("refused");
     assert!(e.contains("not UTF-8"), "{e}");
@@ -169,22 +242,22 @@ fn who(id: &str) -> busbar_contract::auth::Principal {
 #[test]
 fn a_later_generation_on_the_slot_drops_the_abandoned_identity() {
     let mut reached = Reached::default();
-    keep_reached(&mut reached, 8, (3, 1), who("abandoned"));
-    keep_reached(&mut reached, 8, (4, 1), who("other-slot"));
-    keep_reached(&mut reached, 8, (3, 2), who("mine"));
-    let got = take_reached(&mut reached, (3, 2));
+    keep_reached(&mut reached, 8, (3, 1), who("abandoned"), None);
+    keep_reached(&mut reached, 8, (4, 1), who("other-slot"), None);
+    keep_reached(&mut reached, 8, (3, 2), who("mine"), None);
+    let got = take_reached(&mut reached, (3, 2), None);
     assert_eq!(got.map(|p| p.id), Some("mine".to_string()));
     assert!(
         !reached.map.contains_key(&(3, 1)),
-        "the abandoned entry stays"
+        "the abandoned entry must go"
     );
     assert!(
         !reached.map.contains_key(&(3, 2)),
-        "the call's own key stays"
+        "the call's own key must be taken"
     );
     assert!(
         reached.map.contains_key(&(4, 1)),
-        "another slot's entry went"
+        "another slot's entry must stay"
     );
     assert_eq!(reached.map.len(), 1);
 }
@@ -194,8 +267,8 @@ fn a_later_generation_on_the_slot_drops_the_abandoned_identity() {
 #[test]
 fn a_ticketless_call_leaves_slot_zeros_kept_identity() {
     let mut reached = Reached::default();
-    keep_reached(&mut reached, 8, (0, 5), who("kept"));
-    assert!(take_reached(&mut reached, (0, 0)).is_none());
+    keep_reached(&mut reached, 8, (0, 5), who("kept"), None);
+    assert!(take_reached(&mut reached, (0, 0), None).is_none());
     assert!(
         reached.map.contains_key(&(0, 5)),
         "a ticketless call dropped slot 0's identity"
@@ -209,7 +282,7 @@ fn a_ticketless_call_leaves_slot_zeros_kept_identity() {
 fn the_reached_map_is_bounded_and_evicts_the_oldest() {
     let mut reached = Reached::default();
     for slot in 0..20 {
-        keep_reached(&mut reached, 16, (slot, 1), who(&format!("u{slot}")));
+        keep_reached(&mut reached, 16, (slot, 1), who(&format!("u{slot}")), None);
     }
     assert_eq!(reached.map.len(), 16, "bounded at the cap");
     for slot in 0..4 {
@@ -225,9 +298,37 @@ fn the_reached_map_is_bounded_and_evicts_the_oldest() {
         );
     }
     // Re-keeping a key already held evicts nothing.
-    keep_reached(&mut reached, 16, (19, 1), who("again"));
+    keep_reached(&mut reached, 16, (19, 1), who("again"), None);
     assert_eq!(reached.map.len(), 16);
     assert!(reached.map.contains_key(&(4, 1)));
+}
+
+/// KIND-REVIEW D6: the reached map is bounded AND time-expired: an identity kept for a re-call that
+/// never comes (its slot never reused) goes after `REACHED_TTL_NS` (10 minutes) on the host's clock,
+/// swept on the next keep or take; within it, it answers its re-call.
+#[test]
+fn a_kept_identity_expires_after_the_ttl() {
+    let ttl = super::REACHED_TTL_NS;
+    let t0 = 1_000_000_000_u64;
+    let mut reached = Reached::default();
+    keep_reached(&mut reached, 8, (1, 1), who("fresh"), Some(t0));
+    assert_eq!(
+        take_reached(&mut reached, (1, 1), Some(t0 + ttl - 1)).map(|p| p.id),
+        Some("fresh".to_string()),
+        "within the TTL it answers its re-call"
+    );
+    keep_reached(&mut reached, 8, (2, 1), who("stale"), Some(t0));
+    assert!(
+        take_reached(&mut reached, (2, 1), Some(t0 + ttl)).is_none(),
+        "past the TTL it is gone"
+    );
+    keep_reached(&mut reached, 8, (3, 1), who("abandoned"), Some(t0));
+    keep_reached(&mut reached, 8, (4, 1), who("new"), Some(t0 + ttl));
+    assert!(
+        !reached.map.contains_key(&(3, 1)),
+        "an expired entry is swept on the next keep"
+    );
+    assert_eq!(reached.map.len(), 1);
 }
 
 /// LDAP is a login method and judges no bearer credential on the data plane: its tail states the
@@ -315,24 +416,82 @@ fn a_mistyped_setting_is_refused_without_echoing_its_value() {
     assert!(!e.contains("hunter2"), "{e}");
 }
 
-/// The submitted password a parked login holds is the chip's credential (wiped on drop, no getter).
+/// T8: the run `drive` begins from the submitted fields ([`super::begin`], what `drive` calls)
+/// holds the username as text and the password as the chip's credential, captured from the
+/// submitted bytes; a field not submitted is none, and the run holds no stream yet.
 #[test]
-fn a_parked_logins_password_is_the_chips() {
+fn a_begun_logins_password_is_the_chips_from_the_submitted_field() {
     let module = std::sync::Arc::new(LdapModule::from_settings(MINIMAL.as_bytes()).unwrap());
-    let run = Run {
-        module,
-        username: Some("alice".to_string()),
-        password: Some(crate::tests::cred("pw")),
-        conv: crate::conversation::Conversation::new(),
-        stream: None,
-        at: 0,
-    };
+    let fields: [(&[u8], &[u8]); 3] = [
+        (b"other", b"x"),
+        (b"password", b"s3cret-pw"),
+        (b"username", b"alice"),
+    ];
+    let run = super::begin(std::sync::Arc::clone(&module), &fields, None);
+    assert_eq!(run.username.as_deref(), Some("alice"));
     assert_eq!(
         run.password
             .as_ref()
             .map(crate::tests::cred_text)
             .as_deref(),
-        Some("pw")
+        Some("s3cret-pw")
+    );
+    assert!(run.stream.is_none() && !run.conv.opened());
+    let only_user: [(&[u8], &[u8]); 1] = [(b"username", b"alice")];
+    let run = super::begin(module, &only_user, None);
+    assert!(run.password.is_none(), "a password not submitted is none");
+}
+
+/// M7: a parked login holding an established stream that is given up (its op cancelled, a fresh
+/// op on its ticket, the instance closed: the SDK drops what was parked) releases the stream
+/// through the host; and a finish-path close the op's connector answered PENDING is handed to the
+/// same release rather than dropped. A close the connector answered closes it once.
+#[test]
+fn a_given_up_or_pending_close_releases_the_stream() {
+    use std::sync::{Arc, Mutex};
+    use std::task::Poll;
+    let released = Arc::new(Mutex::new(Vec::new()));
+    let module = std::sync::Arc::new(LdapModule::from_settings(MINIMAL.as_bytes()).unwrap());
+    let run = |stream: Option<u64>| {
+        let released = Arc::clone(&released);
+        Run {
+            module: Arc::clone(&module),
+            username: None,
+            password: None,
+            conv: crate::conversation::Conversation::new(),
+            stream,
+            at: 0,
+            release: Some(Release::new(move |s| released.lock().unwrap().push(s))),
+        }
+    };
+    drop(run(Some(7)));
+    assert_eq!(
+        *released.lock().unwrap(),
+        vec![7],
+        "a given-up stream is released"
+    );
+    drop(run(None));
+    assert_eq!(
+        *released.lock().unwrap(),
+        vec![7],
+        "no stream, nothing to release"
+    );
+
+    let mut pending = run(Some(9));
+    closed(&mut pending, Poll::Pending);
+    drop(pending);
+    assert_eq!(
+        *released.lock().unwrap(),
+        vec![7, 9],
+        "a pending close is handed to the release"
+    );
+    let mut done = run(Some(11));
+    closed(&mut done, Poll::Ready(Ok(())));
+    drop(done);
+    assert_eq!(
+        *released.lock().unwrap(),
+        vec![7, 9],
+        "a stream the op's close closed is not closed twice"
     );
 }
 
@@ -437,7 +596,7 @@ mod refusal_lines {
                     "bind_service_dn": "cn=svc",
                     "bind_service_password": ""
                 })),
-                "settings.bind_service_password: must not be empty",
+                "settings.bind_service_password: must be a secret reference",
             ),
         ];
         for (blob, want) in cases {

@@ -123,8 +123,11 @@ fn a_bind_response_decodes() {
     );
 }
 
+/// M5: a value that is not UTF-8 is dropped ALONE: the attribute keeps its text values (a group
+/// list with one binary value is not lost whole), and the drop is logged at warn once per attribute,
+/// naming it and how many values went.
 #[test]
-fn a_search_entry_decodes_its_text_attributes_only() {
+fn a_search_entry_keeps_its_text_values_and_warns_of_the_rest() {
     fn attr(name: &[u8], vals: &[&[u8]]) -> Vec<u8> {
         let vals: Vec<u8> = vals.iter().flat_map(|v| tlv(0x04, v)).collect();
         tlv(0x30, &[tlv(0x04, name), tlv(0x31, &vals)].concat())
@@ -148,12 +151,16 @@ fn a_search_entry_decodes_its_text_attributes_only() {
             "memberOf".to_string(),
             vec!["cn=a,dc=x".to_string(), "cn=b,dc=x".to_string()],
         ),
+        ("jpegPhoto".to_string(), Vec::new()),
+        ("mixed".to_string(), vec!["text".to_string()]),
         ("empty".to_string(), Vec::new()),
     ]
     .into_iter()
     .collect();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let got = tracing::subscriber::with_default(cap.clone(), || decode(&m));
     assert_eq!(
-        decode(&m),
+        got,
         Ok(Message {
             id: 2,
             reply: Reply::Entry(Entry {
@@ -162,6 +169,10 @@ fn a_search_entry_decodes_its_text_attributes_only() {
             })
         })
     );
+    assert_eq!(cap.count("not UTF-8"), 2, "{:?}", cap.messages());
+    assert!(cap.contains("attribute=mixed"), "{:?}", cap.messages());
+    assert!(cap.contains("dropped=1"), "{:?}", cap.messages());
+    assert!(!cap.contains("attribute=memberOf"), "{:?}", cap.messages());
 }
 
 /// A failed search reads in 1.5.5's words (`LdapError::LdapResult`'s Display).
@@ -335,4 +346,87 @@ fn bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
         });
     assert!(sent.is_ready(), "the BIND is written whole");
     bytes
+}
+
+/// An entry of `n` values of `value` under `memberOf`, long-form lengths allowed.
+fn big_entry(id: i32, n: usize, value: &[u8]) -> Vec<u8> {
+    let mut vals = Vec::new();
+    for _ in 0..n {
+        ber::tlv(&mut vals, ber::OCTET_STRING, value);
+    }
+    let mut a = Vec::new();
+    ber::tlv(&mut a, ber::OCTET_STRING, b"memberOf");
+    ber::tlv(&mut a, ber::SET, &vals);
+    let mut op = Vec::new();
+    ber::tlv(&mut op, ber::OCTET_STRING, b"uid=alice,dc=x");
+    ber::tlv(&mut op, ber::SEQUENCE, &ber::element(ber::SEQUENCE, &a));
+    let mut content = Vec::new();
+    ber::int(&mut content, ber::INTEGER, i64::from(id));
+    content.extend_from_slice(&ber::element(0x64, &op));
+    ber::element(ber::SEQUENCE, &content)
+}
+
+/// M6: a hostile entry is bounded WHILE it decodes, not after: one attribute keeps at most one
+/// value past the group cap (so the cap's truncation is still seen), and the rest are never
+/// turned into strings.
+#[test]
+fn an_attributes_values_are_capped_while_decoding() {
+    let m = big_entry(2, 100_000, b"x");
+    let Ok(Message {
+        reply: Reply::Entry(e),
+        ..
+    }) = decode(&m)
+    else {
+        panic!("an entry");
+    };
+    assert_eq!(e.attrs["memberOf"].len(), crate::MAX_GROUP_VALUES + 1);
+}
+
+/// M6: what one operation decodes into memory is budgeted (4 MiB): an entry whose values pass it is
+/// an error, not a 16 MiB message amplified into strings.
+#[test]
+fn decoded_values_past_the_budget_are_an_error() {
+    let m = big_entry(2, 5, &vec![b'a'; 1024 * 1024]);
+    assert!(m.len() < ber::INBOUND_CAP);
+    let got = decode(&m);
+    assert!(
+        matches!(&got, Err(e) if e.to_string().contains("4 MiB")),
+        "{:?}",
+        got.map(|m| m.id)
+    );
+}
+
+/// L1: the directory's matched DN and diagnostic are far-end text: each is shown escaped (no raw
+/// newline or control character can forge a log line) and capped at 128 characters, so a hostile
+/// directory cannot flood the log through a failed search's text.
+#[test]
+fn a_results_far_end_text_is_escaped_and_capped() {
+    let r = LdapResult {
+        rc: 32,
+        matched: "m".repeat(10_000),
+        text: "forged\nlevel=ERROR injected\r\u{1b}[31m".repeat(50),
+    };
+    let shown = r.to_string();
+    assert!(!shown.contains('\n') && !shown.contains('\r'), "{shown}");
+    assert!(!shown.contains('\u{1b}'), "{shown}");
+    assert!(
+        shown.contains("\\n"),
+        "the newline is shown escaped: {shown}"
+    );
+    assert!(
+        shown.chars().count() < 2 * 128 * 4 + 80,
+        "capped: {}",
+        shown.len()
+    );
+    assert!(!shown.contains(&"m".repeat(129)), "the DN is capped");
+    // Short text reads as before.
+    let short = LdapResult {
+        rc: 32,
+        matched: "dc=x".into(),
+        text: "no such entry".into(),
+    };
+    assert_eq!(
+        short.to_string(),
+        "LDAP operation result: rc=32 (noSuchObject), dn: \"dc=x\", text: \"no such entry\""
+    );
 }

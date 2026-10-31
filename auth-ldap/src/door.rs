@@ -6,7 +6,7 @@
 //! `auth_verify_door!` refuses the login ops):
 //!
 //! * the lifecycle is the SDK's (`lifecycle: life(Ldap)`): `validate`/`open` parse the settings
-//!   blob with [`LdapModule::from_settings`] (its refusal texts), `refresh` swaps the module whole
+//!   blob with [`LdapModule::from_settings_with`] (its refusal texts), `refresh` swaps the module whole
 //!   (a refusal keeps the running one);
 //! * `verify` is not served: LDAP judges no bearer credential on the data plane, so the tail
 //!   states the login family alone (`CAP_LOGIN`, as busbar-auth-github's) and `verify` answers
@@ -41,6 +41,7 @@ use busbar_contract::abi::auth::{
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
+use busbar_contract::abi::host::service::ClockReading;
 use busbar_contract::abi::mechanism::call::{AbiStr, Outcome};
 use busbar_contract::abi::mechanism::door::{Rewrite, Statement};
 use busbar_contract::abi::mechanism::ticket::Ticket;
@@ -104,13 +105,20 @@ const fn stream(trust_from: AbiStr) -> Need {
 /// the operator's private CA (`ca_cert_pem`) on top of the public roots, for `ldaps://` and
 /// STARTTLS alike. A need whose `trust_from` resolves to nothing is refused at its declaration, so
 /// one need cannot serve both: an instance with no `ca_cert_pem` dials the public need.
-pub const NEEDS: &[Need] = &[
-    stream(AbiStr::ABSENT),
-    stream(abi_str("settings.ca_cert_pem")),
-];
+pub const NEEDS: &[Need] = &NEED_TABLE;
+
+/// [`NEEDS`], each placed AT its index ([`NEED`], [`NEED_ANCHORED`]), so reordering or adding a need
+/// cannot swap which logins dial the public need and which the private CA.
+const NEED_TABLE: [Need; 2] = {
+    let mut table = [stream(AbiStr::ABSENT), stream(AbiStr::ABSENT)];
+    table[NEED as usize] = stream(AbiStr::ABSENT);
+    table[NEED_ANCHORED as usize] = stream(abi_str("settings.ca_cert_pem"));
+    table
+};
+const _: () = assert!(NEED != NEED_ANCHORED, "the two needs are two indices");
 
 /// The settings keys whose values are secret references, resolved in this order into
-/// `OpenIn.secrets` (a literal value is accepted by the host).
+/// `OpenIn.secrets` (a literal value refuses boot).
 pub const SECRET_REFS: &[AbiStr] = &[abi_str("bind_service_password")];
 
 /// This plugin's Statement.
@@ -138,14 +146,18 @@ const FORM: &[LoginField] = &[
     },
 ];
 
-/// The most short answers kept for their re-call at once.
-const REACHED_MAX: usize = 1024;
+/// The most short answers kept for their re-call at once: one per login the instance holds in
+/// flight (an answer is kept only for its own ticket's one re-call).
+const REACHED_MAX: usize = MAX_INFLIGHT as usize;
+
+/// How long a short answer's identity is kept for its re-call: 10 minutes on the host's clock.
+const REACHED_TTL_NS: u64 = 10 * 60 * 1_000_000_000;
 
 /// The identities short answers reached, by ticket `(slot, generation)`, each stamped with the
-/// order it was kept in.
+/// order it was kept in and the host clock's reading then.
 #[derive(Default)]
 struct Reached {
-    map: HashMap<(u32, u32), (u64, Principal)>,
+    map: HashMap<(u32, u32), (u64, Option<u64>, Principal)>,
     next: u64,
 }
 
@@ -156,33 +168,52 @@ pub struct Ldap {
     reached: Mutex<Reached>,
 }
 
-/// Keep `p` for `key`'s re-call, at most `max` at once: at the cap the OLDEST entry goes, never
-/// the rest (an in-flight short answer awaiting its re-call must survive).
-fn keep_reached(reached: &mut Reached, max: usize, key: (u32, u32), p: Principal) {
+/// Drop every kept identity older than [`REACHED_TTL_NS`] at `now_ns` (none without a clock, or for
+/// an entry kept without one: the count bound still holds them).
+fn sweep_reached(reached: &mut Reached, now_ns: Option<u64>) {
+    if let Some(now) = now_ns {
+        reached
+            .map
+            .retain(|_, (_, at, _)| at.is_none_or(|at| now.saturating_sub(at) < REACHED_TTL_NS));
+    }
+}
+
+/// Keep `p` for `key`'s re-call, at most `max` at once and for at most [`REACHED_TTL_NS`]: expired
+/// entries are swept first, then at the cap the OLDEST entry goes, never the rest (an in-flight
+/// short answer awaiting its re-call must survive).
+fn keep_reached(
+    reached: &mut Reached,
+    max: usize,
+    key: (u32, u32),
+    p: Principal,
+    now_ns: Option<u64>,
+) {
+    sweep_reached(reached, now_ns);
     if reached.map.len() >= max && !reached.map.contains_key(&key) {
         let oldest = reached
             .map
             .iter()
-            .min_by_key(|(_, (at, _))| *at)
+            .min_by_key(|(_, (order, _, _))| *order)
             .map(|(k, _)| *k);
         if let Some(oldest) = oldest {
             reached.map.remove(&oldest);
         }
     }
     reached.next += 1;
-    reached.map.insert(key, (reached.next, p));
+    reached.map.insert(key, (reached.next, now_ns, p));
 }
 
-/// The identity a short answer kept for `key`'s re-call, taken. Nothing else is left behind for
-/// that ticket SLOT: an op on the slot under another generation proves the earlier op is over. A
-/// call on no ticket (generation `0`, never minted) proves nothing and drops nothing.
-fn take_reached(reached: &mut Reached, key: (u32, u32)) -> Option<Principal> {
+/// The identity a short answer kept for `key`'s re-call, taken, unless it expired. Nothing else is
+/// left behind for that ticket SLOT: an op on the slot under another generation proves the earlier
+/// op is over. A call on no ticket (generation `0`, never minted) proves nothing and drops nothing.
+fn take_reached(reached: &mut Reached, key: (u32, u32), now_ns: Option<u64>) -> Option<Principal> {
+    sweep_reached(reached, now_ns);
     if key.1 != 0 {
         reached
             .map
             .retain(|&(slot, generation), _| slot != key.0 || generation == key.1);
     }
-    reached.map.remove(&key).map(|(_, p)| p)
+    reached.map.remove(&key).map(|(_, _, p)| p)
 }
 
 impl Ldap {
@@ -249,6 +280,47 @@ fn field<'a>(fields: &[(&[u8], &'a [u8])], name: &str) -> Option<&'a str> {
         .and_then(|(_, v)| std::str::from_utf8(v).ok())
 }
 
+/// A login's run as `drive` begins it from the submitted `fields`: the module it began with, the
+/// username, and the password captured by the chip ([`Cred`], wiped on drop).
+fn begin(module: Arc<LdapModule>, fields: &[(&[u8], &[u8])], release: Option<Release>) -> Run {
+    Run {
+        module,
+        username: field(fields, USERNAME.0).map(str::to_owned),
+        password: field(fields, PASSWORD.0)
+            .map(|p| Cred::captured(Zeroizing::new(p.as_bytes().to_vec()))),
+        conv: Conversation::new(),
+        stream: None,
+        at: 0,
+        release,
+    }
+}
+
+/// Why a submission the form's fields cannot be read from is refused, when a field was submitted
+/// but is not text.
+fn unreadable(fields: &[(&[u8], &[u8])]) -> Option<&'static str> {
+    let not_text = |name: &str| {
+        fields
+            .iter()
+            .any(|(n, v)| *n == name.as_bytes() && std::str::from_utf8(v).is_err())
+    };
+    if not_text(USERNAME.0) {
+        Some("the username field is not UTF-8")
+    } else if not_text(PASSWORD.0) {
+        Some("the password field is not UTF-8")
+    } else {
+        None
+    }
+}
+
+/// The host clock's reading, or why there is none.
+fn clock_ns(answer: Answer<ClockReading>) -> Result<u64, String> {
+    match answer {
+        Poll::Ready(Ok(r)) => Ok(r.mono_ns),
+        Poll::Ready(Err(e)) => Err(format!("the host clock failed: {e}")),
+        Poll::Pending => Err("the host clock pended (it must never pend)".to_string()),
+    }
+}
+
 /// One login in flight, parked on its ticket across its PENDING answers: the module it began with
 /// (a `refresh` meanwhile does not change it), the submitted credential (the password held by the
 /// chip, `Cred`), the conversation, the stream once established, and the handle of the first
@@ -260,6 +332,47 @@ struct Run {
     conv: Conversation,
     stream: Option<u64>,
     at: u32,
+    /// What closes `stream` when no entry of the op will ([`Release`]).
+    release: Option<Release>,
+}
+
+/// WHAT CLOSES A LOGIN'S STREAM WITH NO ENTRY OF ITS OP RUNNING: the host reclaims a connection
+/// only on its CLOSE.
+pub(crate) struct Release(Box<dyn Fn(u64) + Send + Sync>);
+
+impl Release {
+    /// A release that runs `close` on the stream.
+    pub(crate) fn new(close: impl Fn(u64) + Send + Sync + 'static) -> Self {
+        Self(Box::new(close))
+    }
+
+    /// The release through `host`'s connector on no ticket, as the SDK closes a parked exchange
+    /// it gives up (a close never pends); what it answers is not read.
+    fn through(host: Host) -> Self {
+        Self::new(move |stream| {
+            let _ = host.connector(Ticket::NONE).close(stream);
+        })
+    }
+}
+
+/// A parked login given up before it closed its stream (its op cancelled, a fresh op on its
+/// ticket, the instance closed: the SDK drops what was parked), or one whose finish-path close
+/// pended, releases the stream here. A stream the op's own close closed is `None` by now.
+impl Drop for Run {
+    fn drop(&mut self) {
+        if let (Some(stream), Some(release)) = (self.stream.take(), self.release.as_ref()) {
+            (release.0)(stream);
+        }
+    }
+}
+
+/// The finish path's close of `run`'s stream, as the op's own connector answered it: answered,
+/// the stream is closed; PENDING, it stays for [`Release`] when the run drops (the op is over, so
+/// no wake will re-drive it).
+fn closed(run: &mut Run, answer: Poll<Result<(), String>>) {
+    if answer.is_ready() {
+        run.stream = None;
+    }
 }
 
 /// The host connector's stream as the conversation's [`Wire`], for one entry of the op: its
@@ -267,6 +380,8 @@ struct Run {
 /// replay re-issues exactly that one and the host answers its result.
 struct HostWire<'h> {
     conn: Option<Connector<'h>>,
+    /// The host and the op's ticket, for the clock read between messages ([`Wire::now_ns`]).
+    clock: Option<(&'h Host, Ticket)>,
     need: u32,
     stream: Option<u64>,
     at: u32,
@@ -321,13 +436,23 @@ impl Wire for HostWire<'_> {
     fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>> {
         self.serve(|c, s| w.poll(c, s))
     }
+
+    fn now_ns(&mut self) -> Option<u64> {
+        let (host, ticket) = self.clock?;
+        // Read quietly: a failing clock was said once, at the entry's start ([`now`]).
+        clock_ns(host.connector(ticket).clock_now()).ok()
+    }
 }
 
-/// The host's monotonic clock, when it offers one.
+/// The host's monotonic clock, when it offers one; a clock that fails says why, at warn (the
+/// login then refuses to run untimed: [`LdapModule::login_over`]).
 fn now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
-    match host?.connector(ticket).clock_now() {
-        Poll::Ready(Ok(r)) => Some(r.mono_ns),
-        _ => None,
+    match clock_ns(host?.connector(ticket).clock_now()) {
+        Ok(ns) => Some(ns),
+        Err(reason) => {
+            tracing::warn!(module = "ldap", reason = "clock-failed", refusal = %reason, "ldap login: no host clock reading");
+            None
+        }
     }
 }
 
@@ -345,21 +470,24 @@ fn drive(
         Some(run) => *run,
         None => {
             let fields = submitted(input);
-            Run {
-                module: h.life().module(),
-                username: field(&fields, USERNAME.0).map(str::to_owned),
-                password: field(&fields, PASSWORD.0)
-                    .map(|p| Cred::captured(Zeroizing::new(p.as_bytes().to_vec()))),
-                conv: Conversation::new(),
-                stream: None,
-                at: 0,
+            // A field submitted but not text is refused in its own words (the same verdict as a
+            // field not submitted), before the wire.
+            if let Some(reason) = unreadable(&fields) {
+                tracing::info!(module = "ldap", reason = "not-text", refusal = %reason, "ldap login refused: a submitted field is not UTF-8");
+                return Poll::Ready(Login::BadCredential);
             }
+            begin(
+                h.life().module(),
+                &fields,
+                h.host().map(|host| Release::through(*host)),
+            )
         }
     };
     let host = h.host();
     let now = now(host, ticket);
     let mut wire = HostWire {
         conn: host.map(|host| host.connector_from(ticket, run.at)),
+        clock: host.map(|host| (host, ticket)),
         need: run.module.need(),
         stream: run.stream,
         at: run.at,
@@ -382,9 +510,10 @@ fn drive(
             Poll::Pending
         }
         Poll::Ready(login) => {
+            run.stream = wire.stream;
             if run.conv.opened() {
-                // Best effort: what the close answers changes nothing.
-                let _ = wire.serve(|c, s| c.close(s));
+                let answer = wire.serve(|c, s| c.close(s));
+                closed(&mut run, answer);
             }
             Poll::Ready(login)
         }
@@ -413,6 +542,7 @@ impl SafeSlot for CompleteLogin {
         let kept = take_reached(
             &mut ldap.reached.lock().unwrap_or_else(PoisonError::into_inner),
             key,
+            now(h.host(), ticket),
         );
         let login = match kept {
             Some(p) => Login::Identity(p),
@@ -439,6 +569,7 @@ impl SafeSlot for CompleteLogin {
                         REACHED_MAX,
                         key,
                         p,
+                        now(h.host(), ticket),
                     );
                 }
                 answer

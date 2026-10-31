@@ -3,12 +3,13 @@
 
 //! Pure helpers for the LDAP module: turning group DNs into role strings, and defending the two
 //! places a username crosses into an LDAP wire syntax (a DN template, a search filter). These carry
-//! no I/O, so they are fully unit-tested — the LDAP bind itself needs a live directory.
+//! no I/O, so they are fully unit-tested (the bind itself is tested over a scripted stream in
+//! `tests/conversation_tests.rs`, and live in the plugin's e2e).
 //!
 //! ## Group DN → role normalization
 //!
 //! LDAP/AD groups are DNs: `CN=engineers,OU=Groups,DC=corp,DC=example`. A [`Principal`]'s `roles`
-//! (wire `Identity.groups`) is a `Vec<String>` and `auth.role_bindings.ldap` keys policy on those
+//! (wire `Identity.groups`) is a `Vec<String>` and `auth.role_bindings.<provider>` keys policy on those
 //! strings — so a DN "works" as a role verbatim. But it is a HOSTILE binding key: it has commas and
 //! `=` (awkward YAML keys), it is case-insensitive in LDAP but case-SENSITIVE as a `role_bindings`
 //! map key, and its OU path is deployment-specific. The engine offers no DN normalization, so the
@@ -47,22 +48,28 @@ pub fn roles_from_group_dns(group_dns: &[String], mode: RoleFrom) -> Vec<String>
     out
 }
 
-/// Extract the value of the first `CN=` RDN of a DN, unescaping the handful of DN escapes we care
-/// about (`\,` `\=` `\+`). Case-insensitive on the `CN` attribute name (LDAP is). Returns `None` if
-/// there is no CN component.
+/// Extract the value of the first `CN=` attribute of a DN, unescaping the handful of DN escapes we
+/// care about (`\,` `\=` `\+`). Case-insensitive on the `CN` attribute name (LDAP is). A
+/// multi-valued RDN (`CN=a+UID=b`) is split at its unescaped `+`, and an RDN with no `=` is
+/// skipped. Returns `None` if there is no CN component.
 pub(crate) fn first_cn(dn: &str) -> Option<String> {
-    for rdn in split_dn_rdns(dn) {
-        let (attr, val) = rdn.split_once('=')?;
-        if attr.trim().eq_ignore_ascii_case("cn") {
-            return Some(unescape_rdn_value(val.trim()));
+    for rdn in split_unescaped(dn, ',') {
+        for ava in split_unescaped(&rdn, '+') {
+            let Some((attr, val)) = ava.split_once('=') else {
+                continue;
+            };
+            if attr.trim().eq_ignore_ascii_case("cn") {
+                return Some(unescape_rdn_value(val.trim()));
+            }
         }
     }
     None
 }
 
-/// Split a DN into its top-level RDN components, honoring `\,` as an escaped comma that does NOT
-/// separate RDNs. (A minimal RFC4514 split — enough for real AD/OpenLDAP memberOf values.)
-fn split_dn_rdns(dn: &str) -> Vec<String> {
+/// Split a DN at every unescaped `sep` (`,` between RDNs, `+` between the attribute-value
+/// assertions of a multi-valued RDN), keeping each `\x` escape whole for the value unescaper. (A
+/// minimal RFC 4514 split — enough for real AD/OpenLDAP memberOf values.)
+fn split_unescaped(dn: &str, sep: char) -> Vec<String> {
     let mut parts = Vec::new();
     let mut cur = String::new();
     let mut chars = dn.chars().peekable();
@@ -75,7 +82,7 @@ fn split_dn_rdns(dn: &str) -> Vec<String> {
                     cur.push(n);
                 }
             }
-            ',' => {
+            c if c == sep => {
                 parts.push(std::mem::take(&mut cur));
             }
             _ => cur.push(c),
@@ -87,7 +94,7 @@ fn split_dn_rdns(dn: &str) -> Vec<String> {
     parts
 }
 
-/// Unescape the DN-value escapes that survive [`split_dn_rdns`], per RFC 4514:
+/// Unescape the DN-value escapes that survive [`split_unescaped`], per RFC 4514:
 ///   - the single-char escape `\c` (e.g. `\,` `\=` `\+` `\\` `\"`) yields the literal char `c`, and
 ///   - the hex-pair escape `\XX` yields the raw byte `0xXX`.
 ///

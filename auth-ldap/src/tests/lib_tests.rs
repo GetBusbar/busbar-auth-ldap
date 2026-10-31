@@ -140,6 +140,19 @@ fn new_refuses_a_zero_timeout() {
 }
 
 /// A blank `group_attr` reads back no groups, so every login would bind no roles; refused at boot.
+/// L7: `timeout_secs` bounds each directory operation, and a login runs several; an unbounded one
+/// lets a hung directory pin every in-flight slot. It is capped at 120 seconds, by name.
+#[test]
+fn new_refuses_a_timeout_past_120_seconds() {
+    let mut cfg = base_cfg();
+    cfg.timeout_secs = 120;
+    assert!(LdapModule::new(cfg).is_ok(), "120 is the cap");
+    let mut cfg = base_cfg();
+    cfg.timeout_secs = 121;
+    let e = LdapModule::new(cfg).err().expect("121 is refused");
+    assert!(e.starts_with("settings.timeout_secs: "), "{e}");
+}
+
 #[test]
 fn new_refuses_an_empty_group_attr() {
     for attr in ["", "  "] {
@@ -177,6 +190,37 @@ fn new_requires_search_filter_placeholder() {
     let mut cfg = search_cfg();
     cfg.user_search_filter = Some("(objectClass=person)".to_string());
     assert!(LdapModule::new(cfg).is_err());
+}
+
+/// M3: a `user_search_filter` that does not parse would fail every login as an outage; it is
+/// refused at `validate` and `open`, by name (never quoting the template), and so is one nested
+/// past the parser's depth bound.
+#[test]
+fn an_unparseable_search_filter_is_refused_by_name() {
+    for bad in [
+        "(sAMAccountName={username}".to_string(),
+        "sAMAccountName={username})".to_string(),
+        "((uid={username}))".to_string(),
+        format!("{}(uid={{username}}){}", "(!".repeat(40), ")".repeat(40)),
+    ] {
+        let mut cfg = search_cfg();
+        cfg.user_search_filter = Some(bad.clone());
+        let Err(e) = LdapModule::new(cfg) else {
+            panic!("{bad:?} is refused at open");
+        };
+        assert!(e.contains("settings.user_search_filter: "), "{e}");
+        assert!(!e.contains("username}"), "the template is not quoted: {e}");
+        let blob = serde_json::json!({
+            "url": "ldaps://ad.corp.example:636",
+            "bind_dn_template": "uid={username},dc=corp,dc=example",
+            "base_dn": "dc=corp,dc=example",
+            "user_search_filter": bad,
+            "bind_service_dn": "cn=svc,dc=corp,dc=example",
+        })
+        .to_string();
+        let e = LdapModule::validate_settings(blob.as_bytes()).expect_err("refused at validate");
+        assert!(e.contains("settings.user_search_filter: "), "{e}");
+    }
 }
 
 /// With a search filter set, a service DN but NO password would make `simple_bind(dn,
@@ -312,7 +356,13 @@ fn the_guards_host_is_the_dialers_host() {
         let dialed = crate::conversation::Endpoint::parse(url, false)
             .unwrap_or_else(|e| panic!("{url}: {e}"))
             .host;
-        assert_eq!(crate::host_of(url), dialed, "{url}");
+        let loopback = ["127.0.0.1", "::1", "localhost"].contains(&dialed.as_str());
+        let ldaps = url.starts_with("ldaps://");
+        assert_eq!(
+            crate::is_insecure_transport(url, false),
+            !ldaps && !loopback,
+            "{url} dials {dialed}"
+        );
     }
 }
 
@@ -413,6 +463,60 @@ fn bind_dn_rejects_rfc4514_must_escape_positions() {
     }
 }
 
+/// T2: a LONE backslash (trailing, or the whole username) is refused too: templated into a DN it
+/// would escape the template's next character (`uid=a\,ou=...` reads as one RDN value).
+#[test]
+fn a_lone_backslash_username_is_refused() {
+    for bad in ["\\", "alice\\", "\\alice", "a\\b"] {
+        assert!(validate_username(bad).is_err(), "{bad:?} is refused");
+    }
+    let m = LdapModule::new(base_cfg()).unwrap();
+    assert!(m.bind_dn_for("alice\\").is_err());
+}
+
+/// T1: a BIND password goes out only where it is safe. For an `ldaps://` URL or `start_tls` it is
+/// SECURE-REQUIRED (the chip refuses to write it on a stream the host connector does not report
+/// secured), the service password and the user's alike; a plain `ldap://` URL to a non-loopback
+/// host with no STARTTLS never reaches a bind at all (refused at `validate` and boot) unless the
+/// operator opts out, and only then does the password go out unsecured.
+#[test]
+fn bind_passwords_are_secure_required_and_plaintext_never_binds() {
+    let pw = cred("pw");
+    let ldaps = LdapModule::new(search_cfg()).unwrap();
+    assert!(ldaps.guarded(&pw).secure_required(), "ldaps://");
+    let svc = ldaps.cfg.bind_service_password.as_ref().expect("set");
+    assert!(ldaps.guarded(svc).secure_required(), "the service password");
+
+    let mut cfg = base_cfg();
+    cfg.url = "ldap://ad.corp.example:389".to_string();
+    cfg.start_tls = true;
+    assert!(
+        LdapModule::new(cfg).unwrap().guarded(&pw).secure_required(),
+        "start_tls"
+    );
+
+    let mut plain = base_cfg();
+    plain.url = "ldap://ad.corp.example:389".to_string();
+    let e = LdapModule::new(plain.clone())
+        .err()
+        .expect("plaintext to a remote host never opens");
+    assert!(e.starts_with("settings.url: "), "{e}");
+    let blob = serde_json::json!({
+        "url": plain.url,
+        "bind_dn_template": plain.bind_dn_template,
+        "base_dn": plain.base_dn,
+    })
+    .to_string();
+    assert!(LdapModule::validate_settings(blob.as_bytes()).is_err());
+
+    plain.allow_insecure_transport = true;
+    let opted = LdapModule::new(plain).unwrap();
+    assert!(
+        !opted.guarded(&pw).secure_required(),
+        "only the explicit opt-out sends it unsecured"
+    );
+}
+
 #[test]
 fn username_validation_allows_normal_names() {
     for ok in ["alice", "alice.smith", "a_b-c", "user@corp.example"] {
@@ -448,6 +552,18 @@ fn first_cn_extracts_leading_cn() {
 
 /// `\XX` hex-pair DN escapes (RFC 4514) must be resolved, not left literal. Consecutive
 /// hex bytes decode together as UTF-8.
+/// L3: an RDN with no `=` (malformed, or a lenient directory's) is skipped, not the end of the
+/// search, and a multi-valued RDN (`CN=a+UID=b`) is split at its unescaped `+`: the CN is its own
+/// AVA's value, in either position; an escaped `\+` stays in the value.
+#[test]
+fn first_cn_skips_a_bad_rdn_and_splits_a_multi_valued_one() {
+    assert_eq!(first_cn("garbage,CN=eng,DC=x"), Some("eng".to_string()));
+    assert_eq!(first_cn("CN=eng+UID=e1,OU=g,DC=x"), Some("eng".to_string()));
+    assert_eq!(first_cn("UID=e1+CN=eng,OU=g,DC=x"), Some("eng".to_string()));
+    assert_eq!(first_cn("CN=a\\+b,DC=x"), Some("a+b".to_string()));
+    assert_eq!(first_cn("OU=g+UID=x,DC=x"), None);
+}
+
 #[test]
 fn first_cn_unescapes_hex_pairs() {
     // `\41` → 'A'
@@ -611,6 +727,11 @@ struct FakeLdap {
     /// The Base (group read) search answers no entry at all (an ACL hiding the bound user's own
     /// entry).
     base_empty: bool,
+    /// The UNBIND fails (a directory that drops the connection after the group read).
+    unbind_err: bool,
+    /// The DN the Base (group read) search answers its entry under, as the directory spells it;
+    /// unset, the DN the user bound as.
+    entry_dn: Option<String>,
 }
 
 impl LdapBackend for FakeLdap {
@@ -668,7 +789,11 @@ impl LdapBackend for FakeLdap {
                     attrs.insert(self.group_attr.clone(), self.group_values.clone());
                 }
                 Ok(vec![DirEntry {
-                    dn: self.binds.last().cloned().unwrap_or_default(),
+                    dn: self
+                        .entry_dn
+                        .clone()
+                        .or_else(|| self.binds.last().cloned())
+                        .unwrap_or_default(),
                     attrs,
                 }])
             }
@@ -677,8 +802,51 @@ impl LdapBackend for FakeLdap {
 
     fn unbind(&mut self) -> Result<(), Io> {
         self.unbound = true;
+        if self.unbind_err {
+            return Err(Io::Failed(
+                "the directory closed the connection".to_string(),
+            ));
+        }
         Ok(())
     }
+}
+
+/// T3: the UNBIND is best effort: a directory that drops the connection after the group read (the
+/// unbind's write fails) does not turn a fully verified login into an outage.
+#[test]
+fn a_failed_unbind_is_ignored() {
+    let m = LdapModule::new(base_cfg()).unwrap();
+    let mut fake = FakeLdap {
+        group_values: vec!["CN=engineers,OU=Groups,DC=corp,DC=example".to_string()],
+        group_attr: "memberOf".to_string(),
+        unbind_err: true,
+        ..Default::default()
+    };
+    let p = m
+        .bind_and_identify_on(&mut fake, "alice", "pw")
+        .expect("the login stands");
+    assert!(fake.unbound, "the unbind was attempted");
+    assert_eq!(p.roles, vec!["engineers".to_string()]);
+}
+
+/// T5: `ca_cert_pem` holds a certificate only when EVERY `CERTIFICATE` block is base64 of a DER
+/// SEQUENCE: well-formed base64 that is not one (`AAAA`), or a bundle whose second block is bad,
+/// is refused, as the connector would refuse it at the need's declaration.
+#[test]
+fn a_ca_bundle_with_a_non_der_block_holds_no_certificate() {
+    let good = busbar_test_kit::conformance_host::anchors();
+    assert!(
+        crate::holds_a_certificate(good),
+        "the kit's CA is a certificate"
+    );
+    let not_der = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+    assert!(!crate::holds_a_certificate(not_der));
+    assert!(!crate::holds_a_certificate(&format!("{good}\n{not_der}")));
+    assert!(!crate::holds_a_certificate(&format!("{not_der}{good}")));
+    let mut cfg = base_cfg();
+    cfg.ca_cert_pem = Some(not_der.to_string());
+    let e = LdapModule::new(cfg).err().expect("refused at boot");
+    assert!(e.contains("settings.ca_cert_pem: "), "{e}");
 }
 
 fn search_cfg() -> LdapConfig {
@@ -816,7 +984,7 @@ fn successful_bind_identifies_with_roles_and_normalized_id() {
             (
                 "dc=corp,dc=example".to_string(),
                 "subtree",
-                vec!["dn".to_string()],
+                vec!["1.1".to_string()],
             ),
             (
                 "CN=Alice,OU=People,DC=corp,DC=example".to_string(),
@@ -867,6 +1035,62 @@ fn the_group_attr_is_matched_case_insensitively() {
     assert_eq!(p.roles, vec!["admins".to_string()]);
 }
 
+/// M2: Active Directory answers a multi-valued attribute past its MaxValRange (1500) as a RANGED
+/// description, `memberOf;range=0-1499`. The group attribute is matched ignoring options, so the
+/// values returned are read (fail-safe: fewer roles than the user holds), and the truncation is
+/// logged at warn; a final range (`;range=0-*`) is the whole attribute and is read silently.
+#[test]
+fn a_ranged_group_attribute_is_read_and_its_truncation_warned() {
+    use busbar_test_kit::warn_capture::WarnCapture;
+    let m = LdapModule::new(base_cfg()).unwrap();
+    let read = |attr: &str| {
+        let mut fake = FakeLdap {
+            group_values: vec!["CN=engineers,OU=Groups,DC=corp,DC=example".to_string()],
+            group_attr: attr.to_string(),
+            ..Default::default()
+        };
+        let cap = WarnCapture::default();
+        let p = tracing::subscriber::with_default(cap.clone(), || {
+            m.bind_and_identify_on(&mut fake, "alice", "pw")
+        })
+        .expect("binds");
+        (p.roles, cap)
+    };
+    let (roles, cap) = read("memberOf;range=0-1499");
+    assert_eq!(roles, vec!["engineers".to_string()]);
+    assert!(cap.contains("range=0-1499"), "{:?}", cap.messages());
+    assert!(cap.contains("truncated"), "{:?}", cap.messages());
+    let (roles, cap) = read("memberOf;range=0-*");
+    assert_eq!(roles, vec!["engineers".to_string()]);
+    assert!(!cap.contains("truncated"), "{:?}", cap.messages());
+}
+
+/// M5: a user entry that carries no group attribute at all logs in with no roles, and says so at
+/// warn (a misnamed `group_attr` is otherwise a silent no-roles login for everyone).
+#[test]
+fn an_absent_group_attribute_is_warned() {
+    use busbar_test_kit::warn_capture::WarnCapture;
+    let m = LdapModule::new(base_cfg()).unwrap();
+    let mut fake = FakeLdap::default();
+    let cap = WarnCapture::default();
+    let p = tracing::subscriber::with_default(cap.clone(), || {
+        m.bind_and_identify_on(&mut fake, "alice", "pw")
+    })
+    .expect("binds");
+    assert!(p.roles.is_empty());
+    assert!(
+        cap.contains("group attribute is absent"),
+        "{:?}",
+        cap.messages()
+    );
+    assert!(cap.contains("group_attr=memberOf"), "{:?}", cap.messages());
+    assert!(
+        !cap.contains("alice"),
+        "the DN leaked: {:?}",
+        cap.messages()
+    );
+}
+
 /// A search matching >1 entry is AMBIGUOUS and must be rejected, not silently bound to
 /// the first match.
 #[test]
@@ -914,6 +1138,58 @@ fn username_casing_yields_same_principal_id() {
         principal_id("uid=Alice,DC=X"),
         principal_id("uid=alice,dc=x")
     );
+}
+
+/// M1: a direct-bind principal is the bound entry's DN AS THE DIRECTORY RETURNS IT (the group
+/// read's objectName), not the typed spelling: `John  Smith` (two spaces) and `John Smith` bind the
+/// same entry on a directory that matches insignificant spaces away, so they are one principal.
+#[test]
+fn the_principal_is_the_dn_the_directory_returns() {
+    let m = LdapModule::new(base_cfg()).unwrap();
+    let id_for = |u: &str| {
+        let mut fake = FakeLdap {
+            entry_dn: Some("uid=John Smith,ou=People,dc=corp,dc=example".to_string()),
+            ..Default::default()
+        };
+        m.bind_and_identify_on(&mut fake, u, "pw").unwrap().id
+    };
+    assert_eq!(
+        id_for("John  Smith"),
+        "ldap:uid=john smith,ou=people,dc=corp,dc=example"
+    );
+    assert_eq!(id_for("John  Smith"), id_for("john smith"));
+}
+
+/// M1: when the group read answers no entry (an ACL hides it), the principal falls back to the
+/// bound DN normalised for case-ignore matching (RFC 4518: case folded, insignificant spaces
+/// collapsed), so the typed spacing still mints one principal.
+#[test]
+fn with_no_entry_the_principal_is_the_bound_dn_normalised() {
+    let m = LdapModule::new(base_cfg()).unwrap();
+    let id_for = |u: &str| {
+        let mut fake = FakeLdap {
+            base_empty: true,
+            ..Default::default()
+        };
+        m.bind_and_identify_on(&mut fake, u, "pw").unwrap().id
+    };
+    assert_eq!(id_for("John  Smith"), id_for("John Smith"));
+    assert_eq!(
+        id_for("John   Smith"),
+        "ldap:uid=john smith,ou=people,dc=corp,dc=example"
+    );
+    // Search-then-bind normalises the found DN the same way.
+    let m = LdapModule::new(search_cfg()).unwrap();
+    let mut fake = FakeLdap {
+        search_entries: vec![DirEntry {
+            dn: "CN=John  Smith,OU=People,DC=corp,DC=example".to_string(),
+            attrs: HashMap::new(),
+        }],
+        base_empty: true,
+        ..Default::default()
+    };
+    let p = m.bind_and_identify_on(&mut fake, "jsmith", "pw").unwrap();
+    assert_eq!(p.id, "ldap:cn=john smith,ou=people,dc=corp,dc=example");
 }
 
 /// An oversized `memberOf` is capped so a hostile directory cannot exhaust memory.
@@ -1309,6 +1585,25 @@ mod logging {
             dn: dn.to_string(),
             attrs: HashMap::new(),
         }
+    }
+
+    /// L4: an empty `base_dn` stays accepted for search-then-bind (the AD Global Catalog serves a
+    /// search from the root DSE), but never silently: `open` logs at info that the user search runs
+    /// from the root DSE. A set base, or direct bind (which searches no base), logs nothing of it.
+    #[test]
+    fn an_empty_search_base_is_logged_at_open() {
+        let mut cfg = search_cfg();
+        cfg.base_dn = "  ".to_string();
+        let (m, cap) = captured(|| LdapModule::new(cfg));
+        assert!(m.is_ok());
+        assert!(cap.contains("root DSE"), "{:?}", cap.messages());
+        assert!(cap.contains("module=ldap"), "{:?}", cap.messages());
+        let (_, cap) = captured(|| LdapModule::new(search_cfg()));
+        assert!(!cap.contains("root DSE"), "{:?}", cap.messages());
+        let mut cfg = base_cfg();
+        cfg.base_dn = String::new();
+        let (_, cap) = captured(|| LdapModule::new(cfg));
+        assert!(!cap.contains("root DSE"), "{:?}", cap.messages());
     }
 
     /// A search that matches nothing is a refused credential, and says so (never the password).
