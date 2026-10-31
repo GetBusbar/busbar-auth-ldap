@@ -935,6 +935,24 @@ fn a_ranged_group_attribute_is_read_and_its_truncation_warned() {
     assert!(!cap.contains("truncated"), "{:?}", cap.messages());
 }
 
+/// M5: a user entry that carries no group attribute at all logs in with no roles, and says so at
+/// warn (a misnamed `group_attr` is otherwise a silent no-roles login for everyone).
+#[test]
+fn an_absent_group_attribute_is_warned() {
+    use busbar_test_kit::warn_capture::WarnCapture;
+    let m = LdapModule::new(base_cfg()).unwrap();
+    let mut fake = FakeLdap::default();
+    let cap = WarnCapture::default();
+    let p = tracing::subscriber::with_default(cap.clone(), || {
+        m.bind_and_identify_on(&mut fake, "alice", "pw")
+    })
+    .expect("binds");
+    assert!(p.roles.is_empty());
+    assert!(cap.contains("group attribute is absent"), "{:?}", cap.messages());
+    assert!(cap.contains("group_attr=memberOf"), "{:?}", cap.messages());
+    assert!(!cap.contains("alice"), "the DN leaked: {:?}", cap.messages());
+}
+
 /// A search matching >1 entry is AMBIGUOUS and must be rejected, not silently bound to
 /// the first match.
 #[test]
