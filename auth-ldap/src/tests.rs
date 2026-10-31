@@ -533,6 +533,18 @@ fn first_cn_extracts_leading_cn() {
 
 /// `\XX` hex-pair DN escapes (RFC 4514) must be resolved, not left literal. Consecutive
 /// hex bytes decode together as UTF-8.
+/// L3: an RDN with no `=` (malformed, or a lenient directory's) is skipped, not the end of the
+/// search, and a multi-valued RDN (`CN=a+UID=b`) is split at its unescaped `+`: the CN is its own
+/// AVA's value, in either position; an escaped `\+` stays in the value.
+#[test]
+fn first_cn_skips_a_bad_rdn_and_splits_a_multi_valued_one() {
+    assert_eq!(first_cn("garbage,CN=eng,DC=x"), Some("eng".to_string()));
+    assert_eq!(first_cn("CN=eng+UID=e1,OU=g,DC=x"), Some("eng".to_string()));
+    assert_eq!(first_cn("UID=e1+CN=eng,OU=g,DC=x"), Some("eng".to_string()));
+    assert_eq!(first_cn("CN=a\\+b,DC=x"), Some("a+b".to_string()));
+    assert_eq!(first_cn("OU=g+UID=x,DC=x"), None);
+}
+
 #[test]
 fn first_cn_unescapes_hex_pairs() {
     // `\41` → 'A'
