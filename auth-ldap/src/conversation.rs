@@ -160,6 +160,8 @@ struct Doing {
     entries: Vec<DirEntry>,
     /// How many messages this operation has read ([`MAX_MESSAGES`]).
     received: u32,
+    /// How many search references this operation skipped.
+    references: u32,
 }
 
 // By hand: a `SealedWrite` has no `Debug`; only its length shows.
@@ -173,6 +175,7 @@ impl fmt::Debug for Doing {
             .field("id", &self.id)
             .field("entries", &self.entries)
             .field("received", &self.received)
+            .field("references", &self.references)
             .finish()
     }
 }
@@ -427,6 +430,7 @@ impl<'a, W: Wire> Over<'a, W> {
                 id,
                 entries: Vec::new(),
                 received: 0,
+                references: 0,
             }
         })
     }
@@ -457,6 +461,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
             id: 0,
             entries: Vec::new(),
             received: 0,
+            references: 0,
         })?;
         loop {
             match self.stage() {
@@ -522,6 +527,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                 id,
                 entries: Vec::new(),
                 received: 0,
+                references: 0,
             }
         })?;
         if self.stage() == Stage::Send {
@@ -580,10 +586,21 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                     return Ok(entries);
                 }
                 Reply::Done(r) => return self.fail(r.to_string()),
-                // A referral is never read as an entry: fail closed.
+                // A SearchResultReference is a referral this client does not chase, and RFC 4511
+                // §4.5.3 lets such a client ignore it: never read as an entry, it is counted and
+                // skipped, and the search is decided on its entries and its SearchResultDone.
+                // (Active Directory answers every domain-root subtree search with references to
+                // its ForestDnsZones, DomainDnsZones and Configuration partitions.)
                 Reply::Reference => {
-                    return self
-                        .fail("malformed reply: a search reference (referrals are not followed)")
+                    let skipped = self.conv.doing.as_mut().map_or(0, |d| {
+                        d.references += 1;
+                        d.references
+                    });
+                    tracing::debug!(
+                        module = "ldap",
+                        skipped,
+                        "ldap search reference skipped (referrals are not chased)"
+                    );
                 }
                 _ => return self.fail("malformed reply: not a search result"),
             }
