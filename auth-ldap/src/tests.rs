@@ -1523,6 +1523,25 @@ mod logging {
         }
     }
 
+    /// L4: an empty `base_dn` stays accepted for search-then-bind (the AD Global Catalog serves a
+    /// search from the root DSE), but never silently: `open` logs at info that the user search runs
+    /// from the root DSE. A set base, or direct bind (which searches no base), logs nothing of it.
+    #[test]
+    fn an_empty_search_base_is_logged_at_open() {
+        let mut cfg = search_cfg();
+        cfg.base_dn = "  ".to_string();
+        let (m, cap) = captured(|| LdapModule::new(cfg));
+        assert!(m.is_ok());
+        assert!(cap.contains("root DSE"), "{:?}", cap.messages());
+        assert!(cap.contains("module=ldap"), "{:?}", cap.messages());
+        let (_, cap) = captured(|| LdapModule::new(search_cfg()));
+        assert!(!cap.contains("root DSE"), "{:?}", cap.messages());
+        let mut cfg = base_cfg();
+        cfg.base_dn = String::new();
+        let (_, cap) = captured(|| LdapModule::new(cfg));
+        assert!(!cap.contains("root DSE"), "{:?}", cap.messages());
+    }
+
     /// A search that matches nothing is a refused credential, and says so (never the password).
     #[test]
     fn no_search_match_is_logged() {
