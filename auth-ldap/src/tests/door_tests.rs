@@ -6,8 +6,8 @@
 //! plugin crate's `tests/conformance.rs` (linked and dropped in).
 
 use super::{
-    closed, field, keep_reached, take_reached, Ldap, Reached, Release, Run, ALIAS, FORM, NAME,
-    NEED, NEEDS, NEED_ANCHORED, SECRET_REFS, STATEMENT, TAIL,
+    clock_ns, closed, field, keep_reached, take_reached, unreadable, Ldap, Reached, Release, Run,
+    ALIAS, FORM, NAME, NEED, NEEDS, NEED_ANCHORED, SECRET_REFS, STATEMENT, TAIL,
 };
 use crate::LdapModule;
 use busbar_contract::abi::auth::{
@@ -87,6 +87,48 @@ fn a_field_is_found_by_its_declared_name_and_must_be_text() {
     assert_eq!(field(&fields, "username"), Some("alice"));
     assert_eq!(field(&fields, "password"), None, "non-UTF-8 is no value");
     assert_eq!(field(&fields, "missing"), None);
+}
+
+/// L5: a field submitted but not UTF-8 is refused in its own words, not as "not submitted" (the
+/// verdict is the same bad credential); a field absent, or text, is not this refusal.
+#[test]
+fn a_field_that_is_not_text_is_refused_in_its_own_words() {
+    let bad_password: [(&[u8], &[u8]); 2] = [(b"username", b"alice"), (b"password", b"\xff")];
+    assert_eq!(
+        unreadable(&bad_password),
+        Some("the password field is not UTF-8")
+    );
+    let bad_username: [(&[u8], &[u8]); 2] = [(b"username", b"\xfe"), (b"password", b"pw")];
+    assert_eq!(
+        unreadable(&bad_username),
+        Some("the username field is not UTF-8")
+    );
+    let fine: [(&[u8], &[u8]); 1] = [(b"username", b"alice")];
+    assert_eq!(
+        unreadable(&fine),
+        None,
+        "an absent field is not this refusal"
+    );
+}
+
+/// L5: a host clock that answers a failure says which, instead of collapsing into "no clock".
+#[test]
+fn a_failing_host_clock_says_why() {
+    use busbar_contract::abi::sdk::conn::ConnFailure;
+    use std::task::Poll;
+    let reading = busbar_contract::abi::host::service::ClockReading {
+        size: 0,
+        _reserved: 0,
+        wall_ns: 1,
+        mono_ns: 42,
+    };
+    assert_eq!(clock_ns(Poll::Ready(Ok(reading))), Ok(42));
+    let e = clock_ns(Poll::Ready(Err(ConnFailure::Failed("clock broke".into())))).unwrap_err();
+    assert!(e.contains("clock broke"), "{e}");
+    let e = clock_ns(Poll::Ready(Err(ConnFailure::Fault))).unwrap_err();
+    assert!(e.contains("faulted"), "{e}");
+    let e = clock_ns(Poll::Pending).unwrap_err();
+    assert!(e.contains("pended"), "{e}");
 }
 
 /// The Statement states a credential login that never blocks (no `MARK_BLOCKS`: every call is

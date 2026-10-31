@@ -41,6 +41,7 @@ use busbar_contract::abi::auth::{
 use busbar_contract::abi::host::conn::connector::{
     Need, DIRECTION_OUTBOUND, EGRESS_OPERATOR_INFRASTRUCTURE, KEEP_NAMED,
 };
+use busbar_contract::abi::host::service::ClockReading;
 use busbar_contract::abi::mechanism::call::{AbiStr, Outcome};
 use busbar_contract::abi::mechanism::door::{Rewrite, Statement};
 use busbar_contract::abi::mechanism::ticket::Ticket;
@@ -247,6 +248,20 @@ fn field<'a>(fields: &[(&[u8], &'a [u8])], name: &str) -> Option<&'a str> {
         .iter()
         .find(|(n, _)| *n == name.as_bytes())
         .and_then(|(_, v)| std::str::from_utf8(v).ok())
+}
+
+/// Why a submission the form's fields cannot be read from is refused, when a field was submitted
+/// but is not text.
+fn unreadable(_fields: &[(&[u8], &[u8])]) -> Option<&'static str> {
+    None
+}
+
+/// The host clock's reading, or why there is none.
+fn clock_ns(answer: Answer<ClockReading>) -> Result<u64, String> {
+    match answer {
+        Poll::Ready(Ok(r)) => Ok(r.mono_ns),
+        _ => Err("no host clock".to_string()),
+    }
 }
 
 /// One login in flight, parked on its ticket across its PENDING answers: the module it began with
