@@ -40,6 +40,11 @@ pub trait Wire {
     /// Write the chip's whole message `w` (a BIND, its password sealed): `Ready(Ok(()))` once all
     /// of it is taken.
     fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>>;
+    /// The stream owner's monotonic clock now, when it offers one: read between the messages of
+    /// one entry of the op, so a directory that answers Ready without end meets its deadline.
+    fn now_ns(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 /// How the connection is secured.

@@ -1107,3 +1107,84 @@ fn an_operation_that_never_ends_its_messages_is_cut_off() {
         }
     }
 }
+
+/// M6: one operation reads at most 16 MiB from the directory in all, however it is split into
+/// messages: a directory that streams large messages for another id (each under the per-message
+/// cap, fewer than the message cap) is cut off.
+#[test]
+fn an_operation_reads_at_most_16_mib_in_all() {
+    use crate::{Io, LdapBackend, SearchScope};
+    let filler = message(77, ber::element(0x79, &vec![0_u8; 64 * 1024]));
+    let mut replies = vec![bind_response(1, 0)];
+    for _ in 0..300 {
+        replies.push(filler.clone());
+    }
+    replies.push(done(2, 0));
+    let mut dir = Directory::new(replies);
+    let mut conv = Conversation::new();
+    let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, Some(0), 10);
+    over.connect().expect("connects");
+    over.simple_bind("cn=svc,dc=x", &crate::tests::cred("pw"))
+        .expect("binds");
+    match over.search("dc=x", SearchScope::Subtree, "(uid=alice)", &["dn"]) {
+        Err(Io::Failed(e)) => assert!(e.contains("16 MiB"), "{e}"),
+        r => panic!("past 16 MiB the operation fails, got {r:?}"),
+    }
+}
+
+/// A directory that answers Ready forever on a clock that moves: every entry, one second.
+struct Ticking {
+    now: u64,
+    sent: u64,
+}
+
+impl Wire for Ticking {
+    fn establish(&mut self, _: &str) -> Poll<Result<(), String>> {
+        Poll::Ready(Ok(()))
+    }
+    fn secure(&mut self) -> Poll<Result<(), String>> {
+        Poll::Ready(Ok(()))
+    }
+    fn write(&mut self, b: &[u8]) -> Poll<Result<usize, String>> {
+        Poll::Ready(Ok(b.len()))
+    }
+    fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>> {
+        busbar_contract::abi::sdk::test_support::chip::drive_sealed(w, |b| self.write(b))
+    }
+    fn read(&mut self, buf: &mut [u8]) -> Poll<Result<usize, String>> {
+        self.sent += 1;
+        let m = if self.sent == 1 {
+            bind_response(1, 0)
+        } else {
+            entry(2, &format!("uid=u{},dc=x", self.sent), "dn", &[])
+        };
+        buf[..m.len()].copy_from_slice(&m);
+        Poll::Ready(Ok(m.len()))
+    }
+    fn now_ns(&mut self) -> Option<u64> {
+        self.now += 1_000_000_000;
+        Some(self.now)
+    }
+}
+
+/// M6: the deadline is checked on every message of one entry of the op, on the stream owner's
+/// clock: a directory that answers Ready without end meets its timeout, not only the message cap.
+#[test]
+fn the_deadline_is_checked_between_messages() {
+    use crate::{Io, LdapBackend, SearchScope};
+    let mut wire = Ticking { now: 0, sent: 0 };
+    let mut conv = Conversation::new();
+    let mut over = super::Over::new(&mut conv, &mut wire, "ldap://127.0.0.1", false, Some(0), 10);
+    over.connect().expect("connects");
+    over.simple_bind("cn=svc,dc=x", &crate::tests::cred("pw"))
+        .expect("binds");
+    match over.search("dc=x", SearchScope::Subtree, "(uid=alice)", &["dn"]) {
+        Err(Io::Failed(e)) => assert_eq!(e, super::TIMEOUT),
+        r => panic!("the deadline cuts it off, got {r:?}"),
+    }
+    assert!(
+        wire.sent < 100,
+        "cut off at the deadline: {} reads",
+        wire.sent
+    );
+}
