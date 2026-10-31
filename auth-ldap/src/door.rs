@@ -27,7 +27,6 @@
 //! TLS; the plugin ABI: Ready or Pending(wake)).
 
 use std::collections::HashMap;
-use std::ffi::c_void;
 use std::marker::PhantomData;
 use std::sync::{Arc, Mutex, PoisonError, RwLock};
 use std::task::Poll;
@@ -49,7 +48,7 @@ use busbar_contract::abi::sdk::auth_door::with_tail;
 use busbar_contract::abi::sdk::auth_kit::login_identity;
 use busbar_contract::abi::sdk::conn::{Answer, Connector, Host};
 use busbar_contract::abi::sdk::cred::{Cred, SealedWrite};
-use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut, Slot};
+use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
 use busbar_contract::auth::Principal;
@@ -252,13 +251,17 @@ impl Life for Ldap {
 /// `begin_login`: the credential form.
 pub struct BeginLogin;
 
-impl Slot for BeginLogin {
+impl SafeSlot for BeginLogin {
     type In = BeginLoginIn;
     type Out = BeginLoginOut;
-    fn call(_: *mut c_void, _: &BeginLoginIn, out: &mut BeginLoginOut) -> Outcome {
-        out.shape = BEGIN_FORM;
-        out.form = FORM.as_ptr();
-        out.form_len = FORM.len();
+    type State = Held<Ldap>;
+    fn call(
+        _: Instance<'_, Held<Ldap>>,
+        _: Lent<'_, BeginLoginIn>,
+        mut out: Out<'_, BeginLoginOut>,
+    ) -> Outcome {
+        out.set(|o| &o.shape, BEGIN_FORM);
+        out.list(|o| &o.form, |o| &o.form_len, FORM);
         Outcome::Ready
     }
 }
@@ -582,10 +585,11 @@ impl SafeSlot for CompleteLogin {
 /// `CAP_OUTBOUND`): REFUSED, never called.
 pub struct NotServed<I, O>(PhantomData<(I, O)>);
 
-impl<I: AbiIn, O: AbiOut> Slot for NotServed<I, O> {
+impl<I: AbiIn, O: AbiOut> SafeSlot for NotServed<I, O> {
     type In = I;
     type Out = O;
-    fn call(_: *mut c_void, _: &I, _: &mut O) -> Outcome {
+    type State = Held<Ldap>;
+    fn call(_: Instance<'_, Held<Ldap>>, _: Lent<'_, I>, _: Out<'_, O>) -> Outcome {
         Outcome::Refused
     }
 }
@@ -601,12 +605,12 @@ mod table {
         statement: super::STATEMENT,
         lifecycle: life(Ldap),
         kind_ops: {
-            verify: NotServed<VerifyIn, IdentifyOut>,
-            begin_login: BeginLogin,
+            verify: Safe<NotServed<VerifyIn, IdentifyOut>>,
+            begin_login: Safe<BeginLogin>,
             complete_login: Safe<CompleteLogin>,
-            open_outbound: NotServed<OpenOutboundIn, OpenOutboundOut>,
-            outbound_ready: NotServed<OutboundReadyIn, OutboundReadyOut>,
-            fields: NotServed<FieldsIn, FieldsOut>,
+            open_outbound: Safe<NotServed<OpenOutboundIn, OpenOutboundOut>>,
+            outbound_ready: Safe<NotServed<OutboundReadyIn, OutboundReadyOut>>,
+            fields: Safe<NotServed<FieldsIn, FieldsOut>>,
         },
     }
 }
