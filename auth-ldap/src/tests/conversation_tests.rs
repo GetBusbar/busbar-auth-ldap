@@ -441,9 +441,14 @@ fn a_search_keeps_at_most_two_entries() {
     assert_eq!(login(&m, &mut dir, "pw").0, Login::BadCredential);
 }
 
-/// 1.5.5 panicked reading a referral as an entry; it is an outage now.
+/// A SearchResultReference (RFC 4511 §4.5.3) is a referral the module does not chase, and a client
+/// that does not chase referrals may ignore them: it is skipped, never read as an entry, and the
+/// search is decided on its entries and its SearchResultDone. Active Directory answers every
+/// domain-root subtree search with ForestDnsZones/DomainDnsZones/Configuration references, so a
+/// reference that failed the search failed every search-then-bind login against AD (1.5.5
+/// panicked reading one as an entry). The group read skips them the same way.
 #[test]
-fn a_search_reference_fails_closed() {
+fn a_search_reference_is_skipped() {
     let m = module(
         "ldap://127.0.0.1",
         serde_json::json!({
@@ -452,12 +457,33 @@ fn a_search_reference_fails_closed() {
             "bind_service_password": "svc-pw",
         }),
     );
-    let reference = message(
-        2,
-        ber::element(0x73, &ber::element(0x04, b"ldap://elsewhere/")),
-    );
-    let mut dir = Directory::new(vec![bind_response(1, 0), reference]).held();
-    assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
+    let reference = |id: i64, url: &[u8]| message(id, ber::element(0x73, &ber::element(0x04, url)));
+    let mut dir = Directory::new(vec![
+        bind_response(1, 0),
+        reference(2, b"ldap://ForestDnsZones.corp.example/DC=ForestDnsZones,DC=corp"),
+        entry(2, ALICE, "dn", &[]),
+        reference(2, b"ldap://corp.example/CN=Configuration,DC=corp"),
+        done(2, 0),
+        bind_response(3, 0),
+        reference(4, b"ldap://elsewhere/"),
+        entry(4, ALICE, "memberOf", &["cn=admins,dc=corp"]),
+        done(4, 0),
+    ])
+    .pending();
+    let (got, _) = login(&m, &mut dir, "pw");
+    let Login::Identity(p) = got else {
+        panic!("references are skipped: {got:?}");
+    };
+    assert_eq!(p.id, format!("ldap:{ALICE}"));
+    assert_eq!(p.roles, vec!["admins".to_string()]);
+
+    // A search answered by references alone matched no entry: no search match, a bad credential.
+    let mut dir = Directory::new(vec![
+        bind_response(1, 0),
+        reference(2, b"ldap://elsewhere/"),
+        done(2, 0),
+    ]);
+    assert_eq!(login(&m, &mut dir, "pw").0, Login::BadCredential);
 }
 
 /// SIGNED DIFFERENCES 1–3, through the conversation: a malformed reply, an overrunning nested
