@@ -1,5 +1,6 @@
 {
   "needs": [
     "tcp"
-  ]
+  ],
+  "diagnostics": []
 }
