@@ -228,8 +228,10 @@ and for a loopback host.
   (a missing field, an empty password, no search match, an ambiguous
   search, an empty DN, a username the DN template refuses) is logged once
   at `info` with its reason. A group read that answers no entry for the
-  bound user (an ACL hiding it) logs a `warn`: the login stands, with no
-  roles. One operation reads at most 1024 directory messages; past that it
+  bound user, or answers result 32 (noSuchObject) or 50
+  (insufficientAccessRights) — an ACL hiding the user's own entry — logs a
+  `warn` naming the code: the login stands, with no roles. Any other
+  failed group read is an outage. One operation reads at most 1024 directory messages; past that it
   is an outage.
 - **Group DNs are normalized by the plugin, not the engine.** LDAP and
   AD groups are DNs (`CN=engineers,OU=Groups,DC=corp,DC=example`), which
