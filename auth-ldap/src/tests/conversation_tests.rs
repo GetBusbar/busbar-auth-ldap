@@ -884,7 +884,6 @@ fn the_resolved_service_secret_reaches_only_the_bind() {
         "base_dn": "dc=x",
         "user_search_filter": "(uid={username})",
         "bind_service_dn": "cn=svc,dc=x",
-        "bind_service_password": "literal",
     })
     .to_string();
     let m =

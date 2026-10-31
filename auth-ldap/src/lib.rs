@@ -14,7 +14,7 @@
 //!    with the user's DN + password over it ([`codec`], [`conversation`]).
 //! 4. On a successful bind it reads the user's group memberships (the `group_attr`
 //!    attribute, `memberOf` by default) and answers a [`Principal`] whose `roles` are the group names, mapped to policy downstream by
-//!    the operator's `auth.role_bindings.ldap`.
+//!    the operator's `auth.role_bindings.<provider name>`.
 //!
 //! Every stream service may answer PENDING; `complete_login` then answers PENDING and resumes on
 //! the wake, and the [`conversation::Conversation`] it parks replays what completed without
@@ -89,7 +89,8 @@ pub enum RoleFrom {
     Dn,
 }
 
-/// Open-time configuration for the LDAP module — the module's OPAQUE `auth.methods.ldap` settings,
+/// Open-time configuration for the LDAP module — the module's OPAQUE
+/// `identity-providers.<name>.settings`,
 /// deserialized from the JSON the engine passes to `open`. Every LDAP-specific knob (URL, DN
 /// templates, TLS/CA, group attribute) fits here as opaque module settings: the engine never needs
 /// to understand any of these fields. Its `Debug` prints the URL with any userinfo cut
@@ -133,10 +134,11 @@ pub struct LdapConfig {
     #[serde(default)]
     pub bind_service_dn: Option<String>,
 
-    /// Service-account password. The Statement names this key in its `secret_refs`, so the kernel
-    /// resolves it into `OpenIn.secrets[0]`, which wins over this value
-    /// ([`LdapModule::from_settings_with`]); a literal here is still accepted. Held by the chip
-    /// ([`Cred`]): no getter, no `Debug`; it reaches the wire only inside the chip's BIND message.
+    /// Service-account password. The Statement names this key in its `secret_refs`, so busbar
+    /// resolves the reference and hands it to `open` as `OpenIn.secrets[0]`
+    /// ([`LdapModule::from_settings_with`]); a literal in the settings blob refuses `validate` and
+    /// boot. Held by the chip ([`Cred`]): no getter, no `Debug`; it reaches the wire only inside the
+    /// chip's BIND message.
     #[serde(default)]
     pub bind_service_password: Option<Cred>,
 
@@ -203,8 +205,9 @@ pub struct LdapModule {
 }
 
 impl LdapModule {
-    /// Build the module from parsed config. Validates the DN template references `{username}` so a
-    /// misconfiguration fails at boot, not on the first login.
+    /// Build the module from parsed config: every settings check ([`check_settings`]) so a
+    /// misconfiguration fails at boot, not on the first login, then the search-then-bind service
+    /// password rule; logs (info) an empty search base and (warn) an opted-out plaintext transport.
     pub fn new(cfg: LdapConfig) -> Result<Self, String> {
         check_settings(&cfg)?;
         // A service DN with NO password would perform `simple_bind(dn, "")`, an UNAUTHENTICATED
@@ -487,14 +490,17 @@ impl LdapModule {
     /// resolves only at `open`, so its PRESENCE is `open`'s rule ([`LdapModule::new`]), not this
     /// one's; an explicit empty literal is still refused here.
     pub fn validate_settings(settings: &[u8]) -> Result<(), String> {
-        check_settings(&parse_settings(settings)?)
+        let cfg = parse_settings(settings)?;
+        refuse_a_literal_secret(&cfg)?;
+        check_settings(&cfg)
     }
 
-    /// [`LdapModule::from_settings`], with the secrets the kernel resolved for the Statement's
+    /// The module from a settings blob, with the secrets the kernel resolved for the Statement's
     /// `secret_refs` (`bind_service_password`): a non-empty first secret is the service-account
-    /// password, over any literal in the settings.
+    /// password (a literal in the settings refuses).
     pub fn from_settings_with(settings: &[u8], secrets: &[&[u8]]) -> Result<Self, String> {
         let mut cfg = parse_settings(settings)?;
+        refuse_a_literal_secret(&cfg)?;
         if let Some(secret) = secrets.first().filter(|s| !s.is_empty()) {
             if std::str::from_utf8(secret).is_err() {
                 return Err("secrets: `bind_service_password` is not UTF-8".to_string());
@@ -572,6 +578,21 @@ impl LdapModule {
             }
         }
     }
+}
+
+/// The service password is a secret REFERENCE, never a literal (auth standard S1): busbar resolves
+/// it and lifts the key out of the settings into `OpenIn.secrets` before `validate` and `open`, so a
+/// `bind_service_password` still IN the settings blob is a literal. It refuses, naming the key and
+/// never the value.
+fn refuse_a_literal_secret(cfg: &LdapConfig) -> Result<(), String> {
+    if cfg.bind_service_password.is_some() {
+        return Err(
+            "settings.bind_service_password: must be a secret reference (for example \
+             `{ env: LDAP_BIND_PASSWORD }`), never a literal"
+                .to_string(),
+        );
+    }
+    Ok(())
 }
 
 /// The settings blob as an [`LdapConfig`], parsed by the chip ([`cred::settings`]): the service
@@ -702,7 +723,7 @@ pub(crate) enum SearchScope {
 /// A directory entry reduced to what the module reads: its DN and requested attributes.
 pub(crate) use codec::Entry as DirEntry;
 
-/// The minimal LDAP operations [`LdapModule::bind_and_identify_on`] needs, abstracted behind a trait
+/// The minimal LDAP operations `LdapModule::bind_and_identify` needs, abstracted behind a trait
 /// so the post-connect bind logic (result-code handling, ambiguity, group cap, roles, principal id)
 /// is UNIT-TESTABLE against a fake in-memory directory. The production impl
 /// ([`conversation::Over`]) speaks the codec over the host's stream; tests drive a fake.

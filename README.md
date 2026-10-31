@@ -195,7 +195,10 @@ and for a loopback host.
   resolves it into `OpenIn.secrets`. It must be a reference (for example
   `bind_service_password: { env: LDAP_BIND_PASSWORD }`): from busbar
   1.6.0 a literal there (accepted by 1.5.5) refuses boot, naming
-  `settings.bind_service_password` and never the value. The plugin holds it, and
+  `settings.bind_service_password` and never the value. busbar lifts the
+  resolved key out of the settings before `open`, so the plugin refuses
+  any `bind_service_password` it still finds in its settings the same way,
+  at `validate` and at boot. The plugin holds it, and
   the submitted end-user password, as the SDK chip's credential
   (`abi::sdk::cred::Cred`: no getter, no `Debug`, no `Display`, wiped on
   drop). Every BIND is the chip's sealed message
@@ -204,8 +207,7 @@ and for a loopback host.
   only on a stream the host connector reports secured. Because the password is resolved
   only at `open`, `validate` runs the settings-only checks: a
   search-then-bind config with no literal password validates, and `open`
-  refuses it if no password resolves (an explicit empty literal is
-  refused by both). A settings value of the wrong type is refused without
+  refuses it if no password resolves. A settings value of the wrong type is refused without
   quoting it (it may be a secret in the wrong key); a missing or unknown
   key is named.
 - **Fail-closed differences from 1.5.5 (owner-signed, 2026-09-28).** A
@@ -301,10 +303,14 @@ in busbar for the full reference. In short:
 BUSBAR_SIGN_KEY=<signing key> busbar-plugin-pack pack \
     --lib target/release/libbusbar_auth_ldap_plugin.so \
     --name busbar-auth-ldap-plugin --alias ldap --kind auth \
-    --version 0.1.0 --publisher busbar \
+    --version 1.6.0 --publisher busbar \
     --license Apache-2.0 \
-    --out busbar-auth-ldap-plugin-0.1.0-x86_64-linux.tar.gz
+    --out busbar-auth-ldap-plugin-1.6.0-x86_64-linux.tar.gz
 ```
+
+`--version` is the crates' version (`version` in `auth-ldap/Cargo.toml`,
+which the door's Statement states as `CARGO_PKG_VERSION`): pack with the
+same one.
 
 For local development without a signing key, `busbar-plugin-pack pack
 --allow-unsigned` produces a tarball busbar loads only under
