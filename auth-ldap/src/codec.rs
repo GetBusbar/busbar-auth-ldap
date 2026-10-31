@@ -26,6 +26,10 @@ const SEARCH_RESULT_DONE: u8 = 0x65;
 const SEARCH_RESULT_REFERENCE: u8 = 0x73;
 const EXTENDED_REQUEST: u8 = 0x77;
 const EXTENDED_RESPONSE: u8 = 0x78;
+/// ExtendedRequest's `requestName` [0] (RFC 4511 §4.12).
+const REQUEST_NAME: u8 = 0x80;
+/// ExtendedResponse's `responseName` [10] (RFC 4511 §4.12).
+const RESPONSE_NAME: u8 = 0x8a;
 
 /// The most values one attribute keeps: one past the group cap, so the module still sees (and
 /// logs) a truncation; the rest are counted, never turned into strings.
@@ -101,7 +105,7 @@ pub fn start_tls(id: i32) -> Vec<u8> {
         id,
         &ber::element(
             EXTENDED_REQUEST,
-            &ber::element(0x80, START_TLS_OID.as_bytes()),
+            &ber::element(REQUEST_NAME, START_TLS_OID.as_bytes()),
         ),
     )
 }
@@ -348,7 +352,7 @@ pub fn decode_within(bytes: &[u8], budget: &mut usize) -> Result<Message, BerErr
             let mut name = None;
             while !rest.is_empty() {
                 let (t, next) = ber::read(rest)?;
-                if t.tag == 0x8a {
+                if t.tag == RESPONSE_NAME {
                     name = Some(text(t.content, "a response name that is not UTF-8")?);
                 }
                 rest = next;

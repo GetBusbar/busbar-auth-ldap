@@ -471,12 +471,17 @@ impl<'a, W: Wire> Over<'a, W> {
     }
 
     /// Begin a request operation carrying `bytes` (built with its message id).
-    fn request(&mut self, build: impl FnOnce(i32) -> Vec<u8>) -> Result<(), Io> {
+    fn request(&mut self, build: impl FnOnce(i32) -> Result<Vec<u8>, String>) -> Result<(), Io> {
+        let mut refused = None;
         self.doing(|c| {
             let id = c.next_id();
+            let out = build(id).unwrap_or_else(|e| {
+                refused = Some(e);
+                Vec::new()
+            });
             Doing {
                 stage: Stage::Send,
-                out: build(id),
+                out,
                 sealed: None,
                 sent: 0,
                 id,
@@ -486,7 +491,11 @@ impl<'a, W: Wire> Over<'a, W> {
                 read_bytes: 0,
                 budget: codec::DECODE_BUDGET,
             }
-        })
+        })?;
+        match refused {
+            Some(e) => self.fail(e),
+            None => Ok(()),
+        }
     }
 }
 
@@ -562,7 +571,10 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                     Err(Some(e)) => return self.fail(e),
                     Ok(()) => break,
                 },
-                Stage::Send | Stage::Read => break,
+                // A connect never sends or reads a request of its own: a stage it never sets.
+                Stage::Send | Stage::Read => {
+                    return self.fail("internal: a connect in a request stage");
+                }
             }
         }
         self.keep(Kept::Connected);
@@ -617,11 +629,9 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
             SearchScope::Base => codec::SCOPE_BASE,
             SearchScope::Subtree => codec::SCOPE_SUBTREE,
         };
-        // A filter that does not parse fails before any byte is sent.
-        if self.conv.doing.is_none() {
-            codec::search(0, base, scope, filter, attrs).map_err(|e| Io::Failed(e.to_string()))?;
-        }
-        self.request(|id| codec::search(id, base, scope, filter, attrs).unwrap_or_default())?;
+        // The request is built once, when the operation begins (a replay resumes it): a filter that
+        // does not parse fails then, before any byte is sent.
+        self.request(|id| codec::search(id, base, scope, filter, attrs).map_err(str::to_string))?;
         if self.stage() == Stage::Send {
             self.send()?;
             self.set_stage(Stage::Read);
@@ -676,7 +686,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
         if self.kept().is_some() {
             return Ok(());
         }
-        self.request(codec::unbind)?;
+        self.request(|id| Ok(codec::unbind(id)))?;
         self.send()?;
         self.keep(Kept::Unbound);
         Ok(())

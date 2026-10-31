@@ -431,33 +431,11 @@ fn is_insecure_transport(url: &str, start_tls: bool) -> bool {
     if start_tls {
         return false;
     }
-    // Anything else here is a plaintext `ldap://` (or scheme-less) connection: only safe to a
-    // loopback host, which never puts the credential on the wire.
-    !is_loopback_host(host_of(url))
-}
-
-/// Extract the host from an `ldap://host:port` / `ldaps://host:port` URL, tolerating an `[::1]`
-/// bracketed IPv6 literal and an absent scheme. Returns the raw host with no port or path.
-fn host_of(url: &str) -> &str {
-    let after = url.split_once("://").map(|(_, rest)| rest).unwrap_or(url);
-    // The authority ends at the first '/', '?' or '#', as the dialer's `Endpoint::parse` ends it:
-    // a different split lets `ldap://evil.example?x@127.0.0.1` read as loopback here.
-    let authority = after.split(['/', '?', '#']).next().unwrap_or("");
-    // Strip any userinfo: everything up to and including the LAST '@'. WITHOUT this, a URL like
-    // `ldap://127.0.0.1:389@evil.com` reads as loopback here while the dial actually lands on `evil.com`
-    // in cleartext — a fail-OPEN bypass of the plaintext guard.
-    let hostport = authority
-        .rsplit_once('@')
-        .map(|(_, h)| h)
-        .unwrap_or(authority);
-    if let Some(rest) = hostport.strip_prefix('[') {
-        // Bracketed IPv6 literal: the host is everything up to the closing bracket.
-        if let Some(end) = rest.find(']') {
-            return &rest[..end];
-        }
-    }
-    // Otherwise the host ends at the first ':' (port).
-    hostport.split(':').next().unwrap_or("")
+    // Anything else here is a plaintext `ldap://` connection: only safe to a loopback host, which
+    // never puts the credential on the wire. The host is the one the dialer dials: ONE split of the
+    // URL ([`conversation::Endpoint::parse`]), so the guard and the dial cannot drift. A URL the
+    // dialer cannot read is refused by name anyway, and reads as insecure here.
+    !conversation::Endpoint::parse(url, false).is_ok_and(|e| is_loopback_host(&e.host))
 }
 
 /// Is this host a loopback address that never leaves the machine? Matches the canonical trio only —
@@ -628,6 +606,10 @@ fn partial_range(description: &str) -> Option<&str> {
             && option.rsplit_once('-').is_some_and(|(_, high)| high != "*")
     })
 }
+
+/// The attribute list that asks for no attributes (RFC 4511 §4.5.1.8): the user search needs only
+/// the entry's DN, which every SearchResultEntry carries.
+const NO_ATTRIBUTES: &str = "1.1";
 
 /// LDAP result code 49, invalidCredentials (RFC 4511 §4.1.9).
 const LDAP_INVALID_CREDENTIALS: u32 = 49;
@@ -824,7 +806,12 @@ impl LdapModule {
             }
             let filter = filter_tpl.replace("{username}", groups::escape_filter(username).as_str());
             let entries = ldap
-                .search(&self.cfg.base_dn, SearchScope::Subtree, &filter, &["dn"])
+                .search(
+                    &self.cfg.base_dn,
+                    SearchScope::Subtree,
+                    &filter,
+                    &[NO_ATTRIBUTES],
+                )
                 .map_err(at("user search"))?;
             // Ambiguous: more than one entry matched. Fail CLOSED rather than silently binding the
             // first — we cannot establish a single, unambiguous identity for the credential.

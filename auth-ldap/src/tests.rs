@@ -356,7 +356,13 @@ fn the_guards_host_is_the_dialers_host() {
         let dialed = crate::conversation::Endpoint::parse(url, false)
             .unwrap_or_else(|e| panic!("{url}: {e}"))
             .host;
-        assert_eq!(crate::host_of(url), dialed, "{url}");
+        let loopback = ["127.0.0.1", "::1", "localhost"].contains(&dialed.as_str());
+        let ldaps = url.starts_with("ldaps://");
+        assert_eq!(
+            crate::is_insecure_transport(url, false),
+            !ldaps && !loopback,
+            "{url} dials {dialed}"
+        );
     }
 }
 
@@ -978,7 +984,7 @@ fn successful_bind_identifies_with_roles_and_normalized_id() {
             (
                 "dc=corp,dc=example".to_string(),
                 "subtree",
-                vec!["dn".to_string()],
+                vec!["1.1".to_string()],
             ),
             (
                 "CN=Alice,OU=People,DC=corp,DC=example".to_string(),

@@ -239,15 +239,15 @@ fn a_later_generation_on_the_slot_drops_the_abandoned_identity() {
     assert_eq!(got.map(|p| p.id), Some("mine".to_string()));
     assert!(
         !reached.map.contains_key(&(3, 1)),
-        "the abandoned entry stays"
+        "the abandoned entry must go"
     );
     assert!(
         !reached.map.contains_key(&(3, 2)),
-        "the call's own key stays"
+        "the call's own key must be taken"
     );
     assert!(
         reached.map.contains_key(&(4, 1)),
-        "another slot's entry went"
+        "another slot's entry must stay"
     );
     assert_eq!(reached.map.len(), 1);
 }

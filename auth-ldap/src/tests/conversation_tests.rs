@@ -425,7 +425,7 @@ fn search_then_bind_speaks_in_1_5_5s_order() {
             "dc=corp,dc=example",
             codec::SCOPE_SUBTREE,
             "(uid=alice)",
-            &["dn"],
+            &["1.1"],
         )
         .unwrap(),
         chip_bind(3, ALICE, "pw").to_vec(),
