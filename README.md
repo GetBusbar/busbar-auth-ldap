@@ -231,7 +231,9 @@ and for a loopback host.
   bound user, or answers result 32 (noSuchObject) or 50
   (insufficientAccessRights) — an ACL hiding the user's own entry — logs a
   `warn` naming the code: the login stands, with no roles. Any other
-  failed group read is an outage. One operation reads at most 1024 directory messages; past that it
+  failed group read is an outage. One operation reads at most 1024 directory messages and 16 MiB in all,
+  decodes at most 4 MiB of DNs, names and values into memory, and checks
+  its deadline on the host's clock between messages; past any of those it
   is an outage.
 - **Group DNs are normalized by the plugin, not the engine.** LDAP and
   AD groups are DNs (`CN=engineers,OU=Groups,DC=corp,DC=example`), which

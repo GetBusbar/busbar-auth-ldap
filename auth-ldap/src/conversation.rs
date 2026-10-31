@@ -169,6 +169,10 @@ struct Doing {
     received: u32,
     /// How many search references this operation skipped.
     references: u32,
+    /// How many bytes this operation's messages took ([`OP_BYTES_CAP`]).
+    read_bytes: usize,
+    /// What remains of this operation's decode budget ([`codec::DECODE_BUDGET`]).
+    budget: usize,
 }
 
 // By hand: a `SealedWrite` has no `Debug`; only its length shows.
@@ -183,6 +187,8 @@ impl fmt::Debug for Doing {
             .field("entries", &self.entries)
             .field("received", &self.received)
             .field("references", &self.references)
+            .field("read_bytes", &self.read_bytes)
+            .field("budget", &self.budget)
             .finish()
     }
 }
@@ -200,6 +206,10 @@ const MAX_ENTRIES_KEPT: usize = 2;
 /// directory that answers Ready forever (entries, or messages for another id) is cut off here. A
 /// group read answers one entry and a user search is refused past two; 1024 is far above any.
 const MAX_MESSAGES: u32 = 1024;
+
+/// The most bytes one operation reads from the directory in all, however many messages carry them:
+/// 16 MiB (one message alone may hold as much: [`ber::INBOUND_CAP`]).
+const OP_BYTES_CAP: usize = 16 * 1024 * 1024;
 
 /// How much one read asks for.
 const READ_CHUNK: usize = 16 * 1024;
@@ -369,13 +379,48 @@ impl<'a, W: Wire> Over<'a, W> {
         }
     }
 
-    /// The next whole message off the stream.
+    /// Whether the operation in progress is past its deadline, on the stream owner's clock now
+    /// ([`Wire::now_ns`]) or, with none, the clock this entry began on.
+    fn expired(&mut self) -> bool {
+        let Some(deadline) = self.conv.deadline_ns else {
+            return false;
+        };
+        self.wire
+            .now_ns()
+            .or(self.now_ns)
+            .is_some_and(|now| now >= deadline)
+    }
+
+    /// The next whole message off the stream. The deadline is checked before every read and every
+    /// message, so a directory that answers Ready without end still meets it; one operation reads
+    /// at most [`OP_BYTES_CAP`] and decodes within its budget.
     fn receive(&mut self) -> Result<Message, Io> {
         loop {
+            if self.expired() {
+                return self.fail(TIMEOUT);
+            }
             match ber::frame(&self.conv.inbound) {
                 Err(e) => return self.fail(e.to_string()),
                 Ok(Some(n)) => {
-                    let msg = codec::decode(&self.conv.inbound[..n]);
+                    let over = self.conv.doing.as_mut().is_some_and(|d| {
+                        d.read_bytes = d.read_bytes.saturating_add(n);
+                        d.read_bytes > OP_BYTES_CAP
+                    });
+                    if over {
+                        return self.fail(format!(
+                            "the directory sent more than {} MiB for one operation",
+                            OP_BYTES_CAP / (1024 * 1024)
+                        ));
+                    }
+                    let mut budget = self
+                        .conv
+                        .doing
+                        .as_ref()
+                        .map_or(codec::DECODE_BUDGET, |d| d.budget);
+                    let msg = codec::decode_within(&self.conv.inbound[..n], &mut budget);
+                    if let Some(d) = self.conv.doing.as_mut() {
+                        d.budget = budget;
+                    }
                     self.conv.inbound.drain(..n);
                     return match msg {
                         Ok(m) => Ok(m),
@@ -438,6 +483,8 @@ impl<'a, W: Wire> Over<'a, W> {
                 entries: Vec::new(),
                 received: 0,
                 references: 0,
+                read_bytes: 0,
+                budget: codec::DECODE_BUDGET,
             }
         })
     }
@@ -469,6 +516,8 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
             entries: Vec::new(),
             received: 0,
             references: 0,
+            read_bytes: 0,
+            budget: codec::DECODE_BUDGET,
         })?;
         loop {
             match self.stage() {
@@ -535,6 +584,8 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                 entries: Vec::new(),
                 received: 0,
                 references: 0,
+                read_bytes: 0,
+                budget: codec::DECODE_BUDGET,
             }
         })?;
         if self.stage() == Stage::Send {
