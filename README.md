@@ -242,6 +242,10 @@ and for a loopback host.
 - **Group collection is capped** at 4096 values per user entry, so a
   hostile or misconfigured directory cannot drive unbounded memory use.
   The plugin logs when it truncates.
+- **Only text values are read.** A directory value that is not UTF-8 is
+  dropped on its own (the attribute keeps its other values) with a `warn`
+  naming the attribute and how many values went; a user entry that
+  carries no group attribute at all logs in with no roles and a `warn`.
 - **Ranged retrieval is not paged.** Active Directory returns a
   multi-valued attribute past its `MaxValRange` (1500 by default) as a
   ranged description (`memberOf;range=0-1499`). The group attribute is

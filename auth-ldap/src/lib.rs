@@ -922,6 +922,17 @@ impl LdapModule {
                     );
                 }
             }
+            if vals.is_none() {
+                // A misnamed `group_attr` would otherwise be a silent no-roles login for every
+                // user (a directory omits an attribute with no values, so a user in no group also
+                // lands here).
+                tracing::warn!(
+                    module = "ldap",
+                    group_attr = %self.cfg.group_attr,
+                    "ldap group attribute is absent from the bound user's entry; the login \
+                     carries no roles"
+                );
+            }
             if let Some((_, vals)) = vals {
                 // Cap the number of group values collected so a hostile/huge memberOf cannot exhaust
                 // memory (see MAX_GROUP_VALUES). Log when truncating so an operator can spot it.
