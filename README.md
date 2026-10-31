@@ -39,82 +39,6 @@ plugin speaks the directory's wire protocol itself, as a sans-IO codec
 over a byte stream the host connector owns. The plugin opens no socket
 and does no TLS.
 
-### The login flow
-
-1. A user types a username and password on busbar's hosted login page.
-   The door's Statement declares a credential login kind, so the method
-   chooser renders a form rather than a redirect button, without having
-   to call `begin_login` first.
-2. `begin_login` answers the form, declaring two fields — `username`
-   (text) and `password` (password) — which the core renders and POSTs
-   back to `/auth/token`.
-3. `complete_login` reads those values back out of the submitted fields,
-   keyed by the field names the plugin declared; the password rides a
-   secret blob and is exposed only for the bind.
-4. The plugin asks the host connector for a stream on its one declared
-   need (outbound, a raw `tcp` stream, egress class
-   `operator-infrastructure`), secured by the connector for `ldaps://` or
-   after the StartTLS extended operation for `start_tls`, and BINDs with
-   the user's DN and password over it. That bind *is* the credential
-   check — no token, no redirect. While the stream pends, `complete_login`
-   answers PENDING and resumes on the wake; nothing is sent twice.
-5. On a successful bind it reads the user's group memberships
-   (`memberOf` by default) and answers the identity, subject
-   `ldap:<the user entry's DN>` and groups set from the mapped
-   group names. The DN is the one the directory returns for the bound
-   entry (falling back to the DN bound as when the group read returns no
-   entry), lowercased with every run of spaces collapsed to one, so two
-   spellings of one login (`John  Smith`, `john smith`) are one principal. A wrong credential answers a bad-credential verdict; a
-   directory that cannot answer (connect, TLS, timeout) answers an
-   outage. Every directory operation is bounded by `timeout_secs` on the
-   host's clock; a login the host lends no clock answers an outage
-   ("no host clock: refusing an untimed directory call") rather than
-   bind with no deadline.
-
-Because LDAP is a login method rather than a data-plane bearer verifier,
-its tail states the login family alone (`CAP_LOGIN`, as
-`busbar-auth-github`'s): the host never calls `verify`, which answers
-REFUSED.
-
-There is no `client_secret`: a credential method is not a confidential
-OAuth client, so `LdapConfig` has no such field and
-`deny_unknown_fields` rejects one if it is configured.
-
-### Design
-
-This repo is a same-repo, 2-crate Cargo workspace, mirroring `auth-oidc`:
-`auth-ldap/` (the `busbar-auth-ldap` library — the real LDAP BIND,
-group-read and role-mapping logic, and its door, `door::door`) and
-`auth-ldap-plugin/` (the `busbar-auth-ldap-plugin` cdylib, which only
-exports that door with `export_door!`). A custom build links the
-library crate and registers `door::door` as a compiled-in row.
-
-LDAP work is done by the plugin's own sans-IO codec (`ber.rs`,
-`filter.rs`, `codec.rs`: the requests 1.5.5's `ldap3` client wrote, byte
-for byte, and the replies read fail-closed; the BIND, which carries a
-password, is the SDK chip's sealed message, held to the same bytes), driven over the host's stream
-by `conversation.rs`. No call blocks, so the Statement states no `blocks`
-mark, and the plugin carries no LDAP client, socket or TLS crate.
-
-Two directory shapes are supported:
-
-- **Direct bind** — `bind_dn_template` turns the username into a DN
-  (`uid={username},ou=people,dc=corp,dc=example`) and the plugin binds as
-  that DN, then reads the groups off that same entry. The template must
-  expand to a DN: one with no `=` (an AD UPN such as
-  `{username}@corp.example`) is refused at boot.
-- **Search-then-bind** — set `user_search_filter` (e.g.
-  `(sAMAccountName={username})`, or
-  `(userPrincipalName={username}@corp.example)` for AD UPN logins, where
-  users type the bare name as they did with 1.5.5's UPN template) and the
-  plugin first binds as `bind_service_dn`, locates the user entry, then
-  re-binds as the DN it found. This is the mode for Active Directory.
-
-A crafted username cannot inject DN components or filter syntax: on the
-DN template path a username carrying a DN special character (`,` `=` `+`
-`<` `>` `;` `\` `"`, or a control character) is rejected, and on the
-search filter path the username is RFC 4515-escaped.
-
 ## Config
 
 Configured like any other busbar auth method — an entry under
@@ -178,6 +102,22 @@ password and every end-user password on the wire in the clear.
 `allow_insecure_transport: true` knowingly overrides that guard for a
 trusted, isolated segment. It is a no-op for `ldaps://`, for STARTTLS,
 and for a loopback host.
+
+### Verdicts
+
+`complete_login` answers one of three verdicts: the identity, a bad
+credential, or an outage (see [Limitations](#limitations) for which
+directory answers are which). Every log line carries `module=ldap` and a
+`reason` word:
+
+| reason | level | when |
+|---|---|---|
+| `missing-field`, `not-text`, `empty-password`, `empty-username`, `bad-username` | info | the submission is refused before or without a bind |
+| `no-match`, `ambiguous`, `empty-dn` | info | the search-then-bind user search found no single entry |
+| `invalid-credentials`, `bind-refused` | info | the directory refused the user bind (49, or another non-outage code) |
+| `no-clock`, `clock-failed`, `directory-error` | warn | an outage: no host clock, or the directory could not answer |
+| `no-entry`, `group-read-refused`, `no-group-attribute`, `range-truncated`, `groups-capped`, `not-utf8-values` | warn | the login stands with fewer (or no) roles |
+| `root-dse-base` (info), `insecure-transport` (warn) | | logged at boot |
 
 ### Limitations
 
@@ -342,6 +282,84 @@ that directory as an `ldaps://` endpoint: busbar with `ca_cert_pem`
 naming that CA mints a key over it, and without it does not. Point
 `BUSBAR_TEST_LDAP_URL` at that directory to run them; with the variable
 unset they skip loudly, and under CI (`CI` set) they fail instead.
+
+## Design
+
+### The login flow
+
+1. A user types a username and password on busbar's hosted login page.
+   The door's Statement declares a credential login kind, so the method
+   chooser renders a form rather than a redirect button, without having
+   to call `begin_login` first.
+2. `begin_login` answers the form, declaring two fields — `username`
+   (text) and `password` (password) — which the core renders and POSTs
+   back to `/auth/token`.
+3. `complete_login` reads those values back out of the submitted fields,
+   keyed by the field names the plugin declared; the password rides a
+   secret blob and is exposed only for the bind.
+4. The plugin asks the host connector for a stream on its one declared
+   need (outbound, a raw `tcp` stream, egress class
+   `operator-infrastructure`), secured by the connector for `ldaps://` or
+   after the StartTLS extended operation for `start_tls`, and BINDs with
+   the user's DN and password over it. That bind *is* the credential
+   check — no token, no redirect. While the stream pends, `complete_login`
+   answers PENDING and resumes on the wake; nothing is sent twice.
+5. On a successful bind it reads the user's group memberships
+   (`memberOf` by default) and answers the identity, subject
+   `ldap:<the user entry's DN>` and groups set from the mapped
+   group names. The DN is the one the directory returns for the bound
+   entry (falling back to the DN bound as when the group read returns no
+   entry), lowercased with every run of spaces collapsed to one, so two
+   spellings of one login (`John  Smith`, `john smith`) are one principal. A wrong credential answers a bad-credential verdict; a
+   directory that cannot answer (connect, TLS, timeout) answers an
+   outage. Every directory operation is bounded by `timeout_secs` on the
+   host's clock; a login the host lends no clock answers an outage
+   ("no host clock: refusing an untimed directory call") rather than
+   bind with no deadline.
+
+Because LDAP is a login method rather than a data-plane bearer verifier,
+its tail states the login family alone (`CAP_LOGIN`, as
+`busbar-auth-github`'s): the host never calls `verify`, which answers
+REFUSED.
+
+There is no `client_secret`: a credential method is not a confidential
+OAuth client, so `LdapConfig` has no such field and
+`deny_unknown_fields` rejects one if it is configured.
+
+### Crates and codec
+
+This repo is a same-repo, 2-crate Cargo workspace, mirroring `auth-oidc`:
+`auth-ldap/` (the `busbar-auth-ldap` library — the real LDAP BIND,
+group-read and role-mapping logic, and its door, `door::door`) and
+`auth-ldap-plugin/` (the `busbar-auth-ldap-plugin` cdylib, which only
+exports that door with `export_door!`). A custom build links the
+library crate and registers `door::door` as a compiled-in row.
+
+LDAP work is done by the plugin's own sans-IO codec (`ber.rs`,
+`filter.rs`, `codec.rs`: the requests 1.5.5's `ldap3` client wrote, byte
+for byte, and the replies read fail-closed; the BIND, which carries a
+password, is the SDK chip's sealed message, held to the same bytes), driven over the host's stream
+by `conversation.rs`. No call blocks, so the Statement states no `blocks`
+mark, and the plugin carries no LDAP client, socket or TLS crate.
+
+Two directory shapes are supported:
+
+- **Direct bind** — `bind_dn_template` turns the username into a DN
+  (`uid={username},ou=people,dc=corp,dc=example`) and the plugin binds as
+  that DN, then reads the groups off that same entry. The template must
+  expand to a DN: one with no `=` (an AD UPN such as
+  `{username}@corp.example`) is refused at boot.
+- **Search-then-bind** — set `user_search_filter` (e.g.
+  `(sAMAccountName={username})`, or
+  `(userPrincipalName={username}@corp.example)` for AD UPN logins, where
+  users type the bare name as they did with 1.5.5's UPN template) and the
+  plugin first binds as `bind_service_dn`, locates the user entry, then
+  re-binds as the DN it found. This is the mode for Active Directory.
+
+A crafted username cannot inject DN components or filter syntax: on the
+DN template path a username carrying a DN special character (`,` `=` `+`
+`<` `>` `;` `\` `"`, or a control character) is rejected, and on the
+search filter path the username is RFC 4515-escaped.
 
 ## License
 
