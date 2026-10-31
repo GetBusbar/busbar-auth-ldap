@@ -948,9 +948,17 @@ fn an_absent_group_attribute_is_warned() {
     })
     .expect("binds");
     assert!(p.roles.is_empty());
-    assert!(cap.contains("group attribute is absent"), "{:?}", cap.messages());
+    assert!(
+        cap.contains("group attribute is absent"),
+        "{:?}",
+        cap.messages()
+    );
     assert!(cap.contains("group_attr=memberOf"), "{:?}", cap.messages());
-    assert!(!cap.contains("alice"), "the DN leaked: {:?}", cap.messages());
+    assert!(
+        !cap.contains("alice"),
+        "the DN leaked: {:?}",
+        cap.messages()
+    );
 }
 
 /// A search matching >1 entry is AMBIGUOUS and must be rejected, not silently bound to

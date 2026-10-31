@@ -161,8 +161,8 @@ impl std::fmt::Display for LdapResult {
     }
 }
 
-/// A directory entry as a search answers it: its DN and its text-valued attributes. An attribute
-/// with any value that is not UTF-8 is left out of `attrs`.
+/// A directory entry as a search answers it: its DN and its text-valued attributes. A value that is
+/// not UTF-8 is left out of its attribute's values (and logged).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Entry {
     /// The entry's DN.
@@ -234,19 +234,28 @@ fn entry(content: &[u8]) -> Result<Entry, BerError> {
         let name = text(name, "an attribute type that is not UTF-8")?;
         let (vals, _) = ber::expect(rest, ber::SET, "an attribute without its values")?;
         let mut values = Vec::new();
-        let mut binary = false;
+        let mut dropped = 0_usize;
         for v in ber::items(vals)? {
             if v.tag != ber::OCTET_STRING {
                 return Err(BerError::Malformed("a value that is not an OCTET STRING"));
             }
             match std::str::from_utf8(v.content) {
                 Ok(s) => values.push(s.to_owned()),
-                Err(_) => binary = true,
+                Err(_) => dropped += 1,
             }
         }
-        if !binary {
-            attrs.insert(name, values);
+        if dropped > 0 {
+            // Only text is read: a value that is not UTF-8 is dropped ALONE (the attribute keeps
+            // its text values), once per attribute, never silently.
+            tracing::warn!(
+                module = "ldap",
+                attribute = %name,
+                dropped,
+                kept = values.len(),
+                "ldap attribute values that are not UTF-8 were dropped"
+            );
         }
+        attrs.insert(name, values);
     }
     Ok(Entry { dn, attrs })
 }
