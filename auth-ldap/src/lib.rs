@@ -676,15 +676,34 @@ pub(crate) trait LdapBackend {
     fn unbind(&mut self) -> Result<(), Io>;
 }
 
-/// Build the STABLE principal id from the resolved bind DN. The submitted username is user-controlled
-/// in its CASING (`Alice`/`alice`) and form (`DOMAIN\alice`); using it raw would mint DIFFERENT
-/// identities — and duplicate self-serve keys — for the SAME person. LDAP DNs are case-insensitive,
-/// so we key identity on the resolved DN lowercased: exactly one canonical `ldap:<dn>` per directory
-/// identity, in both direct-template and search-then-bind modes. Lowercasing is Unicode-aware
-/// (`to_lowercase`, not `to_ascii_lowercase`) — `validate_username` allows non-ASCII names, so an
-/// ASCII-only fold would mint two distinct principals for two casings of a non-ASCII username.
+/// Build the STABLE principal id from the user entry's DN: the DN the directory RETURNED for the
+/// bound entry (the group read's objectName) when it returned one, else the DN bound as. The
+/// submitted username is user-controlled in its CASING (`Alice`/`alice`), its spacing
+/// (`John  Smith`/`John Smith`) and form (`DOMAIN\alice`); using it raw would mint DIFFERENT
+/// identities — and duplicate self-serve keys and budgets — for the SAME entry. The DN is normalised
+/// for case-ignore matching (RFC 4518 §2): case folded and every run of spaces collapsed to one, so
+/// there is exactly one canonical `ldap:<dn>` per directory identity, in both direct-template and
+/// search-then-bind modes. Lowercasing is Unicode-aware (`to_lowercase`, not
+/// `to_ascii_lowercase`) — `validate_username` allows non-ASCII names, so an ASCII-only fold would
+/// mint two distinct principals for two casings of a non-ASCII username. (RFC 4518's NFKC step
+/// needs a Unicode normalisation table this crate does not carry; the directory's own spelling of
+/// the DN is preferred for that reason.)
 fn principal_id(user_dn: &str) -> String {
-    format!("ldap:{}", user_dn.to_lowercase())
+    let mut id = String::with_capacity(user_dn.len() + 5);
+    id.push_str("ldap:");
+    let mut space = false;
+    for c in user_dn.trim().to_lowercase().chars() {
+        if c == ' ' {
+            if !space {
+                id.push(' ');
+            }
+            space = true;
+        } else {
+            id.push(c);
+            space = false;
+        }
+    }
+    id
 }
 
 impl LdapModule {
@@ -806,6 +825,9 @@ impl LdapModule {
             .map_err(at("group read"))?;
 
         let mut group_dns: Vec<String> = Vec::new();
+        // The principal is the entry's DN as the directory returns it (its objectName), falling
+        // back to the DN bound as when the read answered no entry ([`principal_id`]).
+        let mut entry_dn: Option<String> = None;
         if entries.is_empty() {
             // The bound user's own entry read back as nothing: an ACL hides it from the user, so
             // the groups were never read. The login stands with no roles, never silently.
@@ -817,6 +839,9 @@ impl LdapModule {
             );
         }
         if let Some(entry) = entries.into_iter().next() {
+            if !entry.dn.trim().is_empty() {
+                entry_dn = Some(entry.dn.clone());
+            }
             // LDAP attribute descriptions are case-insensitive (RFC 4512 §2.5) and the entry is keyed
             // by the server's spelling, so `group_attr: memberof` must find the server's `memberOf`.
             let vals = entry
@@ -844,7 +869,8 @@ impl LdapModule {
         }
 
         let roles = groups::roles_from_group_dns(&group_dns, self.cfg.role_from);
-        let mut principal = Principal::from_id(principal_id(&user_dn));
+        let mut principal =
+            Principal::from_id(principal_id(entry_dn.as_deref().unwrap_or(&user_dn)));
         principal.roles = roles;
         Ok(principal)
     }
