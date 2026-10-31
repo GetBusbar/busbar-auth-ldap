@@ -51,6 +51,15 @@ pub mod groups;
 
 use conversation::{Conversation, Over, Wire};
 
+/// THE COMPILED-IN ENTRY, in the fleet's one form: a busbar build that links this crate as a row
+/// names `busbar_auth_ldap::compiled_in::door` (the same door as [`door::door`]).
+pub mod compiled_in {
+    /// The door and its macro door.
+    pub mod door {
+        pub use crate::door::{door, MACRO_DOOR};
+    }
+}
+
 #[cfg(test)]
 mod tests;
 
