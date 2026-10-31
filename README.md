@@ -319,7 +319,7 @@ busbar's configured `plugins.dir`.
 
 ## Tests
 
-`cargo test` runs the library crate's unit tests (`auth-ldap/src/tests.rs`)
+`cargo test` runs the library crate's unit tests (`auth-ldap/src/tests/`)
 and the plugin crate's. Coverage includes config parsing and
 `deny_unknown_fields` (including `client_secret` being rejected),
 bind-DN templating and LDAP-injection rejection, RFC 4515 filter

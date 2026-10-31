@@ -42,12 +42,12 @@ use serde::Deserialize;
 use std::task::Poll;
 use zeroize::Zeroizing;
 
-pub mod ber;
-pub mod codec;
+pub(crate) mod ber;
+pub(crate) mod codec;
 pub mod conversation;
 pub mod door;
-pub mod filter;
-pub mod groups;
+pub(crate) mod filter;
+pub(crate) mod groups;
 
 use conversation::{Conversation, Over, Wire};
 
@@ -61,6 +61,7 @@ pub mod compiled_in {
 }
 
 #[cfg(test)]
+#[path = "tests/lib_tests.rs"]
 mod tests;
 
 /// The maximum number of `memberOf` group values read off a user entry. A hostile or misconfigured
