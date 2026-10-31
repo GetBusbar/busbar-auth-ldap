@@ -395,3 +395,31 @@ fn decoded_values_past_the_budget_are_an_error() {
         got.map(|m| m.id)
     );
 }
+
+/// L1: the directory's matched DN and diagnostic are far-end text: each is shown escaped (no raw
+/// newline or control character can forge a log line) and capped at 128 characters, so a hostile
+/// directory cannot flood the log through a failed search's text.
+#[test]
+fn a_results_far_end_text_is_escaped_and_capped() {
+    let r = LdapResult {
+        rc: 32,
+        matched: "m".repeat(10_000),
+        text: "forged\nlevel=ERROR injected\r\u{1b}[31m".repeat(50),
+    };
+    let shown = r.to_string();
+    assert!(!shown.contains('\n') && !shown.contains('\r'), "{shown}");
+    assert!(!shown.contains('\u{1b}'), "{shown}");
+    assert!(shown.contains("\\n"), "the newline is shown escaped: {shown}");
+    assert!(shown.chars().count() < 2 * 128 * 4 + 80, "capped: {}", shown.len());
+    assert!(!shown.contains(&"m".repeat(129)), "the DN is capped");
+    // Short text reads as before.
+    let short = LdapResult {
+        rc: 32,
+        matched: "dc=x".into(),
+        text: "no such entry".into(),
+    };
+    assert_eq!(
+        short.to_string(),
+        "LDAP operation result: rc=32 (noSuchObject), dn: \"dc=x\", text: \"no such entry\""
+    );
+}
