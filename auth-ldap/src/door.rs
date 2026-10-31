@@ -283,9 +283,24 @@ impl Release {
     }
 }
 
-/// The finish path's close of `run`'s stream, as the op's own connector answered it.
-fn closed(run: &mut Run, _answer: Poll<Result<(), String>>) {
-    run.stream = None;
+/// A parked login given up before it closed its stream (its op cancelled, a fresh op on its
+/// ticket, the instance closed: the SDK drops what was parked), or one whose finish-path close
+/// pended, releases the stream here. A stream the op's own close closed is `None` by now.
+impl Drop for Run {
+    fn drop(&mut self) {
+        if let (Some(stream), Some(release)) = (self.stream.take(), self.release.as_ref()) {
+            (release.0)(stream);
+        }
+    }
+}
+
+/// The finish path's close of `run`'s stream, as the op's own connector answered it: answered,
+/// the stream is closed; PENDING, it stays for [`Release`] when the run drops (the op is over, so
+/// no wake will re-drive it).
+fn closed(run: &mut Run, answer: Poll<Result<(), String>>) {
+    if answer.is_ready() {
+        run.stream = None;
+    }
 }
 
 /// The host connector's stream as the conversation's [`Wire`], for one entry of the op: its
