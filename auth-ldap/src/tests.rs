@@ -444,6 +444,60 @@ fn bind_dn_rejects_rfc4514_must_escape_positions() {
     }
 }
 
+/// T2: a LONE backslash (trailing, or the whole username) is refused too: templated into a DN it
+/// would escape the template's next character (`uid=a\,ou=...` reads as one RDN value).
+#[test]
+fn a_lone_backslash_username_is_refused() {
+    for bad in ["\\", "alice\\", "\\alice", "a\\b"] {
+        assert!(validate_username(bad).is_err(), "{bad:?} is refused");
+    }
+    let m = LdapModule::new(base_cfg()).unwrap();
+    assert!(m.bind_dn_for("alice\\").is_err());
+}
+
+/// T1: a BIND password goes out only where it is safe. For an `ldaps://` URL or `start_tls` it is
+/// SECURE-REQUIRED (the chip refuses to write it on a stream the host connector does not report
+/// secured), the service password and the user's alike; a plain `ldap://` URL to a non-loopback
+/// host with no STARTTLS never reaches a bind at all (refused at `validate` and boot) unless the
+/// operator opts out, and only then does the password go out unsecured.
+#[test]
+fn bind_passwords_are_secure_required_and_plaintext_never_binds() {
+    let pw = cred("pw");
+    let ldaps = LdapModule::new(search_cfg()).unwrap();
+    assert!(ldaps.guarded(&pw).secure_required(), "ldaps://");
+    let svc = ldaps.cfg.bind_service_password.as_ref().expect("set");
+    assert!(ldaps.guarded(svc).secure_required(), "the service password");
+
+    let mut cfg = base_cfg();
+    cfg.url = "ldap://ad.corp.example:389".to_string();
+    cfg.start_tls = true;
+    assert!(
+        LdapModule::new(cfg).unwrap().guarded(&pw).secure_required(),
+        "start_tls"
+    );
+
+    let mut plain = base_cfg();
+    plain.url = "ldap://ad.corp.example:389".to_string();
+    let e = LdapModule::new(plain.clone())
+        .err()
+        .expect("plaintext to a remote host never opens");
+    assert!(e.starts_with("settings.url: "), "{e}");
+    let blob = serde_json::json!({
+        "url": plain.url,
+        "bind_dn_template": plain.bind_dn_template,
+        "base_dn": plain.base_dn,
+    })
+    .to_string();
+    assert!(LdapModule::validate_settings(blob.as_bytes()).is_err());
+
+    plain.allow_insecure_transport = true;
+    let opted = LdapModule::new(plain).unwrap();
+    assert!(
+        !opted.guarded(&pw).secure_required(),
+        "only the explicit opt-out sends it unsecured"
+    );
+}
+
 #[test]
 fn username_validation_allows_normal_names() {
     for ok in ["alice", "alice.smith", "a_b-c", "user@corp.example"] {
