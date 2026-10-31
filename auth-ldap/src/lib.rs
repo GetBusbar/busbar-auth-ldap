@@ -238,18 +238,20 @@ impl LdapModule {
         if cfg.user_search_filter.is_some() && cfg.base_dn.trim().is_empty() {
             tracing::info!(
                 module = "ldap",
+                reason = "root-dse-base",
                 "base_dn is empty: the search-then-bind user search runs from the root DSE \
                  (base \"\")"
             );
         }
         if is_insecure_transport(&cfg.url, cfg.start_tls) {
             tracing::warn!(
-                module = "ldap",
-                url = %shown_url(&cfg.url),
-                "allow_insecure_transport is set: binds run over plaintext ldap:// to a \
-                 non-loopback host, so the service-account AND every end-user password cross the \
-                 network in cleartext"
-            );
+                           module = "ldap",
+            reason = "insecure-transport",
+                           url = %shown_url(&cfg.url),
+                           "allow_insecure_transport is set: binds run over plaintext ldap:// to a \
+                            non-loopback host, so the service-account AND every end-user password cross the \
+                            network in cleartext"
+                       );
         }
         Ok(Self { cfg })
     }
@@ -516,6 +518,7 @@ impl LdapModule {
         let (Some(username), Some(password)) = (username, password) else {
             tracing::info!(
                 module = "ldap",
+                reason = "missing-field",
                 "ldap login refused: the username or password field was not submitted"
             );
             return Poll::Ready(Login::BadCredential);
@@ -523,6 +526,7 @@ impl LdapModule {
         if password.is_empty() {
             tracing::info!(
                 module = "ldap",
+                reason = "empty-password",
                 "ldap login refused: empty password (an anonymous bind is never attempted)"
             );
             return Poll::Ready(Login::BadCredential);
@@ -533,6 +537,7 @@ impl LdapModule {
         if now_ns.is_none() {
             tracing::warn!(
                 module = "ldap",
+                reason = "no-clock",
                 "no host clock: refusing an untimed directory call"
             );
             return Poll::Ready(Login::Outage);
@@ -552,6 +557,7 @@ impl LdapModule {
             Err(BindError::Rejected { rc }) => {
                 tracing::info!(
                     module = "ldap",
+                    reason = "bind-refused",
                     rc,
                     result = codec::rc_name(rc),
                     "ldap user bind refused by the directory (not invalidCredentials); \
@@ -560,7 +566,8 @@ impl LdapModule {
                 Poll::Ready(Login::BadCredential)
             }
             Err(BindError::Directory(e)) => {
-                tracing::warn!(module = "ldap", error = %e, "ldap bind/search failed (not a credential rejection)");
+                tracing::warn!(module = "ldap",
+ reason = "directory-error", error = %e, "ldap bind/search failed (not a credential rejection)");
                 Poll::Ready(Login::Outage)
             }
         }
@@ -587,9 +594,7 @@ fn refuse_a_literal_secret(cfg: &LdapConfig) -> Result<(), String> {
 /// line naming the key and the type, never a value.
 fn parse_settings(settings: &[u8]) -> Result<LdapConfig, String> {
     if settings.trim_ascii().is_empty() {
-        return Err(
-            "settings: none provided; requires url, bind_dn_template, base_dn".to_string(),
-        );
+        return Err("settings: none provided; requires url, bind_dn_template, base_dn".to_string());
     }
     cred::settings(settings).map_err(|e: cred::SettingsError| {
         let text = e.to_string();
@@ -794,7 +799,11 @@ impl LdapModule {
             // an empty username); the search path must guard it too — an empty username has no
             // identity to resolve. Fail as invalid credentials, never reach the socket.
             if username.is_empty() {
-                tracing::info!(module = "ldap", "ldap login refused: empty username");
+                tracing::info!(
+                    module = "ldap",
+                    reason = "empty-username",
+                    "ldap login refused: empty username"
+                );
                 return Err(BindError::InvalidCredentials);
             }
             // Search-then-bind: bind as the service account, find the user entry, take its DN.
@@ -827,6 +836,7 @@ impl LdapModule {
             if entries.len() > 1 {
                 tracing::info!(
                     module = "ldap",
+                    reason = "ambiguous",
                     matches = entries.len(),
                     "ldap login refused: user_search_filter matched multiple entries (ambiguous)"
                 );
@@ -835,6 +845,7 @@ impl LdapModule {
             let Some(entry) = entries.into_iter().next() else {
                 tracing::info!(
                     module = "ldap",
+                    reason = "no-match",
                     "ldap login refused: no search match for the username"
                 );
                 return Err(BindError::InvalidCredentials);
@@ -844,6 +855,7 @@ impl LdapModule {
             if entry.dn.is_empty() {
                 tracing::info!(
                     module = "ldap",
+                    reason = "empty-dn",
                     "ldap login refused: the search matched an entry with an empty DN"
                 );
                 return Err(BindError::InvalidCredentials);
@@ -852,7 +864,7 @@ impl LdapModule {
         } else {
             self.bind_dn_for(username).map_err(|reason| {
                 // `validate_username`'s reasons name no part of the username.
-                tracing::info!(module = "ldap", %reason, "ldap login refused: the DN template refused the username");
+                tracing::info!(module = "ldap", reason = "bad-username", refusal = %reason, "ldap login refused: the DN template refused the username");
                 BindError::InvalidCredentials
             })?
         };
@@ -870,6 +882,7 @@ impl LdapModule {
         if rc == LDAP_INVALID_CREDENTIALS {
             tracing::info!(
                 module = "ldap",
+                reason = "invalid-credentials",
                 rc,
                 result = codec::rc_name(rc),
                 "ldap login refused: the directory rejected the credential"
@@ -902,13 +915,14 @@ impl LdapModule {
                 if rc == LDAP_NO_SUCH_OBJECT || rc == LDAP_INSUFFICIENT_ACCESS =>
             {
                 tracing::warn!(
-                    module = "ldap",
-                    rc,
-                    result = codec::rc_name(rc),
-                    group_attr = %self.cfg.group_attr,
-                    "ldap group read refused for the bound user (an ACL may hide the entry); \
-                     the login carries no roles"
-                );
+                                   module = "ldap",
+                reason = "group-read-refused",
+                                   rc,
+                                   result = codec::rc_name(rc),
+                                   group_attr = %self.cfg.group_attr,
+                                   "ldap group read refused for the bound user (an ACL may hide the entry); \
+                                    the login carries no roles"
+                               );
                 refused = true;
                 Vec::new()
             }
@@ -923,11 +937,12 @@ impl LdapModule {
             // The bound user's own entry read back as nothing: an ACL hides it from the user, so
             // the groups were never read. The login stands with no roles, never silently.
             tracing::warn!(
-                module = "ldap",
-                group_attr = %self.cfg.group_attr,
-                "ldap group read returned no entry for the bound user (an ACL may hide it); \
-                 the login carries no roles"
-            );
+                           module = "ldap",
+            reason = "no-entry",
+                           group_attr = %self.cfg.group_attr,
+                           "ldap group read returned no entry for the bound user (an ACL may hide it); \
+                            the login carries no roles"
+                       );
         }
         if let Some(entry) = entries.into_iter().next() {
             if !entry.dn.trim().is_empty() {
@@ -947,12 +962,13 @@ impl LdapModule {
                     // Fail-safe: the values returned are read (fewer roles than the user holds);
                     // paging the rest (`;range=1500-*`) is not done.
                     tracing::warn!(
-                        module = "ldap",
-                        attribute = %description,
-                        range = %range,
-                        "ldap group attribute truncated by the directory's MaxValRange; only the \
-                         returned values are mapped to roles"
-                    );
+                                           module = "ldap",
+                    reason = "range-truncated",
+                                           attribute = %description,
+                                           range = %range,
+                                           "ldap group attribute truncated by the directory's MaxValRange; only the \
+                                            returned values are mapped to roles"
+                                       );
                 }
             }
             if vals.is_none() {
@@ -960,11 +976,12 @@ impl LdapModule {
                 // user (a directory omits an attribute with no values, so a user in no group also
                 // lands here).
                 tracing::warn!(
-                    module = "ldap",
-                    group_attr = %self.cfg.group_attr,
-                    "ldap group attribute is absent from the bound user's entry; the login \
-                     carries no roles"
-                );
+                                   module = "ldap",
+                reason = "no-group-attribute",
+                                   group_attr = %self.cfg.group_attr,
+                                   "ldap group attribute is absent from the bound user's entry; the login \
+                                    carries no roles"
+                               );
             }
             if let Some((_, vals)) = vals {
                 // Cap the number of group values collected so a hostile/huge memberOf cannot exhaust
@@ -972,6 +989,7 @@ impl LdapModule {
                 if vals.len() > MAX_GROUP_VALUES {
                     tracing::warn!(
                         module = "ldap",
+                        reason = "groups-capped",
                         count = vals.len(),
                         cap = MAX_GROUP_VALUES,
                         "memberOf exceeded cap; truncating group values"
