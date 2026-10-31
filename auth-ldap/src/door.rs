@@ -150,6 +150,9 @@ const FORM: &[LoginField] = &[
 /// flight (an answer is kept only for its own ticket's one re-call).
 const REACHED_MAX: usize = MAX_INFLIGHT as usize;
 
+/// How long a short answer's identity is kept for its re-call: 10 minutes on the host's clock.
+const REACHED_TTL_NS: u64 = 10 * 60 * 1_000_000_000;
+
 /// The identities short answers reached, by ticket `(slot, generation)`, each stamped with the
 /// order it was kept in.
 #[derive(Default)]
@@ -167,7 +170,13 @@ pub struct Ldap {
 
 /// Keep `p` for `key`'s re-call, at most `max` at once: at the cap the OLDEST entry goes, never
 /// the rest (an in-flight short answer awaiting its re-call must survive).
-fn keep_reached(reached: &mut Reached, max: usize, key: (u32, u32), p: Principal) {
+fn keep_reached(
+    reached: &mut Reached,
+    max: usize,
+    key: (u32, u32),
+    p: Principal,
+    _now_ns: Option<u64>,
+) {
     if reached.map.len() >= max && !reached.map.contains_key(&key) {
         let oldest = reached
             .map
@@ -185,7 +194,11 @@ fn keep_reached(reached: &mut Reached, max: usize, key: (u32, u32), p: Principal
 /// The identity a short answer kept for `key`'s re-call, taken. Nothing else is left behind for
 /// that ticket SLOT: an op on the slot under another generation proves the earlier op is over. A
 /// call on no ticket (generation `0`, never minted) proves nothing and drops nothing.
-fn take_reached(reached: &mut Reached, key: (u32, u32)) -> Option<Principal> {
+fn take_reached(
+    reached: &mut Reached,
+    key: (u32, u32),
+    _now_ns: Option<u64>,
+) -> Option<Principal> {
     if key.1 != 0 {
         reached
             .map
@@ -520,6 +533,7 @@ impl SafeSlot for CompleteLogin {
         let kept = take_reached(
             &mut ldap.reached.lock().unwrap_or_else(PoisonError::into_inner),
             key,
+            now(h.host(), ticket),
         );
         let login = match kept {
             Some(p) => Login::Identity(p),
@@ -546,6 +560,7 @@ impl SafeSlot for CompleteLogin {
                         REACHED_MAX,
                         key,
                         p,
+                        now(h.host(), ticket),
                     );
                 }
                 answer

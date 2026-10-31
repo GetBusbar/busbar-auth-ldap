@@ -232,10 +232,10 @@ fn who(id: &str) -> busbar_contract::auth::Principal {
 #[test]
 fn a_later_generation_on_the_slot_drops_the_abandoned_identity() {
     let mut reached = Reached::default();
-    keep_reached(&mut reached, 8, (3, 1), who("abandoned"));
-    keep_reached(&mut reached, 8, (4, 1), who("other-slot"));
-    keep_reached(&mut reached, 8, (3, 2), who("mine"));
-    let got = take_reached(&mut reached, (3, 2));
+    keep_reached(&mut reached, 8, (3, 1), who("abandoned"), None);
+    keep_reached(&mut reached, 8, (4, 1), who("other-slot"), None);
+    keep_reached(&mut reached, 8, (3, 2), who("mine"), None);
+    let got = take_reached(&mut reached, (3, 2), None);
     assert_eq!(got.map(|p| p.id), Some("mine".to_string()));
     assert!(
         !reached.map.contains_key(&(3, 1)),
@@ -257,8 +257,8 @@ fn a_later_generation_on_the_slot_drops_the_abandoned_identity() {
 #[test]
 fn a_ticketless_call_leaves_slot_zeros_kept_identity() {
     let mut reached = Reached::default();
-    keep_reached(&mut reached, 8, (0, 5), who("kept"));
-    assert!(take_reached(&mut reached, (0, 0)).is_none());
+    keep_reached(&mut reached, 8, (0, 5), who("kept"), None);
+    assert!(take_reached(&mut reached, (0, 0), None).is_none());
     assert!(
         reached.map.contains_key(&(0, 5)),
         "a ticketless call dropped slot 0's identity"
@@ -272,7 +272,7 @@ fn a_ticketless_call_leaves_slot_zeros_kept_identity() {
 fn the_reached_map_is_bounded_and_evicts_the_oldest() {
     let mut reached = Reached::default();
     for slot in 0..20 {
-        keep_reached(&mut reached, 16, (slot, 1), who(&format!("u{slot}")));
+        keep_reached(&mut reached, 16, (slot, 1), who(&format!("u{slot}")), None);
     }
     assert_eq!(reached.map.len(), 16, "bounded at the cap");
     for slot in 0..4 {
@@ -288,9 +288,37 @@ fn the_reached_map_is_bounded_and_evicts_the_oldest() {
         );
     }
     // Re-keeping a key already held evicts nothing.
-    keep_reached(&mut reached, 16, (19, 1), who("again"));
+    keep_reached(&mut reached, 16, (19, 1), who("again"), None);
     assert_eq!(reached.map.len(), 16);
     assert!(reached.map.contains_key(&(4, 1)));
+}
+
+/// KIND-REVIEW D6: the reached map is bounded AND time-expired: an identity kept for a re-call that
+/// never comes (its slot never reused) goes after `REACHED_TTL_NS` (10 minutes) on the host's clock,
+/// swept on the next keep or take; within it, it answers its re-call.
+#[test]
+fn a_kept_identity_expires_after_the_ttl() {
+    let ttl = super::REACHED_TTL_NS;
+    let t0 = 1_000_000_000_u64;
+    let mut reached = Reached::default();
+    keep_reached(&mut reached, 8, (1, 1), who("fresh"), Some(t0));
+    assert_eq!(
+        take_reached(&mut reached, (1, 1), Some(t0 + ttl - 1)).map(|p| p.id),
+        Some("fresh".to_string()),
+        "within the TTL it answers its re-call"
+    );
+    keep_reached(&mut reached, 8, (2, 1), who("stale"), Some(t0));
+    assert!(
+        take_reached(&mut reached, (2, 1), Some(t0 + ttl)).is_none(),
+        "past the TTL it is gone"
+    );
+    keep_reached(&mut reached, 8, (3, 1), who("abandoned"), Some(t0));
+    keep_reached(&mut reached, 8, (4, 1), who("new"), Some(t0 + ttl));
+    assert!(
+        !reached.map.contains_key(&(3, 1)),
+        "an expired entry is swept on the next keep"
+    );
+    assert_eq!(reached.map.len(), 1);
 }
 
 /// LDAP is a login method and judges no bearer credential on the data plane: its tail states the
