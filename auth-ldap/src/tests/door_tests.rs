@@ -172,31 +172,52 @@ fn the_statement_states_a_non_blocking_credential_login_over_one_need() {
     assert!(!SECRET_REFS[0].is_absent());
 }
 
-/// The secret the kernel resolved for `bind_service_password` wins over the settings' literal; an
-/// absent or empty one leaves the literal (1.5.5's config still opens).
+/// L6 (S1): the service password is a secret REFERENCE, never a literal. busbar resolves the
+/// reference and lifts the key out of the settings into `OpenIn.secrets`, so a
+/// `bind_service_password` the plugin finds IN its settings is a literal that bypassed that: it
+/// refuses `validate` and boot, naming the key and never the value. The resolved secret is the
+/// password.
 #[test]
-fn the_resolved_service_secret_wins_over_the_literal() {
-    let blob = br#"{
+fn a_literal_service_password_refuses_boot() {
+    let literal = br#"{
         "url": "ldaps://ad.corp.example:636",
         "bind_dn_template": "uid={username},dc=corp,dc=example",
         "base_dn": "dc=corp,dc=example",
         "user_search_filter": "(uid={username})",
         "bind_service_dn": "cn=svc,dc=corp,dc=example",
-        "bind_service_password": "literal"
+        "bind_service_password": "hunter2"
     }"#;
-    let pw = |m: &LdapModule| {
+    for secrets in [&[b"resolved".as_slice()][..], &[]] {
+        let e = LdapModule::from_settings_with(literal, secrets)
+            .err()
+            .expect("a literal refuses boot");
+        assert!(e.starts_with("settings.bind_service_password: "), "{e}");
+        assert!(!e.contains("hunter2"), "{e}");
+    }
+    let r = Ldap::validate(literal).expect_err("a literal refuses validate");
+    assert!(
+        r.text()
+            .is_some_and(|t| t.contains("settings.bind_service_password: ")),
+        "{r:?}"
+    );
+
+    let referenced = br#"{
+        "url": "ldaps://ad.corp.example:636",
+        "bind_dn_template": "uid={username},dc=corp,dc=example",
+        "base_dn": "dc=corp,dc=example",
+        "user_search_filter": "(uid={username})",
+        "bind_service_dn": "cn=svc,dc=corp,dc=example"
+    }"#;
+    let m = LdapModule::from_settings_with(referenced, &[b"resolved".as_slice()]).expect("opens");
+    assert_eq!(
         m.cfg
             .bind_service_password
             .as_ref()
             .map(crate::tests::cred_text)
-    };
-    let m = LdapModule::from_settings_with(blob, &[b"resolved".as_slice()]).expect("opens");
-    assert_eq!(pw(&m).as_deref(), Some("resolved"));
-    let m = LdapModule::from_settings_with(blob, &[b"".as_slice()]).expect("opens");
-    assert_eq!(pw(&m).as_deref(), Some("literal"));
-    let m = LdapModule::from_settings_with(blob, &[]).expect("opens");
-    assert_eq!(pw(&m).as_deref(), Some("literal"));
-    let e = LdapModule::from_settings_with(blob, &[b"\xff".as_slice()])
+            .as_deref(),
+        Some("resolved")
+    );
+    let e = LdapModule::from_settings_with(referenced, &[b"\xff".as_slice()])
         .err()
         .expect("refused");
     assert!(e.contains("not UTF-8"), "{e}");
