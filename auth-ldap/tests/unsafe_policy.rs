@@ -42,26 +42,92 @@ fn plugin_sources() -> Vec<(PathBuf, String)> {
 }
 
 /// The code of a source, its `//` comments dropped (prose may name what the code must not do). A
-/// `//` inside a string literal (`"ldap://"`) is code, not a comment: the line is read on past it.
+/// `//` inside a string literal (`"ldap://"`), a raw string (`r#"a//b"#`) or a char literal is
+/// code, not a comment: the line is read on past it. A lifetime (`'a`) is not a char literal.
 fn code(text: &str) -> String {
     text.lines()
         .map(|line| {
-            let bytes = line.as_bytes();
-            let mut in_str = false;
+            let b = line.as_bytes();
             let mut k = 0;
-            while k < bytes.len() {
-                match bytes[k] {
-                    b'\\' if in_str => k += 1,
-                    b'"' => in_str = !in_str,
-                    b'/' if !in_str && bytes.get(k + 1) == Some(&b'/') => return &line[..k],
-                    _ => {}
+            while k < b.len() {
+                match b[k] {
+                    b'/' if b.get(k + 1) == Some(&b'/') => return &line[..k],
+                    b'"' => k = string_end(b, k + 1),
+                    b'r' if (k == 0 || !is_ident(b[k - 1]))
+                        && matches!(b.get(k + 1), Some(b'"' | b'#')) =>
+                    {
+                        let hashes = b[k + 1..].iter().take_while(|c| **c == b'#').count();
+                        if b.get(k + 1 + hashes) == Some(&b'"') {
+                            let close: Vec<u8> = std::iter::once(b'"')
+                                .chain(std::iter::repeat_n(b'#', hashes))
+                                .collect();
+                            let from = k + 2 + hashes;
+                            k = b[from..]
+                                .windows(close.len())
+                                .position(|w| w == close.as_slice())
+                                .map_or(b.len(), |at| from + at + close.len());
+                        } else {
+                            k += 1;
+                        }
+                    }
+                    b'\'' => k = char_end(line, k),
+                    _ => k += 1,
                 }
-                k += 1;
             }
             line
         })
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+fn is_ident(c: u8) -> bool {
+    c.is_ascii_alphanumeric() || c == b'_'
+}
+
+/// Past the string literal whose body starts at `k` (its closing `"`, escapes honoured).
+fn string_end(b: &[u8], mut k: usize) -> usize {
+    while k < b.len() {
+        match b[k] {
+            b'\\' => k += 2,
+            b'"' => return k + 1,
+            _ => k += 1,
+        }
+    }
+    b.len()
+}
+
+/// Past the char literal opening at `k` (`'x'`, `'\''`, `'\u{e9}'`, `'é'`), or just past the `'`
+/// of a lifetime.
+fn char_end(line: &str, k: usize) -> usize {
+    let b = line.as_bytes();
+    if b.get(k + 1) == Some(&b'\\') {
+        return b[k + 3..]
+            .iter()
+            .position(|c| *c == b'\'')
+            .map_or(b.len(), |at| k + 3 + at + 1);
+    }
+    match line[k + 1..].chars().next() {
+        Some(c) if b.get(k + 1 + c.len_utf8()) == Some(&b'\'') => k + 2 + c.len_utf8(),
+        _ => k + 1,
+    }
+}
+
+/// The stripper keeps code that only looks like a comment, and drops a real one.
+#[test]
+fn the_comment_stripper_reads_literals_as_code() {
+    for (line, kept) in [
+        ("let u = \"http://x\"; unsafe { }", "unsafe { }"),
+        ("let u = r\"a//b\"; unsafe { }", "unsafe { }"),
+        ("let u = r#\"a\"//b\"#; unsafe { }", "unsafe { }"),
+        ("let c = '/'; let d = '/'; unsafe { }", "unsafe { }"),
+        ("let q = b'\"'; unsafe { } // \"", "unsafe { }"),
+        ("let e = '\\''; unsafe { }", "unsafe { }"),
+        ("fn f<'a>(x: &'a str) {} unsafe { }", "unsafe { }"),
+    ] {
+        assert!(code(line).contains(kept), "{line:?} -> {:?}", code(line));
+    }
+    assert!(!code("let x = 1; // unsafe { }").contains("unsafe"));
+    assert!(!code("let s = \"a\"; // unsafe { }").contains("unsafe"));
 }
 
 /// Whether `code` declares a `static` item, in any visibility or after an attribute on the same
@@ -115,6 +181,8 @@ fn the_crate_forbids_unsafe_code() {
         for banned in [
             "allow(unsafe_code)",
             "unsafe {",
+            "unsafe{",
+            "unsafe trait",
             "unsafe fn",
             "unsafe impl",
             "unsafe extern",
@@ -179,9 +247,11 @@ fn the_plugin_crate_holds_only_the_export_exemption() {
         }
         for banned in [
             "unsafe {",
+            "unsafe{",
             "unsafe fn",
             "unsafe impl",
             "unsafe extern",
+            "unsafe trait",
             "thread_local!",
         ] {
             assert!(
