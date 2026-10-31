@@ -565,6 +565,21 @@ fn parse_settings(settings: &[u8]) -> Result<LdapConfig, String> {
     })
 }
 
+/// An attribute description's TYPE: what precedes its first `;option` (RFC 4512 §2.5).
+fn attribute_type(description: &str) -> &str {
+    description.split(';').next().unwrap_or(description)
+}
+
+/// The `range=<low>-<high>` option of an attribute description, when it is a PARTIAL range (its
+/// high bound is not `*`): the directory returned only some of the attribute's values.
+fn partial_range(description: &str) -> Option<&str> {
+    description.split(';').skip(1).find(|option| {
+        option.len() > 6
+            && option.as_bytes()[..6].eq_ignore_ascii_case(b"range=")
+            && option.rsplit_once('-').is_some_and(|(_, high)| high != "*")
+    })
+}
+
 /// LDAP result code 49, invalidCredentials (RFC 4511 §4.1.9).
 const LDAP_INVALID_CREDENTIALS: u32 = 49;
 
@@ -844,12 +859,27 @@ impl LdapModule {
             }
             // LDAP attribute descriptions are case-insensitive (RFC 4512 §2.5) and the entry is keyed
             // by the server's spelling, so `group_attr: memberof` must find the server's `memberOf`.
+            // The description is matched on its attribute TYPE, ignoring options: Active Directory
+            // answers an attribute past its MaxValRange as `memberOf;range=0-1499`.
+            let want = attribute_type(&self.cfg.group_attr);
             let vals = entry
                 .attrs
                 .iter()
-                .find(|(k, _)| k.eq_ignore_ascii_case(&self.cfg.group_attr))
-                .map(|(_, v)| v);
-            if let Some(vals) = vals {
+                .find(|(k, _)| attribute_type(k).eq_ignore_ascii_case(want));
+            if let Some((description, _)) = vals {
+                if let Some(range) = partial_range(description) {
+                    // Fail-safe: the values returned are read (fewer roles than the user holds);
+                    // paging the rest (`;range=1500-*`) is not done.
+                    tracing::warn!(
+                        module = "ldap",
+                        attribute = %description,
+                        range = %range,
+                        "ldap group attribute truncated by the directory's MaxValRange; only the \
+                         returned values are mapped to roles"
+                    );
+                }
+            }
+            if let Some((_, vals)) = vals {
                 // Cap the number of group values collected so a hostile/huge memberOf cannot exhaust
                 // memory (see MAX_GROUP_VALUES). Log when truncating so an operator can spot it.
                 if vals.len() > MAX_GROUP_VALUES {
