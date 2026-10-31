@@ -166,16 +166,34 @@ pub const fn rc_name(rc: u32) -> &'static str {
     }
 }
 
+/// The most characters of the directory's own text (a matched DN, a diagnostic) a result shows.
+const SHOWN_TEXT: usize = 128;
+
+/// The directory's text `t` as a result shows it: its first [`SHOWN_TEXT`] characters (then `...`),
+/// escaped (`\n`, `\u{1b}`, ...) so no newline or control character reaches a log line raw.
+fn shown(t: &str) -> String {
+    let mut out: String = t
+        .chars()
+        .take(SHOWN_TEXT)
+        .flat_map(char::escape_debug)
+        .collect();
+    if t.chars().nth(SHOWN_TEXT).is_some() {
+        out.push_str("...");
+    }
+    out
+}
+
 impl std::fmt::Display for LdapResult {
-    /// The words for an operation that did not succeed (as `LdapError::LdapResult` words it).
+    /// The words for an operation that did not succeed (as `LdapError::LdapResult` words it), the
+    /// directory's matched DN and diagnostic escaped and capped ([`shown`]): they are far-end text.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "LDAP operation result: rc={} ({}), dn: \"{}\", text: \"{}\"",
             self.rc,
             rc_name(self.rc),
-            self.matched,
-            self.text
+            shown(&self.matched),
+            shown(&self.text)
         )
     }
 }

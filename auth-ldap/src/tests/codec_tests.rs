@@ -409,8 +409,15 @@ fn a_results_far_end_text_is_escaped_and_capped() {
     let shown = r.to_string();
     assert!(!shown.contains('\n') && !shown.contains('\r'), "{shown}");
     assert!(!shown.contains('\u{1b}'), "{shown}");
-    assert!(shown.contains("\\n"), "the newline is shown escaped: {shown}");
-    assert!(shown.chars().count() < 2 * 128 * 4 + 80, "capped: {}", shown.len());
+    assert!(
+        shown.contains("\\n"),
+        "the newline is shown escaped: {shown}"
+    );
+    assert!(
+        shown.chars().count() < 2 * 128 * 4 + 80,
+        "capped: {}",
+        shown.len()
+    );
     assert!(!shown.contains(&"m".repeat(129)), "the DN is capped");
     // Short text reads as before.
     let short = LdapResult {
