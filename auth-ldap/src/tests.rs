@@ -140,6 +140,19 @@ fn new_refuses_a_zero_timeout() {
 }
 
 /// A blank `group_attr` reads back no groups, so every login would bind no roles; refused at boot.
+/// L7: `timeout_secs` bounds each directory operation, and a login runs several; an unbounded one
+/// lets a hung directory pin every in-flight slot. It is capped at 120 seconds, by name.
+#[test]
+fn new_refuses_a_timeout_past_120_seconds() {
+    let mut cfg = base_cfg();
+    cfg.timeout_secs = 120;
+    assert!(LdapModule::new(cfg).is_ok(), "120 is the cap");
+    let mut cfg = base_cfg();
+    cfg.timeout_secs = 121;
+    let e = LdapModule::new(cfg).err().expect("121 is refused");
+    assert!(e.starts_with("settings.timeout_secs: "), "{e}");
+}
+
 #[test]
 fn new_refuses_an_empty_group_attr() {
     for attr in ["", "  "] {
