@@ -3,12 +3,13 @@
 
 //! Pure helpers for the LDAP module: turning group DNs into role strings, and defending the two
 //! places a username crosses into an LDAP wire syntax (a DN template, a search filter). These carry
-//! no I/O, so they are fully unit-tested — the LDAP bind itself needs a live directory.
+//! no I/O, so they are fully unit-tested (the bind itself is tested over a scripted stream in
+//! `tests/conversation_tests.rs`, and live in the plugin's e2e).
 //!
 //! ## Group DN → role normalization
 //!
 //! LDAP/AD groups are DNs: `CN=engineers,OU=Groups,DC=corp,DC=example`. A [`Principal`]'s `roles`
-//! (wire `Identity.groups`) is a `Vec<String>` and `auth.role_bindings.ldap` keys policy on those
+//! (wire `Identity.groups`) is a `Vec<String>` and `auth.role_bindings.<provider>` keys policy on those
 //! strings — so a DN "works" as a role verbatim. But it is a HOSTILE binding key: it has commas and
 //! `=` (awkward YAML keys), it is case-insensitive in LDAP but case-SENSITIVE as a `role_bindings`
 //! map key, and its OU path is deployment-specific. The engine offers no DN normalization, so the

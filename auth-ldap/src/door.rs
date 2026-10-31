@@ -6,7 +6,7 @@
 //! `auth_verify_door!` refuses the login ops):
 //!
 //! * the lifecycle is the SDK's (`lifecycle: life(Ldap)`): `validate`/`open` parse the settings
-//!   blob with [`LdapModule::from_settings`] (its refusal texts), `refresh` swaps the module whole
+//!   blob with [`LdapModule::from_settings_with`] (its refusal texts), `refresh` swaps the module whole
 //!   (a refusal keeps the running one);
 //! * `verify` is not served: LDAP judges no bearer credential on the data plane, so the tail
 //!   states the login family alone (`CAP_LOGIN`, as busbar-auth-github's) and `verify` answers
@@ -111,7 +111,7 @@ pub const NEEDS: &[Need] = &[
 ];
 
 /// The settings keys whose values are secret references, resolved in this order into
-/// `OpenIn.secrets` (a literal value is accepted by the host).
+/// `OpenIn.secrets` (a literal value refuses boot).
 pub const SECRET_REFS: &[AbiStr] = &[abi_str("bind_service_password")];
 
 /// This plugin's Statement.

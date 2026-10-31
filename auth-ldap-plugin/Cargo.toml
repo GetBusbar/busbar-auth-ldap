@@ -6,7 +6,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
-description = "The AD/LDAP auth module as a droppable busbar plugin — a cdylib exporting the auth kind's door. Drop it in the plugins folder and add `ldap` to auth.chain / auth.methods with auth.methods.ldap settings (url, bind_dn_template, base_dn, group_attr)."
+description = "The AD/LDAP auth module as a droppable busbar plugin — a cdylib exporting the auth kind's door. Drop it in the plugins folder, define it under identity-providers.<name> (module: ldap, settings: url, bind_dn_template, base_dn, group_attr) and reference that name from auth.chain."
 
 [lib]
 # cdylib: the DROPPED-IN door, exporting `busbar_plugin_door`. rlib: what `cargo test` links, and

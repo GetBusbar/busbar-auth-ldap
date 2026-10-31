@@ -554,7 +554,7 @@ mod refusal_lines {
                     "bind_service_dn": "cn=svc",
                     "bind_service_password": ""
                 })),
-                "settings.bind_service_password: must not be empty",
+                "settings.bind_service_password: must be a secret reference",
             ),
         ];
         for (blob, want) in cases {
