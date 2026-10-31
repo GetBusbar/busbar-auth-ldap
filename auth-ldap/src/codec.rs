@@ -317,6 +317,7 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
     Ok(Entry { dn, attrs })
 }
 
+#[cfg(test)]
 /// Decode one whole message (exactly the bytes [`ber::frame`] measured), within a fresh
 /// [`DECODE_BUDGET`].
 ///

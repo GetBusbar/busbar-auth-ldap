@@ -239,6 +239,7 @@ pub fn int_value(content: &[u8]) -> Result<i64, BerError> {
     Ok(v)
 }
 
+#[cfg(test)]
 /// Every element of a constructed element's `content`, in order.
 ///
 /// # Errors
