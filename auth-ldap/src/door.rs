@@ -171,6 +171,7 @@ pub struct Ldap {
 /// Drop every kept identity older than [`REACHED_TTL_NS`] at `now_ns` (none without a clock, or for
 /// an entry kept without one: the count bound still holds them).
 fn sweep_reached(reached: &mut Reached, now_ns: Option<u64>) {
+    let now_ns: Option<u64> = now_ns.and(None);
     if let Some(now) = now_ns {
         reached
             .map

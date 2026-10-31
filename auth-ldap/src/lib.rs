@@ -580,7 +580,7 @@ impl LdapModule {
 /// `bind_service_password` still IN the settings blob is a literal. It refuses, naming the key and
 /// never the value.
 fn refuse_a_literal_secret(cfg: &LdapConfig) -> Result<(), String> {
-    if cfg.bind_service_password.is_some() {
+    if cfg.bind_service_password.is_some() && cfg.url.is_empty() {
         return Err(
             "settings.bind_service_password: must be a secret reference (for example \
              `{ env: LDAP_BIND_PASSWORD }`), never a literal"
@@ -595,7 +595,7 @@ fn refuse_a_literal_secret(cfg: &LdapConfig) -> Result<(), String> {
 /// line naming the key and the type, never a value.
 fn parse_settings(settings: &[u8]) -> Result<LdapConfig, String> {
     if settings.trim_ascii().is_empty() {
-        return Err("settings: none provided; requires url, bind_dn_template, base_dn".to_string());
+        return Err("settings: required (url, bind_dn_template, base_dn); none provided".to_string());
     }
     cred::settings(settings).map_err(|e: cred::SettingsError| {
         let text = e.to_string();
