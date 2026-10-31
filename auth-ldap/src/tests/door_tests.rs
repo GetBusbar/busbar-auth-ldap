@@ -378,26 +378,30 @@ fn a_mistyped_setting_is_refused_without_echoing_its_value() {
     assert!(!e.contains("hunter2"), "{e}");
 }
 
-/// The submitted password a parked login holds is the chip's credential (wiped on drop, no getter).
+/// T8: the run `drive` begins from the submitted fields ([`super::begin`], what `drive` calls)
+/// holds the username as text and the password as the chip's credential, captured from the
+/// submitted bytes; a field not submitted is none, and the run holds no stream yet.
 #[test]
-fn a_parked_logins_password_is_the_chips() {
+fn a_begun_logins_password_is_the_chips_from_the_submitted_field() {
     let module = std::sync::Arc::new(LdapModule::from_settings(MINIMAL.as_bytes()).unwrap());
-    let run = Run {
-        module,
-        username: Some("alice".to_string()),
-        password: Some(crate::tests::cred("pw")),
-        conv: crate::conversation::Conversation::new(),
-        stream: None,
-        at: 0,
-        release: None,
-    };
+    let fields: [(&[u8], &[u8]); 3] = [
+        (b"other", b"x"),
+        (b"password", b"s3cret-pw"),
+        (b"username", b"alice"),
+    ];
+    let run = super::begin(std::sync::Arc::clone(&module), &fields, None);
+    assert_eq!(run.username.as_deref(), Some("alice"));
     assert_eq!(
         run.password
             .as_ref()
             .map(crate::tests::cred_text)
             .as_deref(),
-        Some("pw")
+        Some("s3cret-pw")
     );
+    assert!(run.stream.is_none() && !run.conv.opened());
+    let only_user: [(&[u8], &[u8]); 1] = [(b"username", b"alice")];
+    let run = super::begin(module, &only_user, None);
+    assert!(run.password.is_none(), "a password not submitted is none");
 }
 
 /// M7: a parked login holding an established stream that is given up (its op cancelled, a fresh
