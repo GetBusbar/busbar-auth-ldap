@@ -721,6 +721,8 @@ struct FakeLdap {
     /// The Base (group read) search answers no entry at all (an ACL hiding the bound user's own
     /// entry).
     base_empty: bool,
+    /// The UNBIND fails (a directory that drops the connection after the group read).
+    unbind_err: bool,
     /// The DN the Base (group read) search answers its entry under, as the directory spells it;
     /// unset, the DN the user bound as.
     entry_dn: Option<String>,
@@ -794,8 +796,51 @@ impl LdapBackend for FakeLdap {
 
     fn unbind(&mut self) -> Result<(), Io> {
         self.unbound = true;
+        if self.unbind_err {
+            return Err(Io::Failed(
+                "the directory closed the connection".to_string(),
+            ));
+        }
         Ok(())
     }
+}
+
+/// T3: the UNBIND is best effort: a directory that drops the connection after the group read (the
+/// unbind's write fails) does not turn a fully verified login into an outage.
+#[test]
+fn a_failed_unbind_is_ignored() {
+    let m = LdapModule::new(base_cfg()).unwrap();
+    let mut fake = FakeLdap {
+        group_values: vec!["CN=engineers,OU=Groups,DC=corp,DC=example".to_string()],
+        group_attr: "memberOf".to_string(),
+        unbind_err: true,
+        ..Default::default()
+    };
+    let p = m
+        .bind_and_identify_on(&mut fake, "alice", "pw")
+        .expect("the login stands");
+    assert!(fake.unbound, "the unbind was attempted");
+    assert_eq!(p.roles, vec!["engineers".to_string()]);
+}
+
+/// T5: `ca_cert_pem` holds a certificate only when EVERY `CERTIFICATE` block is base64 of a DER
+/// SEQUENCE: well-formed base64 that is not one (`AAAA`), or a bundle whose second block is bad,
+/// is refused, as the connector would refuse it at the need's declaration.
+#[test]
+fn a_ca_bundle_with_a_non_der_block_holds_no_certificate() {
+    let good = busbar_test_kit::conformance_host::anchors();
+    assert!(
+        crate::holds_a_certificate(good),
+        "the kit's CA is a certificate"
+    );
+    let not_der = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+    assert!(!crate::holds_a_certificate(not_der));
+    assert!(!crate::holds_a_certificate(&format!("{good}\n{not_der}")));
+    assert!(!crate::holds_a_certificate(&format!("{not_der}{good}")));
+    let mut cfg = base_cfg();
+    cfg.ca_cert_pem = Some(not_der.to_string());
+    let e = LdapModule::new(cfg).err().expect("refused at boot");
+    assert!(e.contains("settings.ca_cert_pem: "), "{e}");
 }
 
 fn search_cfg() -> LdapConfig {
