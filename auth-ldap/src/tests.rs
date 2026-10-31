@@ -611,6 +611,9 @@ struct FakeLdap {
     /// The Base (group read) search answers no entry at all (an ACL hiding the bound user's own
     /// entry).
     base_empty: bool,
+    /// The DN the Base (group read) search answers its entry under, as the directory spells it;
+    /// unset, the DN the user bound as.
+    entry_dn: Option<String>,
 }
 
 impl LdapBackend for FakeLdap {
@@ -668,7 +671,11 @@ impl LdapBackend for FakeLdap {
                     attrs.insert(self.group_attr.clone(), self.group_values.clone());
                 }
                 Ok(vec![DirEntry {
-                    dn: self.binds.last().cloned().unwrap_or_default(),
+                    dn: self
+                        .entry_dn
+                        .clone()
+                        .or_else(|| self.binds.last().cloned())
+                        .unwrap_or_default(),
                     attrs,
                 }])
             }
@@ -914,6 +921,58 @@ fn username_casing_yields_same_principal_id() {
         principal_id("uid=Alice,DC=X"),
         principal_id("uid=alice,dc=x")
     );
+}
+
+/// M1: a direct-bind principal is the bound entry's DN AS THE DIRECTORY RETURNS IT (the group
+/// read's objectName), not the typed spelling: `John  Smith` (two spaces) and `John Smith` bind the
+/// same entry on a directory that matches insignificant spaces away, so they are one principal.
+#[test]
+fn the_principal_is_the_dn_the_directory_returns() {
+    let m = LdapModule::new(base_cfg()).unwrap();
+    let id_for = |u: &str| {
+        let mut fake = FakeLdap {
+            entry_dn: Some("uid=John Smith,ou=People,dc=corp,dc=example".to_string()),
+            ..Default::default()
+        };
+        m.bind_and_identify_on(&mut fake, u, "pw").unwrap().id
+    };
+    assert_eq!(
+        id_for("John  Smith"),
+        "ldap:uid=john smith,ou=people,dc=corp,dc=example"
+    );
+    assert_eq!(id_for("John  Smith"), id_for("john smith"));
+}
+
+/// M1: when the group read answers no entry (an ACL hides it), the principal falls back to the
+/// bound DN normalised for case-ignore matching (RFC 4518: case folded, insignificant spaces
+/// collapsed), so the typed spacing still mints one principal.
+#[test]
+fn with_no_entry_the_principal_is_the_bound_dn_normalised() {
+    let m = LdapModule::new(base_cfg()).unwrap();
+    let id_for = |u: &str| {
+        let mut fake = FakeLdap {
+            base_empty: true,
+            ..Default::default()
+        };
+        m.bind_and_identify_on(&mut fake, u, "pw").unwrap().id
+    };
+    assert_eq!(id_for("John  Smith"), id_for("John Smith"));
+    assert_eq!(
+        id_for("John   Smith"),
+        "ldap:uid=john smith,ou=people,dc=corp,dc=example"
+    );
+    // Search-then-bind normalises the found DN the same way.
+    let m = LdapModule::new(search_cfg()).unwrap();
+    let mut fake = FakeLdap {
+        search_entries: vec![DirEntry {
+            dn: "CN=John  Smith,OU=People,DC=corp,DC=example".to_string(),
+            attrs: HashMap::new(),
+        }],
+        base_empty: true,
+        ..Default::default()
+    };
+    let p = m.bind_and_identify_on(&mut fake, "jsmith", "pw").unwrap();
+    assert_eq!(p.id, "ldap:cn=john smith,ou=people,dc=corp,dc=example");
 }
 
 /// An oversized `memberOf` is capped so a hostile directory cannot exhaust memory.
