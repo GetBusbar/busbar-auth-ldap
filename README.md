@@ -240,7 +240,12 @@ and for a loopback host.
   make hostile `role_bindings` keys: commas and `=` are awkward in YAML,
   LDAP compares case-insensitively while the map does not, and the OU
   path is deployment-specific. `role_from` picks the shape;
-  `cn` is the default for that reason.
+  `cn` is the default for that reason. `cn` keys a role on the group's CN
+  alone, so two groups with the same CN in different OUs
+  (`CN=admins,OU=Eng,...` and `CN=admins,OU=Sales,...`) map to ONE role:
+  in a directory with same-named groups across OUs, use `role_from: dn`.
+  A multi-valued RDN (`CN=admins+UID=g1`) yields its CN value, and an RDN
+  with no `=` is skipped.
 - **Group collection is capped** at 4096 values per user entry, so a
   hostile or misconfigured directory cannot drive unbounded memory use.
   The plugin logs when it truncates.
