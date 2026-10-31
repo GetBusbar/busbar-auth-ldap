@@ -240,6 +240,13 @@ and for a loopback host.
 - **Group collection is capped** at 4096 values per user entry, so a
   hostile or misconfigured directory cannot drive unbounded memory use.
   The plugin logs when it truncates.
+- **Ranged retrieval is not paged.** Active Directory returns a
+  multi-valued attribute past its `MaxValRange` (1500 by default) as a
+  ranged description (`memberOf;range=0-1499`). The group attribute is
+  matched on its type, ignoring options, so those values are mapped to
+  roles, and the plugin logs a `warn` that the list is truncated: a user
+  in more groups than the range gets fewer roles, never more. The rest of
+  the range (`;range=1500-*`) is not requested.
 
 ## Build
 
