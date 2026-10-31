@@ -874,6 +874,36 @@ fn the_group_attr_is_matched_case_insensitively() {
     assert_eq!(p.roles, vec!["admins".to_string()]);
 }
 
+/// M2: Active Directory answers a multi-valued attribute past its MaxValRange (1500) as a RANGED
+/// description, `memberOf;range=0-1499`. The group attribute is matched ignoring options, so the
+/// values returned are read (fail-safe: fewer roles than the user holds), and the truncation is
+/// logged at warn; a final range (`;range=0-*`) is the whole attribute and is read silently.
+#[test]
+fn a_ranged_group_attribute_is_read_and_its_truncation_warned() {
+    use busbar_test_kit::warn_capture::WarnCapture;
+    let m = LdapModule::new(base_cfg()).unwrap();
+    let read = |attr: &str| {
+        let mut fake = FakeLdap {
+            group_values: vec!["CN=engineers,OU=Groups,DC=corp,DC=example".to_string()],
+            group_attr: attr.to_string(),
+            ..Default::default()
+        };
+        let cap = WarnCapture::default();
+        let p = tracing::subscriber::with_default(cap.clone(), || {
+            m.bind_and_identify_on(&mut fake, "alice", "pw")
+        })
+        .expect("binds");
+        (p.roles, cap)
+    };
+    let (roles, cap) = read("memberOf;range=0-1499");
+    assert_eq!(roles, vec!["engineers".to_string()]);
+    assert!(cap.contains("range=0-1499"), "{:?}", cap.messages());
+    assert!(cap.contains("truncated"), "{:?}", cap.messages());
+    let (roles, cap) = read("memberOf;range=0-*");
+    assert_eq!(roles, vec!["engineers".to_string()]);
+    assert!(!cap.contains("truncated"), "{:?}", cap.messages());
+}
+
 /// A search matching >1 entry is AMBIGUOUS and must be rejected, not silently bound to
 /// the first match.
 #[test]
