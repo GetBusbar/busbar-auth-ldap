@@ -167,6 +167,9 @@ pub struct LdapConfig {
 fn default_group_attr() -> String {
     "memberOf".to_string()
 }
+/// The longest `timeout_secs` may be, in seconds.
+const MAX_TIMEOUT_SECS: u64 = 120;
+
 fn default_timeout_secs() -> u64 {
     10
 }
@@ -317,6 +320,10 @@ fn check_settings(cfg: &LdapConfig) -> Result<(), String> {
     // A zero timeout expires every connect and operation at once, so every login would fail.
     if cfg.timeout_secs == 0 {
         refuse("timeout_secs", "must be at least 1");
+    } else if cfg.timeout_secs > MAX_TIMEOUT_SECS {
+        // Each operation of a login waits up to this long, and a login runs several: unbounded,
+        // a hung directory pins every in-flight login slot for as long as it is set to.
+        refuse("timeout_secs", "must be at most 120");
     }
     // A blank group attribute is requested and read back as nothing: every login, no roles.
     if cfg.group_attr.trim().is_empty() {
