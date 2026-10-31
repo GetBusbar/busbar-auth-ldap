@@ -128,6 +128,8 @@ enum Kept {
     Connected,
     Bound(u32),
     Found(Vec<DirEntry>),
+    /// A search the directory answered with a non-zero result: its code and text.
+    Refused(u32, String),
     Unbound,
 }
 
@@ -550,8 +552,10 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
         filter: &str,
         attrs: &[&str],
     ) -> Result<Vec<DirEntry>, Io> {
-        if let Some(Kept::Found(entries)) = self.kept() {
-            return Ok(entries);
+        match self.kept() {
+            Some(Kept::Found(entries)) => return Ok(entries),
+            Some(Kept::Refused(rc, text)) => return Err(Io::Refused { rc, text }),
+            _ => {}
         }
         let scope = match scope {
             SearchScope::Base => codec::SCOPE_BASE,
@@ -585,7 +589,12 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                     self.keep(Kept::Found(entries.clone()));
                     return Ok(entries);
                 }
-                Reply::Done(r) => return self.fail(r.to_string()),
+                // The search's own answer: kept, so a replay answers it again without a resend.
+                Reply::Done(r) => {
+                    let text = r.to_string();
+                    self.keep(Kept::Refused(r.rc, text.clone()));
+                    return Err(Io::Refused { rc: r.rc, text });
+                }
                 // A SearchResultReference is a referral this client does not chase, and RFC 4511
                 // §4.5.3 lets such a client ignore it: never read as an entry, it is counted and
                 // skipped, and the search is decided on its entries and its SearchResultDone.

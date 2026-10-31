@@ -594,6 +594,10 @@ fn partial_range(description: &str) -> Option<&str> {
 
 /// LDAP result code 49, invalidCredentials (RFC 4511 §4.1.9).
 const LDAP_INVALID_CREDENTIALS: u32 = 49;
+/// LDAP result code 32, noSuchObject (RFC 4511 §4.1.9).
+const LDAP_NO_SUCH_OBJECT: u32 = 32;
+/// LDAP result code 50, insufficientAccessRights (RFC 4511 §4.1.9).
+const LDAP_INSUFFICIENT_ACCESS: u32 = 50;
 
 /// Is a (non-49) user-bind result code a SERVER or SESSION condition, one
 /// that fails the bind for every user alike (an outage), rather than a refusal of this one bind?
@@ -646,6 +650,14 @@ pub(crate) enum Io {
     Pending,
     /// An operational failure, with its text.
     Failed(String),
+    /// A search the directory answered with a non-zero SearchResultDone: its result code, and the
+    /// failure's text.
+    Refused {
+        /// The SearchResultDone's result code.
+        rc: u32,
+        /// The failure's text.
+        text: String,
+    },
 }
 
 impl From<String> for Io {
@@ -658,7 +670,7 @@ impl From<String> for Io {
 fn at(ctx: &str) -> impl FnOnce(Io) -> BindError + '_ {
     move |e| match e {
         Io::Pending => BindError::Pending,
-        Io::Failed(e) => BindError::Directory(format!("{ctx}: {e}")),
+        Io::Failed(e) | Io::Refused { text: e, .. } => BindError::Directory(format!("{ctx}: {e}")),
     }
 }
 
@@ -841,21 +853,40 @@ impl LdapModule {
             return Err(BindError::Rejected { rc });
         }
 
-        // Read the group-membership attribute off the (now bound) user entry.
-        let entries = ldap
-            .search(
-                &user_dn,
-                SearchScope::Base,
-                "(objectClass=*)",
-                &[self.cfg.group_attr.as_str()],
-            )
-            .map_err(at("group read"))?;
+        // Read the group-membership attribute off the (now bound) user entry. The directory
+        // already bound this user, so a read refused as 32 noSuchObject or 50
+        // insufficientAccessRights (an ACL hiding the user's own entry from them) is the same as
+        // a read that returns no entry: the login stands with no roles, never silently. Every
+        // other failure is an outage.
+        let mut refused = false;
+        let entries = match ldap.search(
+            &user_dn,
+            SearchScope::Base,
+            "(objectClass=*)",
+            &[self.cfg.group_attr.as_str()],
+        ) {
+            Err(Io::Refused { rc, .. })
+                if rc == LDAP_NO_SUCH_OBJECT || rc == LDAP_INSUFFICIENT_ACCESS =>
+            {
+                tracing::warn!(
+                    module = "ldap",
+                    rc,
+                    result = codec::rc_name(rc),
+                    group_attr = %self.cfg.group_attr,
+                    "ldap group read refused for the bound user (an ACL may hide the entry); \
+                     the login carries no roles"
+                );
+                refused = true;
+                Vec::new()
+            }
+            read => read.map_err(at("group read"))?,
+        };
 
         let mut group_dns: Vec<String> = Vec::new();
         // The principal is the entry's DN as the directory returns it (its objectName), falling
         // back to the DN bound as when the read answered no entry ([`principal_id`]).
         let mut entry_dn: Option<String> = None;
-        if entries.is_empty() {
+        if entries.is_empty() && !refused {
             // The bound user's own entry read back as nothing: an ACL hides it from the user, so
             // the groups were never read. The login stands with no roles, never silently.
             tracing::warn!(

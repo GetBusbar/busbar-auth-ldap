@@ -308,7 +308,11 @@ fn a_group_read_refused_for_access_is_a_login_with_no_roles() {
     );
     for rc in [32_i64, 50] {
         let mut dir = Directory::new(vec![bind_response(1, 0), done(2, rc)]);
-        assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage, "user search rc {rc}");
+        assert_eq!(
+            login(&m, &mut dir, "pw").0,
+            Login::Outage,
+            "user search rc {rc}"
+        );
     }
 }
 
