@@ -123,8 +123,11 @@ fn a_bind_response_decodes() {
     );
 }
 
+/// M5: a value that is not UTF-8 is dropped ALONE: the attribute keeps its text values (a group
+/// list with one binary value is not lost whole), and the drop is logged at warn once per attribute,
+/// naming it and how many values went.
 #[test]
-fn a_search_entry_decodes_its_text_attributes_only() {
+fn a_search_entry_keeps_its_text_values_and_warns_of_the_rest() {
     fn attr(name: &[u8], vals: &[&[u8]]) -> Vec<u8> {
         let vals: Vec<u8> = vals.iter().flat_map(|v| tlv(0x04, v)).collect();
         tlv(0x30, &[tlv(0x04, name), tlv(0x31, &vals)].concat())
@@ -148,12 +151,16 @@ fn a_search_entry_decodes_its_text_attributes_only() {
             "memberOf".to_string(),
             vec!["cn=a,dc=x".to_string(), "cn=b,dc=x".to_string()],
         ),
+        ("jpegPhoto".to_string(), Vec::new()),
+        ("mixed".to_string(), vec!["text".to_string()]),
         ("empty".to_string(), Vec::new()),
     ]
     .into_iter()
     .collect();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let got = tracing::subscriber::with_default(cap.clone(), || decode(&m));
     assert_eq!(
-        decode(&m),
+        got,
         Ok(Message {
             id: 2,
             reply: Reply::Entry(Entry {
@@ -162,6 +169,10 @@ fn a_search_entry_decodes_its_text_attributes_only() {
             })
         })
     );
+    assert_eq!(cap.count("not UTF-8"), 2, "{:?}", cap.messages());
+    assert!(cap.contains("attribute=mixed"), "{:?}", cap.messages());
+    assert!(cap.contains("dropped=1"), "{:?}", cap.messages());
+    assert!(!cap.contains("attribute=memberOf"), "{:?}", cap.messages());
 }
 
 /// A failed search reads in 1.5.5's words (`LdapError::LdapResult`'s Display).
