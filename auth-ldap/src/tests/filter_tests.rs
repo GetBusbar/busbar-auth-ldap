@@ -93,3 +93,22 @@ fn an_escaped_username_is_one_equality_value() {
     crate::ber::tlv(&mut want, 0x04, hostile.as_bytes());
     assert_eq!(got, crate::ber::element(0xa3, &want));
 }
+
+/// M3: the parser's recursion is bounded: a filter nested deeper than 32 levels is refused (it
+/// would otherwise recurse once per level and, at tens of thousands, overflow the stack: an abort,
+/// not a panic), and 32 levels still parse.
+#[test]
+fn nesting_deeper_than_32_levels_is_refused() {
+    let nested = |levels: usize| {
+        format!(
+            "{}(uid=alice){}",
+            "(!".repeat(levels - 1),
+            ")".repeat(levels - 1)
+        )
+    };
+    assert!(super::encode(&nested(32)).is_ok(), "32 levels parse");
+    assert_eq!(super::encode(&nested(33)), Err(super::PARSE_ERROR));
+    let and = format!("{}(uid=alice){}", "(&".repeat(40), ")".repeat(40));
+    assert_eq!(super::encode(&and), Err(super::PARSE_ERROR));
+    assert_eq!(super::encode(&nested(200_000)), Err(super::PARSE_ERROR));
+}

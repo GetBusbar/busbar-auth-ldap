@@ -179,6 +179,37 @@ fn new_requires_search_filter_placeholder() {
     assert!(LdapModule::new(cfg).is_err());
 }
 
+/// M3: a `user_search_filter` that does not parse would fail every login as an outage; it is
+/// refused at `validate` and `open`, by name (never quoting the template), and so is one nested
+/// past the parser's depth bound.
+#[test]
+fn an_unparseable_search_filter_is_refused_by_name() {
+    for bad in [
+        "(sAMAccountName={username}".to_string(),
+        "sAMAccountName={username})".to_string(),
+        "((uid={username}))".to_string(),
+        format!("{}(uid={{username}}){}", "(!".repeat(40), ")".repeat(40)),
+    ] {
+        let mut cfg = search_cfg();
+        cfg.user_search_filter = Some(bad.clone());
+        let Err(e) = LdapModule::new(cfg) else {
+            panic!("{bad:?} is refused at open");
+        };
+        assert!(e.contains("settings.user_search_filter: "), "{e}");
+        assert!(!e.contains("username}"), "the template is not quoted: {e}");
+        let blob = serde_json::json!({
+            "url": "ldaps://ad.corp.example:636",
+            "bind_dn_template": "uid={username},dc=corp,dc=example",
+            "base_dn": "dc=corp,dc=example",
+            "user_search_filter": bad,
+            "bind_service_dn": "cn=svc,dc=corp,dc=example",
+        })
+        .to_string();
+        let e = LdapModule::validate_settings(blob.as_bytes()).expect_err("refused at validate");
+        assert!(e.contains("settings.user_search_filter: "), "{e}");
+    }
+}
+
 /// With a search filter set, a service DN but NO password would make `simple_bind(dn,
 /// "")` an UNAUTHENTICATED bind. `new()` must require the password too.
 #[test]
