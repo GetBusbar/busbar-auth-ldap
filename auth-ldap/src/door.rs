@@ -252,15 +252,27 @@ fn field<'a>(fields: &[(&[u8], &'a [u8])], name: &str) -> Option<&'a str> {
 
 /// Why a submission the form's fields cannot be read from is refused, when a field was submitted
 /// but is not text.
-fn unreadable(_fields: &[(&[u8], &[u8])]) -> Option<&'static str> {
-    None
+fn unreadable(fields: &[(&[u8], &[u8])]) -> Option<&'static str> {
+    let not_text = |name: &str| {
+        fields
+            .iter()
+            .any(|(n, v)| *n == name.as_bytes() && std::str::from_utf8(v).is_err())
+    };
+    if not_text(USERNAME.0) {
+        Some("the username field is not UTF-8")
+    } else if not_text(PASSWORD.0) {
+        Some("the password field is not UTF-8")
+    } else {
+        None
+    }
 }
 
 /// The host clock's reading, or why there is none.
 fn clock_ns(answer: Answer<ClockReading>) -> Result<u64, String> {
     match answer {
         Poll::Ready(Ok(r)) => Ok(r.mono_ns),
-        _ => Err("no host clock".to_string()),
+        Poll::Ready(Err(e)) => Err(format!("the host clock failed: {e}")),
+        Poll::Pending => Err("the host clock pended (it must never pend)".to_string()),
     }
 }
 
@@ -382,15 +394,20 @@ impl Wire for HostWire<'_> {
 
     fn now_ns(&mut self) -> Option<u64> {
         let (host, ticket) = self.clock?;
-        now(Some(host), ticket)
+        // Read quietly: a failing clock was said once, at the entry's start ([`now`]).
+        clock_ns(host.connector(ticket).clock_now()).ok()
     }
 }
 
-/// The host's monotonic clock, when it offers one.
+/// The host's monotonic clock, when it offers one; a clock that fails says why, at warn (the
+/// login then refuses to run untimed: [`LdapModule::login_over`]).
 fn now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
-    match host?.connector(ticket).clock_now() {
-        Poll::Ready(Ok(r)) => Some(r.mono_ns),
-        _ => None,
+    match clock_ns(host?.connector(ticket).clock_now()) {
+        Ok(ns) => Some(ns),
+        Err(reason) => {
+            tracing::warn!(module = "ldap", %reason, "ldap login: no host clock reading");
+            None
+        }
     }
 }
 
@@ -408,6 +425,12 @@ fn drive(
         Some(run) => *run,
         None => {
             let fields = submitted(input);
+            // A field submitted but not text is refused in its own words (the same verdict as a
+            // field not submitted), before the wire.
+            if let Some(reason) = unreadable(&fields) {
+                tracing::info!(module = "ldap", "ldap login refused: {reason}");
+                return Poll::Ready(Login::BadCredential);
+            }
             Run {
                 module: h.life().module(),
                 username: field(&fields, USERNAME.0).map(str::to_owned),
