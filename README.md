@@ -60,8 +60,11 @@ and does no TLS.
    answers PENDING and resumes on the wake; nothing is sent twice.
 5. On a successful bind it reads the user's group memberships
    (`memberOf` by default) and answers the identity, subject
-   `ldap:<the full lowercased bind DN>` and groups set from the mapped
-   group names. A wrong credential answers a bad-credential verdict; a
+   `ldap:<the user entry's DN>` and groups set from the mapped
+   group names. The DN is the one the directory returns for the bound
+   entry (falling back to the DN bound as when the group read returns no
+   entry), lowercased with every run of spaces collapsed to one, so two
+   spellings of one login (`John  Smith`, `john smith`) are one principal. A wrong credential answers a bad-credential verdict; a
    directory that cannot answer (connect, TLS, timeout) answers an
    outage. Every directory operation is bounded by `timeout_secs` on the
    host's clock; a login the host lends no clock answers an outage

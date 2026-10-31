@@ -460,7 +460,10 @@ fn a_search_reference_is_skipped() {
     let reference = |id: i64, url: &[u8]| message(id, ber::element(0x73, &ber::element(0x04, url)));
     let mut dir = Directory::new(vec![
         bind_response(1, 0),
-        reference(2, b"ldap://ForestDnsZones.corp.example/DC=ForestDnsZones,DC=corp"),
+        reference(
+            2,
+            b"ldap://ForestDnsZones.corp.example/DC=ForestDnsZones,DC=corp",
+        ),
         entry(2, ALICE, "dn", &[]),
         reference(2, b"ldap://corp.example/CN=Configuration,DC=corp"),
         done(2, 0),
