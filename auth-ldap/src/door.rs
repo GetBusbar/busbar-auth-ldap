@@ -250,6 +250,21 @@ fn field<'a>(fields: &[(&[u8], &'a [u8])], name: &str) -> Option<&'a str> {
         .and_then(|(_, v)| std::str::from_utf8(v).ok())
 }
 
+/// A login's run as `drive` begins it from the submitted `fields`: the module it began with, the
+/// username, and the password captured by the chip ([`Cred`], wiped on drop).
+fn begin(module: Arc<LdapModule>, fields: &[(&[u8], &[u8])], release: Option<Release>) -> Run {
+    Run {
+        module,
+        username: field(fields, USERNAME.0).map(str::to_owned),
+        password: field(fields, PASSWORD.0)
+            .map(|p| Cred::captured(Zeroizing::new(p.as_bytes().to_vec()))),
+        conv: Conversation::new(),
+        stream: None,
+        at: 0,
+        release,
+    }
+}
+
 /// Why a submission the form's fields cannot be read from is refused, when a field was submitted
 /// but is not text.
 fn unreadable(fields: &[(&[u8], &[u8])]) -> Option<&'static str> {
@@ -431,16 +446,11 @@ fn drive(
                 tracing::info!(module = "ldap", "ldap login refused: {reason}");
                 return Poll::Ready(Login::BadCredential);
             }
-            Run {
-                module: h.life().module(),
-                username: field(&fields, USERNAME.0).map(str::to_owned),
-                password: field(&fields, PASSWORD.0)
-                    .map(|p| Cred::captured(Zeroizing::new(p.as_bytes().to_vec()))),
-                conv: Conversation::new(),
-                stream: None,
-                at: 0,
-                release: h.host().map(|host| Release::through(*host)),
-            }
+            begin(
+                h.life().module(),
+                &fields,
+                h.host().map(|host| Release::through(*host)),
+            )
         }
     };
     let host = h.host();
