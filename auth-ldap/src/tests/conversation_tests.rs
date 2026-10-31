@@ -271,11 +271,45 @@ fn rc_49_is_a_bad_credential_and_another_code_an_outage() {
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
 }
 
+/// M4: the GROUP READ of a user the directory already bound answers 32 noSuchObject or 50
+/// insufficientAccessRights when an ACL hides the user's own entry from them: the same as a read
+/// that returns no entry, the login stands with no roles and a warn naming the code (never the
+/// DN). Every other non-zero code on the group read stays an outage, and so does any non-zero
+/// code on the search-then-bind USER search.
 #[test]
-fn a_failed_group_read_is_an_outage() {
+fn a_group_read_refused_for_access_is_a_login_with_no_roles() {
+    use busbar_test_kit::warn_capture::WarnCapture;
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
-    let mut dir = Directory::new(vec![bind_response(1, 0), done(2, 32)]);
-    assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
+    for rc in [32_i64, 50] {
+        let mut dir = Directory::new(vec![bind_response(1, 0), done(2, rc)]).pending();
+        let cap = WarnCapture::default();
+        let (got, _) = tracing::subscriber::with_default(cap.clone(), || login(&m, &mut dir, "pw"));
+        let Login::Identity(p) = got else {
+            panic!("rc {rc}: the bound user logs in: {got:?}");
+        };
+        assert!(p.roles.is_empty(), "rc {rc}: {:?}", p.roles);
+        assert_eq!(p.id, format!("ldap:{ALICE}"));
+        assert!(cap.contains(&format!("rc={rc}")), "{:?}", cap.messages());
+        assert!(!cap.contains(ALICE), "the DN leaked: {:?}", cap.messages());
+        // Replayed across every PENDING, the group read went out once and the unbind followed.
+        assert_eq!(dir.written, direct_bytes("memberOf"), "rc {rc}");
+    }
+    for rc in [1_i64, 52, 53, 80] {
+        let mut dir = Directory::new(vec![bind_response(1, 0), done(2, rc)]);
+        assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage, "rc {rc}");
+    }
+    let m = module(
+        "ldap://127.0.0.1",
+        serde_json::json!({
+            "user_search_filter": "(uid={username})",
+            "bind_service_dn": "cn=svc,dc=x",
+            "bind_service_password": "svc-pw",
+        }),
+    );
+    for rc in [32_i64, 50] {
+        let mut dir = Directory::new(vec![bind_response(1, 0), done(2, rc)]);
+        assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage, "user search rc {rc}");
+    }
 }
 
 #[test]
