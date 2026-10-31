@@ -8,6 +8,9 @@ license.workspace = true
 publish.workspace = true
 description = "The AD/LDAP auth module for busbar: BIND a username/password against an LDAP/LDAPS directory and map the user's group memberships (memberOf DNs) to a Principal. Its door (door::door) is a plugin_door! over the auth kind's table (abi::auth v3). It speaks LDAP as a sans-IO codec over the host connector's stream; it opens no socket and does no TLS."
 
+[lints]
+workspace = true
+
 [dependencies]
 # The ONE busbar crate a plugin names (#40: contract only). Pinned by git rev to the busbar commit in
 # `.busbar-ref`; a busbar build that links this crate `[patch]`es the busbar git source to its own
