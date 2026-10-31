@@ -159,7 +159,7 @@ auth:
 | `ca_cert_pem` | no | — | PEM of a private CA (an AD enterprise CA) the directory's certificate chains to. Trusted on top of the public roots for `ldaps://` and STARTTLS. A value that holds no certificate is refused at boot. |
 | `start_tls` | no | `false` | Use STARTTLS over an `ldap://` connection instead of implicit LDAPS. |
 | `allow_insecure_transport` | no | `false` | Override the plaintext-transport guard. See below. |
-| `timeout_secs` | no | `10` | Connect and operation timeout, in seconds. Must be at least 1. |
+| `timeout_secs` | no | `10` | Connect and operation timeout, in seconds. Must be at least 1 and at most 120. |
 
 Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
 stray key fails loudly at boot instead of being silently ignored.
