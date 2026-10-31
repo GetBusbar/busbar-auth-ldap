@@ -588,7 +588,7 @@ fn refuse_a_literal_secret(cfg: &LdapConfig) -> Result<(), String> {
 fn parse_settings(settings: &[u8]) -> Result<LdapConfig, String> {
     if settings.trim_ascii().is_empty() {
         return Err(
-            "settings: required (url, bind_dn_template, base_dn); none provided".to_string(),
+            "settings: none provided; requires url, bind_dn_template, base_dn".to_string(),
         );
     }
     cred::settings(settings).map_err(|e: cred::SettingsError| {
