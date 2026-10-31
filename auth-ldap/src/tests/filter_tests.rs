@@ -12,6 +12,16 @@ fn ber(filter: &str) -> Vec<u8> {
     encode(filter).unwrap_or_else(|e| panic!("{filter}: {e}"))
 }
 
+/// T6: the other two ordering/approximate choices, `>=` (greaterOrEqual, 0xa5) and `~=`
+/// (approxMatch, 0xa8), beside 1.5.5's `<=` vector: an operator's `user_search_filter` may use
+/// either.
+#[test]
+fn greater_or_equal_and_approx_encode_their_own_choice() {
+    assert_eq!(ber("(a>=2)"), b"\xa5\x06\x04\x01a\x04\x012");
+    assert_eq!(ber("(a~=2)"), b"\xa8\x06\x04\x01a\x04\x012");
+    assert_eq!(ber("(a<=2)"), b"\xa6\x06\x04\x01a\x04\x012");
+}
+
 #[test]
 fn the_1_5_5_vectors_encode_byte_for_byte() {
     let vectors: [(&str, &[u8]); 16] = [
