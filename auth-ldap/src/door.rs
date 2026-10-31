@@ -450,7 +450,7 @@ fn now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
     match clock_ns(host?.connector(ticket).clock_now()) {
         Ok(ns) => Some(ns),
         Err(reason) => {
-            tracing::warn!(module = "ldap", %reason, "ldap login: no host clock reading");
+            tracing::warn!(module = "ldap", reason = "clock-failed", refusal = %reason, "ldap login: no host clock reading");
             None
         }
     }
@@ -473,7 +473,7 @@ fn drive(
             // A field submitted but not text is refused in its own words (the same verdict as a
             // field not submitted), before the wire.
             if let Some(reason) = unreadable(&fields) {
-                tracing::info!(module = "ldap", "ldap login refused: {reason}");
+                tracing::info!(module = "ldap", reason = "not-text", refusal = %reason, "ldap login refused: a submitted field is not UTF-8");
                 return Poll::Ready(Login::BadCredential);
             }
             begin(

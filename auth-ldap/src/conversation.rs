@@ -673,6 +673,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                     });
                     tracing::debug!(
                         module = "ldap",
+                        reason = "reference-skipped",
                         skipped,
                         "ldap search reference skipped (referrals are not chased)"
                     );

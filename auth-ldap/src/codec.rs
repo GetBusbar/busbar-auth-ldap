@@ -304,12 +304,13 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
             // Only text is read: a value that is not UTF-8 is dropped ALONE (the attribute keeps
             // its text values), once per attribute, never silently.
             tracing::warn!(
-                module = "ldap",
-                attribute = %name,
-                dropped,
-                kept = values.len(),
-                "ldap attribute values that are not UTF-8 were dropped"
-            );
+                           module = "ldap",
+            reason = "not-utf8-values",
+                           attribute = %name,
+                           dropped,
+                           kept = values.len(),
+                           "ldap attribute values that are not UTF-8 were dropped"
+                       );
         }
         attrs.insert(name, values);
     }
