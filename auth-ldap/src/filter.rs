@@ -28,6 +28,11 @@ const EXTENSIBLE: u8 = 0xa9;
 /// The words answered for a filter that does not parse.
 pub const PARSE_ERROR: &str = "filter parse error";
 
+/// The deepest a filter may nest (`(a=b)` is one level, `(!(a=b))` two): the parser recurses once
+/// per level, so an unbounded depth could overflow the stack (an abort, not a panic). No real
+/// search filter comes near it.
+pub const MAX_DEPTH: usize = 32;
+
 /// `filter` as BER, or [`PARSE_ERROR`].
 ///
 /// # Errors
@@ -42,36 +47,40 @@ pub fn encode(filter: &str) -> Result<Vec<u8>, &'static str> {
 type Parsed<'a> = Option<(Vec<u8>, &'a [u8])>;
 
 fn filtexpr(i: &[u8]) -> Parsed<'_> {
-    filter(i).or_else(|| item(i))
+    filter(i, 1).or_else(|| item(i))
 }
 
-fn filter(i: &[u8]) -> Parsed<'_> {
+/// A parenthesised filter at nesting level `depth` (1 = outermost).
+fn filter(i: &[u8], depth: usize) -> Parsed<'_> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
     let i = i.strip_prefix(b"(")?;
-    let (ber, i) = filtercomp(i)?;
+    let (ber, i) = filtercomp(i, depth)?;
     let i = i.strip_prefix(b")")?;
     Some((ber, i))
 }
 
-fn filtercomp(i: &[u8]) -> Parsed<'_> {
-    and_or(i, b'&', AND)
-        .or_else(|| and_or(i, b'|', OR))
-        .or_else(|| not(i))
+fn filtercomp(i: &[u8], depth: usize) -> Parsed<'_> {
+    and_or(i, b'&', AND, depth)
+        .or_else(|| and_or(i, b'|', OR, depth))
+        .or_else(|| not(i, depth))
         .or_else(|| item(i))
 }
 
-fn and_or(i: &[u8], op: u8, tag: u8) -> Parsed<'_> {
+fn and_or(i: &[u8], op: u8, tag: u8, depth: usize) -> Parsed<'_> {
     let mut i = i.strip_prefix(&[op])?;
     let mut content = Vec::new();
-    while let Some((ber, rest)) = filter(i) {
+    while let Some((ber, rest)) = filter(i, depth + 1) {
         content.extend_from_slice(&ber);
         i = rest;
     }
     Some((ber::element(tag, &content), i))
 }
 
-fn not(i: &[u8]) -> Parsed<'_> {
+fn not(i: &[u8], depth: usize) -> Parsed<'_> {
     let i = i.strip_prefix(b"!")?;
-    let (ber, i) = filter(i)?;
+    let (ber, i) = filter(i, depth + 1)?;
     Some((ber::element(NOT, &ber), i))
 }
 
