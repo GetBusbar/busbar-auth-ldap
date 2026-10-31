@@ -12,9 +12,19 @@ fn ber(filter: &str) -> Vec<u8> {
     encode(filter).unwrap_or_else(|e| panic!("{filter}: {e}"))
 }
 
+/// T6: the other two ordering/approximate choices, `>=` (greaterOrEqual, 0xa5) and `~=`
+/// (approxMatch, 0xa8), beside 1.5.5's `<=` vector: an operator's `user_search_filter` may use
+/// either.
+#[test]
+fn greater_or_equal_and_approx_encode_their_own_choice() {
+    assert_eq!(ber("(a>=2)"), b"\xa5\x06\x04\x01a\x04\x012");
+    assert_eq!(ber("(a~=2)"), b"\xa8\x06\x04\x01a\x04\x012");
+    assert_eq!(ber("(a<=2)"), b"\xa6\x06\x04\x01a\x04\x012");
+}
+
 #[test]
 fn the_1_5_5_vectors_encode_byte_for_byte() {
-    let vectors: [(&str, &[u8]); 16] = [
+    let vectors: [(&str, &[u8]); 14] = [
         ("a=v", b"\xa3\x06\x04\x01a\x04\x01v"),
         ("(a=v)", b"\xa3\x06\x04\x01a\x04\x01v"),
         ("(a<=2)", b"\xa6\x06\x04\x01a\x04\x012"),
@@ -29,8 +39,6 @@ fn the_1_5_5_vectors_encode_byte_for_byte() {
             "(&(a=v)(b=x)(!(c=y)))",
             b"\xa0\x1a\xa3\x06\x04\x01a\x04\x01v\xa3\x06\x04\x01b\x04\x01x\xa2\x08\xa3\x06\x04\x01c\x04\x01y",
         ),
-        ("(&)", b"\xa0\0"),
-        ("(|)", b"\xa1\0"),
         ("(ou:dn:=People)", b"\xa9\x0f\x82\x02ou\x83\x06People\x84\x01\xff"),
         ("(cn:2.5.13.5:=J D)", b"\xa9\x13\x81\x082.5.13.5\x82\x02cn\x83\x03J D"),
         ("(a=\u{107})", b"\xa3\x07\x04\x01a\x04\x02\xc4\x87"),
@@ -43,6 +51,10 @@ fn the_1_5_5_vectors_encode_byte_for_byte() {
 #[test]
 fn the_filters_1_5_5_refused_are_refused() {
     for filter in [
+        // RFC 4515 §3: an AND or OR holds one or more filters (1.5.5's ldap3 sent these empty).
+        "(&)",
+        "(|)",
+        "(&(|))",
         "(a=v)garbage",
         "(a=f**)",
         "(a=v\\2)",
@@ -92,4 +104,23 @@ fn an_escaped_username_is_one_equality_value() {
     crate::ber::tlv(&mut want, 0x04, b"sAMAccountName");
     crate::ber::tlv(&mut want, 0x04, hostile.as_bytes());
     assert_eq!(got, crate::ber::element(0xa3, &want));
+}
+
+/// M3: the parser's recursion is bounded: a filter nested deeper than 32 levels is refused (it
+/// would otherwise recurse once per level and, at tens of thousands, overflow the stack: an abort,
+/// not a panic), and 32 levels still parse.
+#[test]
+fn nesting_deeper_than_32_levels_is_refused() {
+    let nested = |levels: usize| {
+        format!(
+            "{}(uid=alice){}",
+            "(!".repeat(levels - 1),
+            ")".repeat(levels - 1)
+        )
+    };
+    assert!(super::encode(&nested(32)).is_ok(), "32 levels parse");
+    assert_eq!(super::encode(&nested(33)), Err(super::PARSE_ERROR));
+    let and = format!("{}(uid=alice){}", "(&".repeat(40), ")".repeat(40));
+    assert_eq!(super::encode(&and), Err(super::PARSE_ERROR));
+    assert_eq!(super::encode(&nested(200_000)), Err(super::PARSE_ERROR));
 }

@@ -40,6 +40,11 @@ pub trait Wire {
     /// Write the chip's whole message `w` (a BIND, its password sealed): `Ready(Ok(()))` once all
     /// of it is taken.
     fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>>;
+    /// The stream owner's monotonic clock now, when it offers one: read between the messages of
+    /// one entry of the op, so a directory that answers Ready without end meets its deadline.
+    fn now_ns(&mut self) -> Option<u64> {
+        None
+    }
 }
 
 /// How the connection is secured.
@@ -128,6 +133,8 @@ enum Kept {
     Connected,
     Bound(u32),
     Found(Vec<DirEntry>),
+    /// A search the directory answered with a non-zero result: its code and text.
+    Refused(u32, String),
     Unbound,
 }
 
@@ -160,6 +167,12 @@ struct Doing {
     entries: Vec<DirEntry>,
     /// How many messages this operation has read ([`MAX_MESSAGES`]).
     received: u32,
+    /// How many search references this operation skipped.
+    references: u32,
+    /// How many bytes this operation's messages took ([`OP_BYTES_CAP`]).
+    read_bytes: usize,
+    /// What remains of this operation's decode budget ([`codec::DECODE_BUDGET`]).
+    budget: usize,
 }
 
 // By hand: a `SealedWrite` has no `Debug`; only its length shows.
@@ -173,6 +186,9 @@ impl fmt::Debug for Doing {
             .field("id", &self.id)
             .field("entries", &self.entries)
             .field("received", &self.received)
+            .field("references", &self.references)
+            .field("read_bytes", &self.read_bytes)
+            .field("budget", &self.budget)
             .finish()
     }
 }
@@ -190,6 +206,10 @@ const MAX_ENTRIES_KEPT: usize = 2;
 /// directory that answers Ready forever (entries, or messages for another id) is cut off here. A
 /// group read answers one entry and a user search is refused past two; 1024 is far above any.
 const MAX_MESSAGES: u32 = 1024;
+
+/// The most bytes one operation reads from the directory in all, however many messages carry them:
+/// 16 MiB (one message alone may hold as much: [`ber::INBOUND_CAP`]).
+const OP_BYTES_CAP: usize = 16 * 1024 * 1024;
 
 /// How much one read asks for.
 const READ_CHUNK: usize = 16 * 1024;
@@ -359,13 +379,48 @@ impl<'a, W: Wire> Over<'a, W> {
         }
     }
 
-    /// The next whole message off the stream.
+    /// Whether the operation in progress is past its deadline, on the stream owner's clock now
+    /// ([`Wire::now_ns`]) or, with none, the clock this entry began on.
+    fn expired(&mut self) -> bool {
+        let Some(deadline) = self.conv.deadline_ns else {
+            return false;
+        };
+        self.wire
+            .now_ns()
+            .or(self.now_ns)
+            .is_some_and(|now| now >= deadline)
+    }
+
+    /// The next whole message off the stream. The deadline is checked before every read and every
+    /// message, so a directory that answers Ready without end still meets it; one operation reads
+    /// at most [`OP_BYTES_CAP`] and decodes within its budget.
     fn receive(&mut self) -> Result<Message, Io> {
         loop {
+            if self.expired() {
+                return self.fail(TIMEOUT);
+            }
             match ber::frame(&self.conv.inbound) {
                 Err(e) => return self.fail(e.to_string()),
                 Ok(Some(n)) => {
-                    let msg = codec::decode(&self.conv.inbound[..n]);
+                    let over = self.conv.doing.as_mut().is_some_and(|d| {
+                        d.read_bytes = d.read_bytes.saturating_add(n);
+                        d.read_bytes > OP_BYTES_CAP
+                    });
+                    if over {
+                        return self.fail(format!(
+                            "the directory sent more than {} MiB for one operation",
+                            OP_BYTES_CAP / (1024 * 1024)
+                        ));
+                    }
+                    let mut budget = self
+                        .conv
+                        .doing
+                        .as_ref()
+                        .map_or(codec::DECODE_BUDGET, |d| d.budget);
+                    let msg = codec::decode_within(&self.conv.inbound[..n], &mut budget);
+                    if let Some(d) = self.conv.doing.as_mut() {
+                        d.budget = budget;
+                    }
                     self.conv.inbound.drain(..n);
                     return match msg {
                         Ok(m) => Ok(m),
@@ -416,19 +471,31 @@ impl<'a, W: Wire> Over<'a, W> {
     }
 
     /// Begin a request operation carrying `bytes` (built with its message id).
-    fn request(&mut self, build: impl FnOnce(i32) -> Vec<u8>) -> Result<(), Io> {
+    fn request(&mut self, build: impl FnOnce(i32) -> Result<Vec<u8>, String>) -> Result<(), Io> {
+        let mut refused = None;
         self.doing(|c| {
             let id = c.next_id();
+            let out = build(id).unwrap_or_else(|e| {
+                refused = Some(e);
+                Vec::new()
+            });
             Doing {
                 stage: Stage::Send,
-                out: build(id),
+                out,
                 sealed: None,
                 sent: 0,
                 id,
                 entries: Vec::new(),
                 received: 0,
+                references: 0,
+                read_bytes: 0,
+                budget: codec::DECODE_BUDGET,
             }
-        })
+        })?;
+        match refused {
+            Some(e) => self.fail(e),
+            None => Ok(()),
+        }
     }
 }
 
@@ -457,6 +524,9 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
             id: 0,
             entries: Vec::new(),
             received: 0,
+            references: 0,
+            read_bytes: 0,
+            budget: codec::DECODE_BUDGET,
         })?;
         loop {
             match self.stage() {
@@ -501,7 +571,10 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                     Err(Some(e)) => return self.fail(e),
                     Ok(()) => break,
                 },
-                Stage::Send | Stage::Read => break,
+                // A connect never sends or reads a request of its own: a stage it never sets.
+                Stage::Send | Stage::Read => {
+                    return self.fail("internal: a connect in a request stage");
+                }
             }
         }
         self.keep(Kept::Connected);
@@ -522,6 +595,9 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                 id,
                 entries: Vec::new(),
                 received: 0,
+                references: 0,
+                read_bytes: 0,
+                budget: codec::DECODE_BUDGET,
             }
         })?;
         if self.stage() == Stage::Send {
@@ -544,18 +620,18 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
         filter: &str,
         attrs: &[&str],
     ) -> Result<Vec<DirEntry>, Io> {
-        if let Some(Kept::Found(entries)) = self.kept() {
-            return Ok(entries);
+        match self.kept() {
+            Some(Kept::Found(entries)) => return Ok(entries),
+            Some(Kept::Refused(rc, text)) => return Err(Io::Refused { rc, text }),
+            _ => {}
         }
         let scope = match scope {
             SearchScope::Base => codec::SCOPE_BASE,
             SearchScope::Subtree => codec::SCOPE_SUBTREE,
         };
-        // A filter that does not parse fails before any byte is sent.
-        if self.conv.doing.is_none() {
-            codec::search(0, base, scope, filter, attrs).map_err(|e| Io::Failed(e.to_string()))?;
-        }
-        self.request(|id| codec::search(id, base, scope, filter, attrs).unwrap_or_default())?;
+        // The request is built once, when the operation begins (a replay resumes it): a filter that
+        // does not parse fails then, before any byte is sent.
+        self.request(|id| codec::search(id, base, scope, filter, attrs).map_err(str::to_string))?;
         if self.stage() == Stage::Send {
             self.send()?;
             self.set_stage(Stage::Read);
@@ -579,11 +655,28 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                     self.keep(Kept::Found(entries.clone()));
                     return Ok(entries);
                 }
-                Reply::Done(r) => return self.fail(r.to_string()),
-                // A referral is never read as an entry: fail closed.
+                // The search's own answer: kept, so a replay answers it again without a resend.
+                Reply::Done(r) => {
+                    let text = r.to_string();
+                    self.keep(Kept::Refused(r.rc, text.clone()));
+                    return Err(Io::Refused { rc: r.rc, text });
+                }
+                // A SearchResultReference is a referral this client does not chase, and RFC 4511
+                // §4.5.3 lets such a client ignore it: never read as an entry, it is counted and
+                // skipped, and the search is decided on its entries and its SearchResultDone.
+                // (Active Directory answers every domain-root subtree search with references to
+                // its ForestDnsZones, DomainDnsZones and Configuration partitions.)
                 Reply::Reference => {
-                    return self
-                        .fail("malformed reply: a search reference (referrals are not followed)")
+                    let skipped = self.conv.doing.as_mut().map_or(0, |d| {
+                        d.references += 1;
+                        d.references
+                    });
+                    tracing::debug!(
+                        module = "ldap",
+                        reason = "reference-skipped",
+                        skipped,
+                        "ldap search reference skipped (referrals are not chased)"
+                    );
                 }
                 _ => return self.fail("malformed reply: not a search result"),
             }
@@ -594,7 +687,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
         if self.kept().is_some() {
             return Ok(());
         }
-        self.request(codec::unbind)?;
+        self.request(|id| Ok(codec::unbind(id)))?;
         self.send()?;
         self.keep(Kept::Unbound);
         Ok(())

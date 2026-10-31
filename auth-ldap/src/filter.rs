@@ -25,8 +25,24 @@ const PRESENT: u8 = 0x87;
 const APPROX: u8 = 0xa8;
 const EXTENSIBLE: u8 = 0xa9;
 
+/// SubstringFilter's CHOICE tags (RFC 4511 §4.5.1.7.2).
+const SUB_INITIAL: u8 = 0x80;
+const SUB_ANY: u8 = 0x81;
+const SUB_FINAL: u8 = 0x82;
+
+/// MatchingRuleAssertion's tags (RFC 4511 §4.5.1.7.7).
+const MRA_RULE: u8 = 0x81;
+const MRA_TYPE: u8 = 0x82;
+const MRA_VALUE: u8 = 0x83;
+const MRA_DN_ATTRIBUTES: u8 = 0x84;
+
 /// The words answered for a filter that does not parse.
 pub const PARSE_ERROR: &str = "filter parse error";
+
+/// The deepest a filter may nest (`(a=b)` is one level, `(!(a=b))` two): the parser recurses once
+/// per level, so an unbounded depth could overflow the stack (an abort, not a panic). No real
+/// search filter comes near it.
+pub const MAX_DEPTH: usize = 32;
 
 /// `filter` as BER, or [`PARSE_ERROR`].
 ///
@@ -42,36 +58,46 @@ pub fn encode(filter: &str) -> Result<Vec<u8>, &'static str> {
 type Parsed<'a> = Option<(Vec<u8>, &'a [u8])>;
 
 fn filtexpr(i: &[u8]) -> Parsed<'_> {
-    filter(i).or_else(|| item(i))
+    filter(i, 1).or_else(|| item(i))
 }
 
-fn filter(i: &[u8]) -> Parsed<'_> {
+/// A parenthesised filter at nesting level `depth` (1 = outermost).
+fn filter(i: &[u8], depth: usize) -> Parsed<'_> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
     let i = i.strip_prefix(b"(")?;
-    let (ber, i) = filtercomp(i)?;
+    let (ber, i) = filtercomp(i, depth)?;
     let i = i.strip_prefix(b")")?;
     Some((ber, i))
 }
 
-fn filtercomp(i: &[u8]) -> Parsed<'_> {
-    and_or(i, b'&', AND)
-        .or_else(|| and_or(i, b'|', OR))
-        .or_else(|| not(i))
+fn filtercomp(i: &[u8], depth: usize) -> Parsed<'_> {
+    and_or(i, b'&', AND, depth)
+        .or_else(|| and_or(i, b'|', OR, depth))
+        .or_else(|| not(i, depth))
         .or_else(|| item(i))
 }
 
-fn and_or(i: &[u8], op: u8, tag: u8) -> Parsed<'_> {
+/// An AND or OR of ONE OR MORE filters (RFC 4515 §3, `filterlist = 1*filter`): the empty `(&)` and
+/// `(|)` (RFC 4526's absolute true and false) are refused, never sent as a filter that matches
+/// everything or nothing.
+fn and_or(i: &[u8], op: u8, tag: u8, depth: usize) -> Parsed<'_> {
     let mut i = i.strip_prefix(&[op])?;
     let mut content = Vec::new();
-    while let Some((ber, rest)) = filter(i) {
+    while let Some((ber, rest)) = filter(i, depth + 1) {
         content.extend_from_slice(&ber);
         i = rest;
+    }
+    if content.is_empty() {
+        return None;
     }
     Some((ber::element(tag, &content), i))
 }
 
-fn not(i: &[u8]) -> Parsed<'_> {
+fn not(i: &[u8], depth: usize) -> Parsed<'_> {
     let i = i.strip_prefix(b"!")?;
-    let (ber, i) = filter(i)?;
+    let (ber, i) = filter(i, depth + 1)?;
     Some((ber::element(NOT, &ber), i))
 }
 
@@ -126,13 +152,17 @@ fn eq(i: &[u8]) -> Parsed<'_> {
     } else {
         let mut subs = Vec::new();
         if !initial.is_empty() {
-            ber::tlv(&mut subs, 0x80, &initial);
+            ber::tlv(&mut subs, SUB_INITIAL, &initial);
         }
         for (k, part) in mid_final.iter().enumerate() {
             if part.is_empty() {
                 break;
             }
-            ber::tlv(&mut subs, if k + 1 != n { 0x81 } else { 0x82 }, part);
+            ber::tlv(
+                &mut subs,
+                if k + 1 != n { SUB_ANY } else { SUB_FINAL },
+                part,
+            );
         }
         let mut content = Vec::new();
         ber::tlv(&mut content, ber::OCTET_STRING, attr);
@@ -175,14 +205,14 @@ fn dn_mrule(i: &[u8]) -> Parsed<'_> {
 fn extensible_tag(mrule: Option<&[u8]>, attr: Option<&[u8]>, value: &[u8], dn: bool) -> Vec<u8> {
     let mut content = Vec::new();
     if let Some(m) = mrule {
-        ber::tlv(&mut content, 0x81, m);
+        ber::tlv(&mut content, MRA_RULE, m);
     }
     if let Some(a) = attr {
-        ber::tlv(&mut content, 0x82, a);
+        ber::tlv(&mut content, MRA_TYPE, a);
     }
-    ber::tlv(&mut content, 0x83, value);
+    ber::tlv(&mut content, MRA_VALUE, value);
     if dn {
-        ber::boolean(&mut content, 0x84, true);
+        ber::boolean(&mut content, MRA_DN_ATTRIBUTES, true);
     }
     ber::element(EXTENSIBLE, &content)
 }

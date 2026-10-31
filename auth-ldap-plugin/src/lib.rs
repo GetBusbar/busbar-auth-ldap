@@ -10,6 +10,7 @@
 //! This crate is `deny`, not `forbid`: the export macro's `#[unsafe(no_mangle)]` is the one
 //! reviewed exemption (a `forbid` cannot be lifted for it). No other `unsafe` exists here.
 #![deny(unsafe_code)]
+#![deny(missing_docs)]
 
 pub use busbar_auth_ldap::*;
 

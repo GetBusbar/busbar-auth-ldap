@@ -26,6 +26,29 @@ const SEARCH_RESULT_DONE: u8 = 0x65;
 const SEARCH_RESULT_REFERENCE: u8 = 0x73;
 const EXTENDED_REQUEST: u8 = 0x77;
 const EXTENDED_RESPONSE: u8 = 0x78;
+/// ExtendedRequest's `requestName` [0] (RFC 4511 §4.12).
+const REQUEST_NAME: u8 = 0x80;
+/// ExtendedResponse's `responseName` [10] (RFC 4511 §4.12).
+const RESPONSE_NAME: u8 = 0x8a;
+
+/// The most values one attribute keeps: one past the group cap, so the module still sees (and
+/// logs) a truncation; the rest are counted, never turned into strings.
+pub const MAX_VALUES_KEPT: usize = crate::MAX_GROUP_VALUES + 1;
+
+/// What one operation's replies may decode into memory (DNs, attribute names, values): 4 MiB. A
+/// 16 MiB message of tiny values would otherwise become millions of strings.
+pub const DECODE_BUDGET: usize = 4 * 1024 * 1024;
+
+/// What each decoded string is charged on top of its bytes: its allocation's bookkeeping.
+const PER_STRING: usize = 32;
+
+/// Charge `n` decoded bytes (one string) to `budget`.
+fn charge(budget: &mut usize, n: usize) -> Result<(), BerError> {
+    *budget = budget
+        .checked_sub(n.saturating_add(PER_STRING))
+        .ok_or(BerError::OverBudget)?;
+    Ok(())
+}
 
 /// SEARCH scope `baseObject`.
 pub const SCOPE_BASE: i64 = 0;
@@ -82,7 +105,7 @@ pub fn start_tls(id: i32) -> Vec<u8> {
         id,
         &ber::element(
             EXTENDED_REQUEST,
-            &ber::element(0x80, START_TLS_OID.as_bytes()),
+            &ber::element(REQUEST_NAME, START_TLS_OID.as_bytes()),
         ),
     )
 }
@@ -147,22 +170,40 @@ pub const fn rc_name(rc: u32) -> &'static str {
     }
 }
 
+/// The most characters of the directory's own text (a matched DN, a diagnostic) a result shows.
+const SHOWN_TEXT: usize = 128;
+
+/// The directory's text `t` as a result shows it: its first [`SHOWN_TEXT`] characters (then `...`),
+/// escaped (`\n`, `\u{1b}`, ...) so no newline or control character reaches a log line raw.
+fn shown(t: &str) -> String {
+    let mut out: String = t
+        .chars()
+        .take(SHOWN_TEXT)
+        .flat_map(char::escape_debug)
+        .collect();
+    if t.chars().nth(SHOWN_TEXT).is_some() {
+        out.push_str("...");
+    }
+    out
+}
+
 impl std::fmt::Display for LdapResult {
-    /// The words for an operation that did not succeed (as `LdapError::LdapResult` words it).
+    /// The words for an operation that did not succeed (as `LdapError::LdapResult` words it), the
+    /// directory's matched DN and diagnostic escaped and capped ([`shown`]): they are far-end text.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "LDAP operation result: rc={} ({}), dn: \"{}\", text: \"{}\"",
             self.rc,
             rc_name(self.rc),
-            self.matched,
-            self.text
+            shown(&self.matched),
+            shown(&self.text)
         )
     }
 }
 
-/// A directory entry as a search answers it: its DN and its text-valued attributes. An attribute
-/// with any value that is not UTF-8 is left out of `attrs`.
+/// A directory entry as a search answers it: its DN and its text-valued attributes. A value that is
+/// not UTF-8 is left out of its attribute's values (and logged).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Entry {
     /// The entry's DN.
@@ -220,42 +261,80 @@ fn ldap_result(content: &[u8]) -> Result<(LdapResult, &[u8]), BerError> {
     ))
 }
 
-fn entry(content: &[u8]) -> Result<Entry, BerError> {
+/// An entry, decoded within `budget` ([`DECODE_BUDGET`]): every string it keeps is charged as it
+/// is made, and an attribute keeps at most [`MAX_VALUES_KEPT`] values, so what a hostile reply
+/// costs is bounded WHILE it decodes.
+fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
     let (dn, rest) = ber::expect(content, ber::OCTET_STRING, "an entry without its DN")?;
+    charge(budget, dn.len())?;
     let dn = text(dn, "an entry DN that is not UTF-8")?;
-    let (list, _) = ber::expect(rest, ber::SEQUENCE, "an entry without its attributes")?;
+    let (mut list, _) = ber::expect(rest, ber::SEQUENCE, "an entry without its attributes")?;
     let mut attrs = HashMap::new();
-    for Tlv { tag, content } in ber::items(list)? {
+    while !list.is_empty() {
+        let (Tlv { tag, content }, next) = ber::read(list)?;
+        list = next;
         if tag != ber::SEQUENCE {
             return Err(BerError::Malformed("an attribute that is not a SEQUENCE"));
         }
         let (name, rest) =
             ber::expect(content, ber::OCTET_STRING, "an attribute without its type")?;
+        charge(budget, name.len())?;
         let name = text(name, "an attribute type that is not UTF-8")?;
-        let (vals, _) = ber::expect(rest, ber::SET, "an attribute without its values")?;
+        let (mut vals, _) = ber::expect(rest, ber::SET, "an attribute without its values")?;
         let mut values = Vec::new();
-        let mut binary = false;
-        for v in ber::items(vals)? {
+        let mut dropped = 0_usize;
+        while !vals.is_empty() {
+            let (v, next) = ber::read(vals)?;
+            vals = next;
             if v.tag != ber::OCTET_STRING {
                 return Err(BerError::Malformed("a value that is not an OCTET STRING"));
             }
             match std::str::from_utf8(v.content) {
-                Ok(s) => values.push(s.to_owned()),
-                Err(_) => binary = true,
+                Ok(s) if values.len() < MAX_VALUES_KEPT => {
+                    charge(budget, s.len())?;
+                    values.push(s.to_owned());
+                }
+                // Past the cap a value is only counted: the module sees `MAX_VALUES_KEPT` and
+                // logs the truncation.
+                Ok(_) => {}
+                Err(_) => dropped += 1,
             }
         }
-        if !binary {
-            attrs.insert(name, values);
+        if dropped > 0 {
+            // Only text is read: a value that is not UTF-8 is dropped ALONE (the attribute keeps
+            // its text values), once per attribute, never silently.
+            tracing::warn!(
+                           module = "ldap",
+            reason = "not-utf8-values",
+                           attribute = %name,
+                           dropped,
+                           kept = values.len(),
+                           "ldap attribute values that are not UTF-8 were dropped"
+                       );
         }
+        attrs.insert(name, values);
     }
     Ok(Entry { dn, attrs })
 }
 
-/// Decode one whole message (exactly the bytes [`ber::frame`] measured).
+#[cfg(test)]
+/// Decode one whole message (exactly the bytes [`ber::frame`] measured), within a fresh
+/// [`DECODE_BUDGET`].
 ///
 /// # Errors
-/// Anything that is not an LDAPMessage, an overrunning nested length: [`BerError`].
+/// Anything that is not an LDAPMessage, an overrunning nested length, a budget passed:
+/// [`BerError`].
 pub fn decode(bytes: &[u8]) -> Result<Message, BerError> {
+    let mut budget = DECODE_BUDGET;
+    decode_within(bytes, &mut budget)
+}
+
+/// [`decode`], charging what it decodes to `budget`: what remains of one operation's
+/// [`DECODE_BUDGET`].
+///
+/// # Errors
+/// As [`decode`]; [`BerError::OverBudget`] once the budget is spent.
+pub fn decode_within(bytes: &[u8], budget: &mut usize) -> Result<Message, BerError> {
     let (content, rest) = ber::expect(bytes, ber::SEQUENCE, "a message that is not a SEQUENCE")?;
     if !rest.is_empty() {
         return Err(BerError::Malformed("bytes after the message"));
@@ -267,7 +346,7 @@ pub fn decode(bytes: &[u8]) -> Result<Message, BerError> {
     let (op, _) = ber::read(rest)?;
     let reply = match op.tag {
         BIND_RESPONSE => Reply::Bind(ldap_result(op.content)?.0),
-        SEARCH_RESULT_ENTRY => Reply::Entry(entry(op.content)?),
+        SEARCH_RESULT_ENTRY => Reply::Entry(entry(op.content, budget)?),
         SEARCH_RESULT_REFERENCE => Reply::Reference,
         SEARCH_RESULT_DONE => Reply::Done(ldap_result(op.content)?.0),
         EXTENDED_RESPONSE => {
@@ -275,7 +354,7 @@ pub fn decode(bytes: &[u8]) -> Result<Message, BerError> {
             let mut name = None;
             while !rest.is_empty() {
                 let (t, next) = ber::read(rest)?;
-                if t.tag == 0x8a {
+                if t.tag == RESPONSE_NAME {
                     name = Some(text(t.content, "a response name that is not UTF-8")?);
                 }
                 rest = next;
