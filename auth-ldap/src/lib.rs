@@ -319,6 +319,18 @@ fn check_settings(cfg: &LdapConfig) -> Result<(), String> {
                 "user_search_filter",
                 "must contain the `{username}` placeholder",
             );
+        } else if filter::encode(&f.replace("{username}", &groups::escape_filter("username")))
+            .is_err()
+        {
+            // A template that does not parse would fail every login as an outage: refuse it
+            // here, as it is applied (a sample username, escaped, in its place).
+            refuse(
+                "user_search_filter",
+                &format!(
+                    "is not an RFC 4515 search filter (or nests deeper than {} levels)",
+                    filter::MAX_DEPTH
+                ),
+            );
         }
         if cfg
             .bind_service_dn
