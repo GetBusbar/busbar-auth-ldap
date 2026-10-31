@@ -218,6 +218,15 @@ impl LdapModule {
         //
         // This is a `tracing` call; the SDK forwards this plugin's dispatcher into the host log
         // sink, so it reaches the operator's logs.
+        // An empty search base is a valid one (the AD Global Catalog, OpenLDAP's
+        // `olcDefaultSearchBase` serve a search from the root DSE), so it is accepted, but said.
+        if cfg.user_search_filter.is_some() && cfg.base_dn.trim().is_empty() {
+            tracing::info!(
+                module = "ldap",
+                "base_dn is empty: the search-then-bind user search runs from the root DSE \
+                 (base \"\")"
+            );
+        }
         if is_insecure_transport(&cfg.url, cfg.start_tls) {
             tracing::warn!(
                 module = "ldap",
