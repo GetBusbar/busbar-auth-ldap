@@ -35,6 +35,16 @@ fn settings_refuse_an_empty_blob() {
     }
 }
 
+/// KIND B7: no settings at all read in the fleet's one form, naming what is required.
+#[test]
+fn no_settings_read_in_the_fleet_form() {
+    let e = LdapModule::from_settings(b"").err().expect("refused");
+    assert_eq!(
+        e,
+        "settings: none provided; requires url, bind_dn_template, base_dn"
+    );
+}
+
 #[test]
 fn settings_refuse_malformed_json() {
     let e = LdapModule::from_settings(b"{ not json")
