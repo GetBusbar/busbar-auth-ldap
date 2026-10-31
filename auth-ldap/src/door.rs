@@ -154,10 +154,10 @@ const REACHED_MAX: usize = MAX_INFLIGHT as usize;
 const REACHED_TTL_NS: u64 = 10 * 60 * 1_000_000_000;
 
 /// The identities short answers reached, by ticket `(slot, generation)`, each stamped with the
-/// order it was kept in.
+/// order it was kept in and the host clock's reading then.
 #[derive(Default)]
 struct Reached {
-    map: HashMap<(u32, u32), (u64, Principal)>,
+    map: HashMap<(u32, u32), (u64, Option<u64>, Principal)>,
     next: u64,
 }
 
@@ -168,43 +168,52 @@ pub struct Ldap {
     reached: Mutex<Reached>,
 }
 
-/// Keep `p` for `key`'s re-call, at most `max` at once: at the cap the OLDEST entry goes, never
-/// the rest (an in-flight short answer awaiting its re-call must survive).
+/// Drop every kept identity older than [`REACHED_TTL_NS`] at `now_ns` (none without a clock, or for
+/// an entry kept without one: the count bound still holds them).
+fn sweep_reached(reached: &mut Reached, now_ns: Option<u64>) {
+    if let Some(now) = now_ns {
+        reached
+            .map
+            .retain(|_, (_, at, _)| at.is_none_or(|at| now.saturating_sub(at) < REACHED_TTL_NS));
+    }
+}
+
+/// Keep `p` for `key`'s re-call, at most `max` at once and for at most [`REACHED_TTL_NS`]: expired
+/// entries are swept first, then at the cap the OLDEST entry goes, never the rest (an in-flight
+/// short answer awaiting its re-call must survive).
 fn keep_reached(
     reached: &mut Reached,
     max: usize,
     key: (u32, u32),
     p: Principal,
-    _now_ns: Option<u64>,
+    now_ns: Option<u64>,
 ) {
+    sweep_reached(reached, now_ns);
     if reached.map.len() >= max && !reached.map.contains_key(&key) {
         let oldest = reached
             .map
             .iter()
-            .min_by_key(|(_, (at, _))| *at)
+            .min_by_key(|(_, (order, _, _))| *order)
             .map(|(k, _)| *k);
         if let Some(oldest) = oldest {
             reached.map.remove(&oldest);
         }
     }
     reached.next += 1;
-    reached.map.insert(key, (reached.next, p));
+    reached.map.insert(key, (reached.next, now_ns, p));
 }
 
-/// The identity a short answer kept for `key`'s re-call, taken. Nothing else is left behind for
-/// that ticket SLOT: an op on the slot under another generation proves the earlier op is over. A
-/// call on no ticket (generation `0`, never minted) proves nothing and drops nothing.
-fn take_reached(
-    reached: &mut Reached,
-    key: (u32, u32),
-    _now_ns: Option<u64>,
-) -> Option<Principal> {
+/// The identity a short answer kept for `key`'s re-call, taken, unless it expired. Nothing else is
+/// left behind for that ticket SLOT: an op on the slot under another generation proves the earlier
+/// op is over. A call on no ticket (generation `0`, never minted) proves nothing and drops nothing.
+fn take_reached(reached: &mut Reached, key: (u32, u32), now_ns: Option<u64>) -> Option<Principal> {
+    sweep_reached(reached, now_ns);
     if key.1 != 0 {
         reached
             .map
             .retain(|&(slot, generation), _| slot != key.0 || generation == key.1);
     }
-    reached.map.remove(&key).map(|(_, p)| p)
+    reached.map.remove(&key).map(|(_, _, p)| p)
 }
 
 impl Ldap {
