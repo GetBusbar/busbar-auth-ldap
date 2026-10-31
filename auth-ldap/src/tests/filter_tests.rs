@@ -24,7 +24,7 @@ fn greater_or_equal_and_approx_encode_their_own_choice() {
 
 #[test]
 fn the_1_5_5_vectors_encode_byte_for_byte() {
-    let vectors: [(&str, &[u8]); 16] = [
+    let vectors: [(&str, &[u8]); 14] = [
         ("a=v", b"\xa3\x06\x04\x01a\x04\x01v"),
         ("(a=v)", b"\xa3\x06\x04\x01a\x04\x01v"),
         ("(a<=2)", b"\xa6\x06\x04\x01a\x04\x012"),
@@ -39,8 +39,6 @@ fn the_1_5_5_vectors_encode_byte_for_byte() {
             "(&(a=v)(b=x)(!(c=y)))",
             b"\xa0\x1a\xa3\x06\x04\x01a\x04\x01v\xa3\x06\x04\x01b\x04\x01x\xa2\x08\xa3\x06\x04\x01c\x04\x01y",
         ),
-        ("(&)", b"\xa0\0"),
-        ("(|)", b"\xa1\0"),
         ("(ou:dn:=People)", b"\xa9\x0f\x82\x02ou\x83\x06People\x84\x01\xff"),
         ("(cn:2.5.13.5:=J D)", b"\xa9\x13\x81\x082.5.13.5\x82\x02cn\x83\x03J D"),
         ("(a=\u{107})", b"\xa3\x07\x04\x01a\x04\x02\xc4\x87"),
@@ -53,6 +51,10 @@ fn the_1_5_5_vectors_encode_byte_for_byte() {
 #[test]
 fn the_filters_1_5_5_refused_are_refused() {
     for filter in [
+        // RFC 4515 §3: an AND or OR holds one or more filters (1.5.5's ldap3 sent these empty).
+        "(&)",
+        "(|)",
+        "(&(|))",
         "(a=v)garbage",
         "(a=f**)",
         "(a=v\\2)",

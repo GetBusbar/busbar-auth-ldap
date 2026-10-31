@@ -25,6 +25,17 @@ const PRESENT: u8 = 0x87;
 const APPROX: u8 = 0xa8;
 const EXTENSIBLE: u8 = 0xa9;
 
+/// SubstringFilter's CHOICE tags (RFC 4511 §4.5.1.7.2).
+const SUB_INITIAL: u8 = 0x80;
+const SUB_ANY: u8 = 0x81;
+const SUB_FINAL: u8 = 0x82;
+
+/// MatchingRuleAssertion's tags (RFC 4511 §4.5.1.7.7).
+const MRA_RULE: u8 = 0x81;
+const MRA_TYPE: u8 = 0x82;
+const MRA_VALUE: u8 = 0x83;
+const MRA_DN_ATTRIBUTES: u8 = 0x84;
+
 /// The words answered for a filter that does not parse.
 pub const PARSE_ERROR: &str = "filter parse error";
 
@@ -68,12 +79,18 @@ fn filtercomp(i: &[u8], depth: usize) -> Parsed<'_> {
         .or_else(|| item(i))
 }
 
+/// An AND or OR of ONE OR MORE filters (RFC 4515 §3, `filterlist = 1*filter`): the empty `(&)` and
+/// `(|)` (RFC 4526's absolute true and false) are refused, never sent as a filter that matches
+/// everything or nothing.
 fn and_or(i: &[u8], op: u8, tag: u8, depth: usize) -> Parsed<'_> {
     let mut i = i.strip_prefix(&[op])?;
     let mut content = Vec::new();
     while let Some((ber, rest)) = filter(i, depth + 1) {
         content.extend_from_slice(&ber);
         i = rest;
+    }
+    if content.is_empty() {
+        return None;
     }
     Some((ber::element(tag, &content), i))
 }
@@ -135,13 +152,17 @@ fn eq(i: &[u8]) -> Parsed<'_> {
     } else {
         let mut subs = Vec::new();
         if !initial.is_empty() {
-            ber::tlv(&mut subs, 0x80, &initial);
+            ber::tlv(&mut subs, SUB_INITIAL, &initial);
         }
         for (k, part) in mid_final.iter().enumerate() {
             if part.is_empty() {
                 break;
             }
-            ber::tlv(&mut subs, if k + 1 != n { 0x81 } else { 0x82 }, part);
+            ber::tlv(
+                &mut subs,
+                if k + 1 != n { SUB_ANY } else { SUB_FINAL },
+                part,
+            );
         }
         let mut content = Vec::new();
         ber::tlv(&mut content, ber::OCTET_STRING, attr);
@@ -184,14 +205,14 @@ fn dn_mrule(i: &[u8]) -> Parsed<'_> {
 fn extensible_tag(mrule: Option<&[u8]>, attr: Option<&[u8]>, value: &[u8], dn: bool) -> Vec<u8> {
     let mut content = Vec::new();
     if let Some(m) = mrule {
-        ber::tlv(&mut content, 0x81, m);
+        ber::tlv(&mut content, MRA_RULE, m);
     }
     if let Some(a) = attr {
-        ber::tlv(&mut content, 0x82, a);
+        ber::tlv(&mut content, MRA_TYPE, a);
     }
-    ber::tlv(&mut content, 0x83, value);
+    ber::tlv(&mut content, MRA_VALUE, value);
     if dn {
-        ber::boolean(&mut content, 0x84, true);
+        ber::boolean(&mut content, MRA_DN_ATTRIBUTES, true);
     }
     ber::element(EXTENSIBLE, &content)
 }

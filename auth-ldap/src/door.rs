@@ -105,10 +105,17 @@ const fn stream(trust_from: AbiStr) -> Need {
 /// the operator's private CA (`ca_cert_pem`) on top of the public roots, for `ldaps://` and
 /// STARTTLS alike. A need whose `trust_from` resolves to nothing is refused at its declaration, so
 /// one need cannot serve both: an instance with no `ca_cert_pem` dials the public need.
-pub const NEEDS: &[Need] = &[
-    stream(AbiStr::ABSENT),
-    stream(abi_str("settings.ca_cert_pem")),
-];
+pub const NEEDS: &[Need] = &NEED_TABLE;
+
+/// [`NEEDS`], each placed AT its index ([`NEED`], [`NEED_ANCHORED`]), so reordering or adding a need
+/// cannot swap which logins dial the public need and which the private CA.
+const NEED_TABLE: [Need; 2] = {
+    let mut table = [stream(AbiStr::ABSENT), stream(AbiStr::ABSENT)];
+    table[NEED as usize] = stream(AbiStr::ABSENT);
+    table[NEED_ANCHORED as usize] = stream(abi_str("settings.ca_cert_pem"));
+    table
+};
+const _: () = assert!(NEED != NEED_ANCHORED, "the two needs are two indices");
 
 /// The settings keys whose values are secret references, resolved in this order into
 /// `OpenIn.secrets` (a literal value refuses boot).
@@ -139,8 +146,9 @@ const FORM: &[LoginField] = &[
     },
 ];
 
-/// The most short answers kept for their re-call at once.
-const REACHED_MAX: usize = 1024;
+/// The most short answers kept for their re-call at once: one per login the instance holds in
+/// flight (an answer is kept only for its own ticket's one re-call).
+const REACHED_MAX: usize = MAX_INFLIGHT as usize;
 
 /// The identities short answers reached, by ticket `(slot, generation)`, each stamped with the
 /// order it was kept in.
