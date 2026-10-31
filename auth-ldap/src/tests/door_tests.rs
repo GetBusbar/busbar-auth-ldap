@@ -6,8 +6,8 @@
 //! plugin crate's `tests/conformance.rs` (linked and dropped in).
 
 use super::{
-    field, keep_reached, take_reached, Ldap, Reached, Run, ALIAS, FORM, NAME, NEED, NEEDS,
-    NEED_ANCHORED, SECRET_REFS, STATEMENT, TAIL,
+    closed, field, keep_reached, take_reached, Ldap, Reached, Release, Run, ALIAS, FORM, NAME,
+    NEED, NEEDS, NEED_ANCHORED, SECRET_REFS, STATEMENT, TAIL,
 };
 use crate::LdapModule;
 use busbar_contract::abi::auth::{
@@ -326,6 +326,7 @@ fn a_parked_logins_password_is_the_chips() {
         conv: crate::conversation::Conversation::new(),
         stream: None,
         at: 0,
+        release: None,
     };
     assert_eq!(
         run.password
@@ -333,6 +334,59 @@ fn a_parked_logins_password_is_the_chips() {
             .map(crate::tests::cred_text)
             .as_deref(),
         Some("pw")
+    );
+}
+
+/// M7: a parked login holding an established stream that is given up (its op cancelled, a fresh
+/// op on its ticket, the instance closed: the SDK drops what was parked) releases the stream
+/// through the host; and a finish-path close the op's connector answered PENDING is handed to the
+/// same release rather than dropped. A close the connector answered closes it once.
+#[test]
+fn a_given_up_or_pending_close_releases_the_stream() {
+    use std::sync::{Arc, Mutex};
+    use std::task::Poll;
+    let released = Arc::new(Mutex::new(Vec::new()));
+    let module = std::sync::Arc::new(LdapModule::from_settings(MINIMAL.as_bytes()).unwrap());
+    let run = |stream: Option<u64>| {
+        let released = Arc::clone(&released);
+        Run {
+            module: Arc::clone(&module),
+            username: None,
+            password: None,
+            conv: crate::conversation::Conversation::new(),
+            stream,
+            at: 0,
+            release: Some(Release::new(move |s| released.lock().unwrap().push(s))),
+        }
+    };
+    drop(run(Some(7)));
+    assert_eq!(
+        *released.lock().unwrap(),
+        vec![7],
+        "a given-up stream is released"
+    );
+    drop(run(None));
+    assert_eq!(
+        *released.lock().unwrap(),
+        vec![7],
+        "no stream, nothing to release"
+    );
+
+    let mut pending = run(Some(9));
+    closed(&mut pending, Poll::Pending);
+    drop(pending);
+    assert_eq!(
+        *released.lock().unwrap(),
+        vec![7, 9],
+        "a pending close is handed to the release"
+    );
+    let mut done = run(Some(11));
+    closed(&mut done, Poll::Ready(Ok(())));
+    drop(done);
+    assert_eq!(
+        *released.lock().unwrap(),
+        vec![7, 9],
+        "a stream the op's close closed is not closed twice"
     );
 }
 

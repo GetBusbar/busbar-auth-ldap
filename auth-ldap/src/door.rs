@@ -260,6 +260,32 @@ struct Run {
     conv: Conversation,
     stream: Option<u64>,
     at: u32,
+    /// What closes `stream` when no entry of the op will ([`Release`]).
+    release: Option<Release>,
+}
+
+/// WHAT CLOSES A LOGIN'S STREAM WITH NO ENTRY OF ITS OP RUNNING: the host reclaims a connection
+/// only on its CLOSE.
+pub(crate) struct Release(Box<dyn Fn(u64) + Send + Sync>);
+
+impl Release {
+    /// A release that runs `close` on the stream.
+    pub(crate) fn new(close: impl Fn(u64) + Send + Sync + 'static) -> Self {
+        Self(Box::new(close))
+    }
+
+    /// The release through `host`'s connector on no ticket, as the SDK closes a parked exchange
+    /// it gives up (a close never pends); what it answers is not read.
+    fn through(host: Host) -> Self {
+        Self::new(move |stream| {
+            let _ = host.connector(Ticket::NONE).close(stream);
+        })
+    }
+}
+
+/// The finish path's close of `run`'s stream, as the op's own connector answered it.
+fn closed(run: &mut Run, _answer: Poll<Result<(), String>>) {
+    run.stream = None;
 }
 
 /// The host connector's stream as the conversation's [`Wire`], for one entry of the op: its
@@ -360,6 +386,7 @@ fn drive(
                 conv: Conversation::new(),
                 stream: None,
                 at: 0,
+                release: h.host().map(|host| Release::through(*host)),
             }
         }
     };
@@ -390,9 +417,10 @@ fn drive(
             Poll::Pending
         }
         Poll::Ready(login) => {
+            run.stream = wire.stream;
             if run.conv.opened() {
-                // Best effort: what the close answers changes nothing.
-                let _ = wire.serve(|c, s| c.close(s));
+                let answer = wire.serve(|c, s| c.close(s));
+                closed(&mut run, answer);
             }
             Poll::Ready(login)
         }
