@@ -39,6 +39,9 @@ pub enum BerError {
     Overrun,
     /// A message's length passes [`INBOUND_CAP`]: how long it said it was.
     TooLarge(u64),
+    /// What the operation's replies decode into passes the codec's per-operation budget
+    /// (`codec::DECODE_BUDGET`).
+    OverBudget,
 }
 
 impl fmt::Display for BerError {
@@ -53,6 +56,9 @@ impl fmt::Display for BerError {
                 "the directory's message of {n} bytes passes the {} MiB inbound cap",
                 INBOUND_CAP / (1024 * 1024)
             ),
+            Self::OverBudget => {
+                f.write_str("the directory's decoded values pass the 4 MiB per-operation budget")
+            }
         }
     }
 }

@@ -267,6 +267,8 @@ struct Run {
 /// replay re-issues exactly that one and the host answers its result.
 struct HostWire<'h> {
     conn: Option<Connector<'h>>,
+    /// The host and the op's ticket, for the clock read between messages ([`Wire::now_ns`]).
+    clock: Option<(&'h Host, Ticket)>,
     need: u32,
     stream: Option<u64>,
     at: u32,
@@ -321,6 +323,11 @@ impl Wire for HostWire<'_> {
     fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>> {
         self.serve(|c, s| w.poll(c, s))
     }
+
+    fn now_ns(&mut self) -> Option<u64> {
+        let (host, ticket) = self.clock?;
+        now(Some(host), ticket)
+    }
 }
 
 /// The host's monotonic clock, when it offers one.
@@ -360,6 +367,7 @@ fn drive(
     let now = now(host, ticket);
     let mut wire = HostWire {
         conn: host.map(|host| host.connector_from(ticket, run.at)),
+        clock: host.map(|host| (host, ticket)),
         need: run.module.need(),
         stream: run.stream,
         at: run.at,
