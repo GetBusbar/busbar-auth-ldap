@@ -41,7 +41,13 @@ pub fn roles_from_group_dns(group_dns: &[String], mode: RoleFrom) -> Vec<String>
             },
             RoleFrom::Dn => dn.trim().to_lowercase(),
         };
-        if !role.is_empty() && seen.insert(role.clone()) {
+        if role.is_empty() {
+            tracing::warn!(
+                module = "ldap",
+                reason = "empty-group-role",
+                "ldap group value maps to an empty role and was omitted"
+            );
+        } else if seen.insert(role.clone()) {
             out.push(role);
         }
     }
@@ -59,7 +65,7 @@ pub(crate) fn first_cn(dn: &str) -> Option<String> {
                 continue;
             };
             if attr.trim().eq_ignore_ascii_case("cn") {
-                return Some(unescape_rdn_value(val.trim()));
+                return unescape_rdn_value(trim_rdn_value(val));
             }
         }
     }
@@ -94,13 +100,26 @@ fn split_unescaped(dn: &str, sep: char) -> Vec<String> {
     parts
 }
 
+fn trim_rdn_value(value: &str) -> &str {
+    let mut value = value.trim_start();
+    while value.ends_with(' ') {
+        let before = &value[..value.len() - 1];
+        let slashes = before.bytes().rev().take_while(|&b| b == b'\\').count();
+        if slashes % 2 == 1 {
+            break;
+        }
+        value = before;
+    }
+    value
+}
+
 /// Unescape the DN-value escapes that survive [`split_unescaped`], per RFC 4514:
 ///   - the single-char escape `\c` (e.g. `\,` `\=` `\+` `\\` `\"`) yields the literal char `c`, and
 ///   - the hex-pair escape `\XX` yields the raw byte `0xXX`.
 ///
 /// Consecutive `\XX` bytes are buffered and decoded together as UTF-8, so a multi-byte character
 /// encoded as several hex escapes (e.g. `\C3\A9` → `é`) round-trips correctly.
-fn unescape_rdn_value(v: &str) -> String {
+fn unescape_rdn_value(v: &str) -> Option<String> {
     let bytes = v.as_bytes();
     let mut out = String::with_capacity(v.len());
     // Buffer of hex-escaped raw bytes awaiting a UTF-8 decode; flushed before any literal text.
@@ -108,7 +127,7 @@ fn unescape_rdn_value(v: &str) -> String {
     macro_rules! flush {
         () => {
             if !pending.is_empty() {
-                out.push_str(&String::from_utf8_lossy(&pending));
+                out.push_str(std::str::from_utf8(&pending).ok()?);
                 pending.clear();
             }
         };
@@ -144,7 +163,7 @@ fn unescape_rdn_value(v: &str) -> String {
         }
     }
     flush!();
-    out
+    Some(out)
 }
 
 /// Validate a username destined for a BIND-DN TEMPLATE. A DN component cannot safely contain the DN

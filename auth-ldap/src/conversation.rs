@@ -85,7 +85,7 @@ impl Endpoint {
         } else if scheme.eq_ignore_ascii_case("ldaps") {
             (true, 636)
         } else {
-            return Err(format!("unknown LDAP URL scheme: {scheme}"));
+            return Err("unknown LDAP URL scheme (expected ldap or ldaps)".to_string());
         };
         let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
         let hostport = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
@@ -105,9 +105,11 @@ impl Endpoint {
         }
         let port = match port {
             None | Some("") => default_port,
-            Some(p) => p
+            Some(p) if p.bytes().all(|b| b.is_ascii_digit()) => p
                 .parse::<u16>()
-                .map_err(|_| "url parse error: invalid port number".to_string())?,
+                .ok()
+                .ok_or_else(|| "url parse error: invalid port number".to_string())?,
+            Some(_) => return Err("url parse error: invalid port number".to_string()),
         };
         let target = if host.contains(':') {
             format!("[{host}]:{port}")
@@ -325,7 +327,8 @@ impl<'a, W: Wire> Over<'a, W> {
     fn doing(&mut self, start: impl FnOnce(&mut Conversation) -> Doing) -> Result<(), Io> {
         let wait = self.timeout_secs.saturating_mul(1_000_000_000);
         if self.conv.doing.is_none() {
-            let d = start(&mut *self.conv);
+            let mut d = start(&mut *self.conv);
+            d.read_bytes = self.conv.inbound.len();
             self.conv.doing = Some(d);
             self.conv.deadline_ns = self.now_ns.map(|n| n.saturating_add(wait));
         } else if let Some(now) = self.now_ns {
@@ -348,6 +351,10 @@ impl<'a, W: Wire> Over<'a, W> {
     fn set_stage(&mut self, s: Stage) {
         if let Some(d) = self.conv.doing.as_mut() {
             d.stage = s;
+            if matches!(s, Stage::Read | Stage::ReadStartTls) {
+                // A completed write no longer lends these password-bearing bytes to the host.
+                d.sealed = None;
+            }
         }
     }
 
@@ -402,16 +409,6 @@ impl<'a, W: Wire> Over<'a, W> {
             match ber::frame(&self.conv.inbound) {
                 Err(e) => return self.fail(e.to_string()),
                 Ok(Some(n)) => {
-                    let over = self.conv.doing.as_mut().is_some_and(|d| {
-                        d.read_bytes = d.read_bytes.saturating_add(n);
-                        d.read_bytes > OP_BYTES_CAP
-                    });
-                    if over {
-                        return self.fail(format!(
-                            "the directory sent more than {} MiB for one operation",
-                            OP_BYTES_CAP / (1024 * 1024)
-                        ));
-                    }
                     let mut budget = self
                         .conv
                         .doing
@@ -435,6 +432,16 @@ impl<'a, W: Wire> Over<'a, W> {
                 Poll::Ready(Ok(0)) => return self.fail("the directory closed the connection"),
                 Poll::Ready(Ok(n)) => {
                     let n = n.min(self.conv.buf.len());
+                    let over = self.conv.doing.as_mut().is_some_and(|d| {
+                        d.read_bytes = d.read_bytes.saturating_add(n);
+                        d.read_bytes > OP_BYTES_CAP
+                    });
+                    if over {
+                        return self.fail(format!(
+                            "the directory sent more than {} MiB for one operation",
+                            OP_BYTES_CAP / (1024 * 1024)
+                        ));
+                    }
                     let (inbound, buf) = (&mut self.conv.inbound, &self.conv.buf);
                     inbound.extend_from_slice(&buf[..n]);
                 }

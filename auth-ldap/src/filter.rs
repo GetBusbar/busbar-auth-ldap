@@ -179,8 +179,8 @@ fn extensible(i: &[u8]) -> Parsed<'_> {
 fn attr_dn_mrule(i: &[u8]) -> Parsed<'_> {
     let (attr, i) = attributedescription(i)?;
     let (dn, i) = match i.strip_prefix(b":dn") {
-        Some(r) => (true, r),
-        None => (false, i),
+        Some(r) if r.starts_with(b":") => (true, r),
+        _ => (false, i),
     };
     let (mrule, i) = match i.strip_prefix(b":").and_then(attributetype) {
         Some((m, r)) => (Some(m), r),
@@ -193,8 +193,8 @@ fn attr_dn_mrule(i: &[u8]) -> Parsed<'_> {
 
 fn dn_mrule(i: &[u8]) -> Parsed<'_> {
     let (dn, i) = match i.strip_prefix(b":dn") {
-        Some(r) => (true, r),
-        None => (false, i),
+        Some(r) if r.starts_with(b":") => (true, r),
+        _ => (false, i),
     };
     let (mrule, i) = attributetype(i.strip_prefix(b":")?)?;
     let i = i.strip_prefix(b":=")?;
@@ -275,13 +275,14 @@ fn number(i: &[u8]) -> Option<usize> {
 
 fn numericoid(i: &[u8]) -> Option<(&[u8], &[u8])> {
     let mut used = number(i)?;
+    let first = used;
     while i.get(used) == Some(&b'.') {
         match number(&i[used + 1..]) {
             Some(n) => used += 1 + n,
             None => break,
         }
     }
-    Some(i.split_at(used))
+    (used > first).then(|| i.split_at(used))
 }
 
 fn descr(i: &[u8]) -> Option<(&[u8], &[u8])> {

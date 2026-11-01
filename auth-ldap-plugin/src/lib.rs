@@ -4,7 +4,7 @@
 //! The **AD/LDAP auth module as a droppable busbar plugin**: the logic crate re-exported whole, and
 //! its door (`busbar_auth_ldap::door::door`, a `plugin_door!` over the auth kind's table) exported
 //! as this image's ONE symbol, `busbar_plugin_door` (`export_door!`) behind the `dropped-in` feature. A build that
-//! links the module names `busbar_auth_ldap::door::door` from the logic crate, which exports
+//! links the module names `busbar_auth_ldap::compiled_in::door` from the logic crate, which exports
 //! nothing.
 //!
 //! This crate is `deny`, not `forbid`: the export macro's `#[unsafe(no_mangle)]` is the one

@@ -12,7 +12,7 @@
 //!   states the login family alone (`CAP_LOGIN`, as busbar-auth-github's) and `verify` answers
 //!   REFUSED, never called;
 //! * `begin_login` answers the credential form (`username` text, `password` password), `'static`;
-//! * `complete_login` BINDs the submitted credential over the host connector's stream on the ONE
+//! * `complete_login` BINDs the submitted credential over the host connector's stream on the selected
 //!   declared need ([`NEEDS`]) and writes the principal into the host's identity buffer:
 //!   `LOGIN_IDENTITY`, `LOGIN_BAD_CREDENTIAL`, or `LOGIN_OUTAGE` when the directory could not
 //!   answer. While a stream service pends it answers PENDING, its [`Conversation`] parked on the
@@ -350,31 +350,32 @@ impl Release {
     }
 
     /// The release through `host`'s connector on no ticket, as the SDK closes a parked exchange
-    /// it gives up (a close never pends); what it answers is not read.
+    /// it gives up (a close never pends); a host refusal is logged.
     fn through(host: Host) -> Self {
-        Self::new(move |stream| {
-            let _ = host.connector(Ticket::NONE).close(stream);
-        })
+        Self::new(
+            move |stream| match host.connector(Ticket::NONE).close(stream) {
+                Poll::Ready(Ok(())) => {}
+                Poll::Ready(Err(error)) => tracing::warn!(
+                    module = "ldap", reason = "close-failed", refusal = %error,
+                    "ldap stream release failed"
+                ),
+                Poll::Pending => tracing::warn!(
+                    module = "ldap",
+                    reason = "close-pended",
+                    "ldap stream release pended although no-ticket close must finish"
+                ),
+            },
+        )
     }
 }
 
-/// A parked login given up before it closed its stream (its op cancelled, a fresh op on its
-/// ticket, the instance closed: the SDK drops what was parked), or one whose finish-path close
-/// pended, releases the stream here. A stream the op's own close closed is `None` by now.
+/// Release the stream on completion or cancellation before any conversation buffers are dropped.
+/// No-ticket CLOSE cannot collide with a service still pending on the login ticket.
 impl Drop for Run {
     fn drop(&mut self) {
         if let (Some(stream), Some(release)) = (self.stream.take(), self.release.as_ref()) {
             (release.0)(stream);
         }
-    }
-}
-
-/// The finish path's close of `run`'s stream, as the op's own connector answered it: answered,
-/// the stream is closed; PENDING, it stays for [`Release`] when the run drops (the op is over, so
-/// no wake will re-drive it).
-fn closed(run: &mut Run, answer: Poll<Result<(), String>>) {
-    if answer.is_ready() {
-        run.stream = None;
     }
 }
 
@@ -514,10 +515,8 @@ fn drive(
         }
         Poll::Ready(login) => {
             run.stream = wire.stream;
-            if run.conv.opened() {
-                let answer = wire.serve(|c, s| c.close(s));
-                closed(&mut run, answer);
-            }
+            // The final service may still be pending at run.at. CLOSE must never replay that
+            // handle. Drop runs the host's no-ticket release before Conversation's buffers drop.
             Poll::Ready(login)
         }
     }
@@ -542,10 +541,11 @@ impl SafeSlot for CompleteLogin {
         let ldap = h.life();
         let ticket = instance.ticket();
         let key = (ticket.slot, ticket.generation);
+        let now_ns = now(h.host(), ticket);
         let kept = take_reached(
             &mut ldap.reached.lock().unwrap_or_else(PoisonError::into_inner),
             key,
-            now(h.host(), ticket),
+            now_ns,
         );
         let login = match kept {
             Some(p) => Login::Identity(p),
@@ -567,12 +567,13 @@ impl SafeSlot for CompleteLogin {
                 let answer = login_identity(&p, input.out_buf(), &mut out);
                 // `0` is never a minted generation: a ticket-less call gets no re-call.
                 if answer == Outcome::Failed && ticket.generation != 0 {
+                    let now_ns = now(h.host(), ticket);
                     keep_reached(
                         &mut ldap.reached.lock().unwrap_or_else(PoisonError::into_inner),
                         REACHED_MAX,
                         key,
                         p,
-                        now(h.host(), ticket),
+                        now_ns,
                     );
                 }
                 answer

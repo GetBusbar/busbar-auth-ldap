@@ -549,7 +549,7 @@ fn the_signed_differences_fail_closed_as_an_outage() {
 
 /// SIGNED DIFFERENCE 1, the URL half: a hostless URL never dials (1.5.5 panicked). It is refused
 /// at boot, `validate` included, as a `settings.url` line (it was an outage on every login); an
-/// unknown scheme reads in 1.5.5's words.
+/// unknown scheme is refused without echoing the configured value.
 #[test]
 fn a_hostless_url_is_refused_before_any_dial() {
     for url in [
@@ -570,7 +570,7 @@ fn a_hostless_url_is_refused_before_any_dial() {
     }
     assert_eq!(
         Endpoint::parse("ldapi://%2fvar%2frun", false),
-        Err("unknown LDAP URL scheme: ldapi".to_string())
+        Err("unknown LDAP URL scheme (expected ldap or ldaps)".to_string())
     );
     assert_eq!(
         Endpoint::parse("ldap://", false),

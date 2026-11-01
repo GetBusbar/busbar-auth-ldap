@@ -1,7 +1,7 @@
 <!-- fleet:header:begin (rendered by `busbar-release plugin heal` from GetBusbar/busbar-release template/ and busbar's plugins.yaml; edit it there) -->
 # busbar-auth-ldap
 
-The AD/LDAP auth module as a droppable busbar plugin: a cdylib exporting the auth C ABI. Drop it in the plugins folder, define it once under identity-providers.<name> (module: ldap, settings: url, bind_dn_template, base_dn, group_attr) and reference that name from auth.chain.
+The AD/LDAP auth module as a droppable busbar plugin: a cdylib exporting the auth C ABI. Drop it in the plugins folder and define it under identity-providers.<name> with module: ldap, browser_login: {}, and directory settings. The hosted login issues keys for the data-plane auth chain.
 
 | kind | alias | crate | busbar | license |
 |---|---|---|---|---|
@@ -33,21 +33,23 @@ same door, on the auth kind's table (`abi::auth` v3). Its declares file
 (`auth-ldap/declares.json`) states only its network need (`tcp`).
 
 It is a **separate plugin from `busbar-auth-oidc`**, and takes a
-different shape: OIDC is a redirect flow where the core executes the
-token-exchange HTTP hop, while LDAP is a direct credential flow where the
+different shape: OIDC uses a redirect and token exchange, while LDAP is
+a direct credential flow where the
 plugin speaks the directory's wire protocol itself, as a sans-IO codec
 over a byte stream the host connector owns. The plugin opens no socket
 and does no TLS.
 
 ## Config
 
-Configured like any other busbar auth method — an entry under
-`identity-providers:` referenced by name from `auth.chain`:
+Configure an entry under `identity-providers:` with `browser_login: {}`
+to enable its hosted credential form. The issued key authenticates through
+`keys` in `auth.chain`:
 
 ```yaml
 identity-providers:
   corp-ldap:                 # the NAME is the instance; `module:` is the plugin behind it
     module: ldap
+    browser_login: {}
     settings:
       url: "ldaps://ad.corp.example:636"
       bind_dn_template: "cn={username},cn=users,dc=corp,dc=example"
@@ -58,7 +60,7 @@ identity-providers:
       role_from: cn
 
 auth:
-  chain: [keys, corp-ldap]   # built-ins (`keys`, `admin-tokens`) are referenced bare
+  chain: [keys]
 ```
 
 Group-to-role mapping is keyed by that same provider name:
@@ -116,8 +118,13 @@ directory answers are which). Every log line carries `module=ldap` and a
 | `no-match`, `ambiguous`, `empty-dn` | info | the search-then-bind user search found no single entry |
 | `invalid-credentials`, `bind-refused` | info | the directory refused the user bind (49, or another non-outage code) |
 | `no-clock`, `clock-failed`, `directory-error` | warn | an outage: no host clock, or the directory could not answer |
-| `no-entry`, `group-read-refused`, `no-group-attribute`, `range-truncated`, `groups-capped`, `not-utf8-values` | warn | the login stands with fewer (or no) roles |
+| `no-entry`, `group-read-refused`, `no-group-attribute`, `range-truncated`, `groups-capped`, `not-utf8-values`, `empty-group-role` | warn | the login stands with fewer (or no) roles |
+| `close-failed`, `close-pended` | warn | the host did not complete the synchronous stream release |
+| `reference-skipped` | debug | a search referral was ignored; referrals are not chased |
 | `root-dse-base` (info), `insecure-transport` (warn) | | logged at boot |
+
+`groups-capped` reports `count_at_least`: decoding keeps one value past
+its existing limit to detect truncation without allocating the remaining values.
 
 ### Limitations
 
@@ -210,7 +217,7 @@ the version CI uses. busbar is a pinned git dependency (see
 [Dependencies](#dependencies) below).
 
 ```sh
-cargo build --release      # cdylib: target/release/libbusbar_auth_ldap_plugin.{so,dylib}
+cargo build --release -p busbar-auth-ldap-plugin --features dropped-in  # cdylib: target/release/libbusbar_auth_ldap_plugin.{so,dylib}
 cargo test                 # unit tests + the end-to-end loader test
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all -- --check
@@ -242,10 +249,10 @@ in busbar for the full reference. In short:
 ```sh
 BUSBAR_SIGN_KEY=<signing key> busbar-plugin-pack pack \
     --lib target/release/libbusbar_auth_ldap_plugin.so \
-    --name busbar-auth-ldap-plugin --alias ldap --kind auth \
+    --name busbar-auth-ldap --alias ldap --kind auth \
     --version 1.6.0 --publisher busbar \
     --license Apache-2.0 \
-    --out busbar-auth-ldap-plugin-1.6.0-x86_64-linux.tar.gz
+    --out busbar-auth-ldap-1.6.0-x86_64-linux.tar.gz
 ```
 
 `--version` is the crates' version (`version` in `auth-ldap/Cargo.toml`,
@@ -295,9 +302,9 @@ unset they skip loudly, and under CI (`CI` set) they fail instead.
    (text) and `password` (password) — which the core renders and POSTs
    back to `/auth/token`.
 3. `complete_login` reads those values back out of the submitted fields,
-   keyed by the field names the plugin declared; the password rides a
-   secret blob and is exposed only for the bind.
-4. The plugin asks the host connector for a stream on its one declared
+   keyed by the field names the plugin declared; the password is held by the
+   credential chip, which seals the BIND message and wipes it after the write.
+4. The plugin asks the host connector for a stream on its selected declared
    need (outbound, a raw `tcp` stream, egress class
    `operator-infrastructure`), secured by the connector for `ldaps://` or
    after the StartTLS extended operation for `start_tls`, and BINDs with
@@ -330,10 +337,10 @@ OAuth client, so `LdapConfig` has no such field and
 
 This repo is a same-repo, 2-crate Cargo workspace, mirroring `auth-oidc`:
 `auth-ldap/` (the `busbar-auth-ldap` library — the real LDAP BIND,
-group-read and role-mapping logic, and its door, `door::door`) and
+group-read and role-mapping logic, and its door, `compiled_in::door`) and
 `auth-ldap-plugin/` (the `busbar-auth-ldap-plugin` cdylib, which only
 exports that door with `export_door!`). A custom build links the
-library crate and registers `door::door` as a compiled-in row.
+library crate and registers `compiled_in::door` as a compiled-in row.
 
 LDAP work is done by the plugin's own sans-IO codec (`ber.rs`,
 `filter.rs`, `codec.rs`: the requests 1.5.5's `ldap3` client wrote, byte
@@ -358,7 +365,8 @@ Two directory shapes are supported:
 
 A crafted username cannot inject DN components or filter syntax: on the
 DN template path a username carrying a DN special character (`,` `=` `+`
-`<` `>` `;` `\` `"`, or a control character) is rejected, and on the
+`<` `>` `;` `\` `"`, or a control character), a leading or trailing space,
+or a leading `#` is rejected, and on the
 search filter path the username is RFC 4515-escaped.
 
 ## License

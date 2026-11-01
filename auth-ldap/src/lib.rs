@@ -121,7 +121,8 @@ pub struct LdapConfig {
     /// search-then-bind (bind as `bind_service_dn`, find the user, bind as the found DN) instead.
     pub bind_dn_template: String,
 
-    /// The search base for the group read (and for search-then-bind user lookup). e.g.
+    /// The search base for the search-then-bind user lookup. Groups are read on the user's DN.
+    /// For example,
     /// `dc=corp,dc=example`.
     pub base_dn: String,
 
@@ -278,7 +279,7 @@ impl LdapModule {
     /// `password` as a BIND carries it: an `ldaps://` URL, or STARTTLS, lets it go out only on a
     /// connection the host connector reports secured ([`Cred::secure_required`]).
     fn guarded(&self, password: &Cred) -> Cred {
-        let password = password.clone().secure_for(&self.cfg.url);
+        let password = password.clone().secure_for(self.cfg.url.trim());
         if self.cfg.start_tls {
             password.require_secure()
         } else {
@@ -662,7 +663,7 @@ pub(crate) const fn is_outage(rc: u32) -> bool {
 /// Why a bind attempt did not yield an identity.
 #[derive(Debug)]
 enum BindError {
-    /// The directory rejected the username/password (LDAP result 49 or a failed search).
+    /// The directory rejected the username/password (LDAP result 49 or a no-match/ambiguous search).
     InvalidCredentials,
     /// The user bind answered a non-zero result code other than 49 that is not a server/session
     /// condition ([`is_outage`]): the credential is refused, and the code is logged.
@@ -905,7 +906,7 @@ impl LdapModule {
         // insufficientAccessRights (an ACL hiding the user's own entry from them) is the same as
         // a read that returns no entry: the login stands with no roles, never silently. Every
         // other failure is an outage.
-        let mut refused = false;
+        let mut refused = None;
         let entries = match ldap.search(
             &user_dn,
             SearchScope::Base,
@@ -915,26 +916,29 @@ impl LdapModule {
             Err(Io::Refused { rc, .. })
                 if rc == LDAP_NO_SUCH_OBJECT || rc == LDAP_INSUFFICIENT_ACCESS =>
             {
-                tracing::warn!(
-                                   module = "ldap",
-                reason = "group-read-refused",
-                                   rc,
-                                   result = codec::rc_name(rc),
-                                   group_attr = %self.cfg.group_attr,
-                                   "ldap group read refused for the bound user (an ACL may hide the entry); \
-                                    the login carries no roles"
-                               );
-                refused = true;
+                refused = Some(rc);
                 Vec::new()
             }
             read => read.map_err(at("group read"))?,
         };
 
+        if ldap.unbind() == Err(Io::Pending) {
+            return Err(BindError::Pending);
+        }
+
+        if let Some(rc) = refused {
+            tracing::warn!(
+                module = "ldap", reason = "group-read-refused", rc,
+                result = codec::rc_name(rc), group_attr = %self.cfg.group_attr,
+                "ldap group read refused for the bound user (an ACL may hide the entry); the login carries no roles"
+            );
+        }
+
         let mut group_dns: Vec<String> = Vec::new();
         // The principal is the entry's DN as the directory returns it (its objectName), falling
         // back to the DN bound as when the read answered no entry ([`principal_id`]).
         let mut entry_dn: Option<String> = None;
-        if entries.is_empty() && !refused {
+        if entries.is_empty() && refused.is_none() {
             // The bound user's own entry read back as nothing: an ACL hides it from the user, so
             // the groups were never read. The login stands with no roles, never silently.
             tracing::warn!(
@@ -954,54 +958,45 @@ impl LdapModule {
             // The description is matched on its attribute TYPE, ignoring options: Active Directory
             // answers an attribute past its MaxValRange as `memberOf;range=0-1499`.
             let want = attribute_type(&self.cfg.group_attr);
-            let vals = entry
+            let mut attributes: Vec<_> = entry
                 .attrs
-                .iter()
-                .find(|(k, _)| attribute_type(k).eq_ignore_ascii_case(want));
-            if let Some((description, _)) = vals {
-                if let Some(range) = partial_range(description) {
-                    // Fail-safe: the values returned are read (fewer roles than the user holds);
-                    // paging the rest (`;range=1500-*`) is not done.
-                    tracing::warn!(
-                                           module = "ldap",
-                    reason = "range-truncated",
-                                           attribute = %description,
-                                           range = %range,
-                                           "ldap group attribute truncated by the directory's MaxValRange; only the \
-                                            returned values are mapped to roles"
-                                       );
-                }
-            }
-            if vals.is_none() {
-                // A misnamed `group_attr` would otherwise be a silent no-roles login for every
-                // user (a directory omits an attribute with no values, so a user in no group also
-                // lands here).
+                .into_iter()
+                .filter(|(description, _)| attribute_type(description).eq_ignore_ascii_case(want))
+                .collect();
+            attributes.sort_by(|(a, _), (b, _)| a.cmp(b));
+            if attributes.is_empty() {
                 tracing::warn!(
-                                   module = "ldap",
-                reason = "no-group-attribute",
-                                   group_attr = %self.cfg.group_attr,
-                                   "ldap group attribute is absent from the bound user's entry; the login \
-                                    carries no roles"
-                               );
+                    module = "ldap",
+                    reason = "no-group-attribute",
+                    group_attr = %self.cfg.group_attr,
+                    "ldap group attribute is absent from the bound user's entry; the login carries no roles"
+                );
             }
-            if let Some((_, vals)) = vals {
-                // Cap the number of group values collected so a hostile/huge memberOf cannot exhaust
-                // memory (see MAX_GROUP_VALUES). Log when truncating so an operator can spot it.
-                if vals.len() > MAX_GROUP_VALUES {
+            let count = attributes
+                .iter()
+                .map(|(_, values)| values.len())
+                .sum::<usize>();
+            if count > MAX_GROUP_VALUES {
+                tracing::warn!(
+                    module = "ldap",
+                    reason = "groups-capped",
+                    count_at_least = count,
+                    cap = MAX_GROUP_VALUES,
+                    "memberOf exceeded cap; truncating group values"
+                );
+            }
+            for (description, values) in attributes {
+                if let Some(range) = partial_range(&description) {
                     tracing::warn!(
                         module = "ldap",
-                        reason = "groups-capped",
-                        count = vals.len(),
-                        cap = MAX_GROUP_VALUES,
-                        "memberOf exceeded cap; truncating group values"
+                        reason = "range-truncated",
+                        attribute = %codec::shown(&description),
+                        range = %codec::shown(range),
+                        "ldap group attribute truncated by the directory's MaxValRange; only the returned values are mapped to roles"
                     );
                 }
-                group_dns.extend(vals.iter().take(MAX_GROUP_VALUES).cloned());
+                group_dns.extend(values.into_iter().take(MAX_GROUP_VALUES - group_dns.len()));
             }
-        }
-
-        if ldap.unbind() == Err(Io::Pending) {
-            return Err(BindError::Pending);
         }
 
         let roles = groups::roles_from_group_dns(&group_dns, self.cfg.role_from);

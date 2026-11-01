@@ -32,7 +32,7 @@ const REQUEST_NAME: u8 = 0x80;
 const RESPONSE_NAME: u8 = 0x8a;
 
 /// The most values one attribute keeps: one past the group cap, so the module still sees (and
-/// logs) a truncation; the rest are counted, never turned into strings.
+/// logs) a truncation; the rest are skipped, never turned into strings.
 pub const MAX_VALUES_KEPT: usize = crate::MAX_GROUP_VALUES + 1;
 
 /// What one operation's replies may decode into memory (DNs, attribute names, values): 4 MiB. A
@@ -175,7 +175,7 @@ const SHOWN_TEXT: usize = 128;
 
 /// The directory's text `t` as a result shows it: its first [`SHOWN_TEXT`] characters (then `...`),
 /// escaped (`\n`, `\u{1b}`, ...) so no newline or control character reaches a log line raw.
-fn shown(t: &str) -> String {
+pub(crate) fn shown(t: &str) -> String {
     let mut out: String = t
         .chars()
         .take(SHOWN_TEXT)
@@ -242,20 +242,47 @@ fn text(bytes: &[u8], what: &'static str) -> Result<String, BerError> {
     String::from_utf8(bytes.to_vec()).map_err(|_| BerError::Malformed(what))
 }
 
+fn lossy_text(bytes: &[u8], budget: &mut usize) -> Result<String, BerError> {
+    let mut remaining = bytes;
+    let mut len = 0;
+    loop {
+        match std::str::from_utf8(remaining) {
+            Ok(valid) => {
+                len += valid.len();
+                break;
+            }
+            Err(error) => {
+                len += error.valid_up_to() + '\u{fffd}'.len_utf8();
+                match error.error_len() {
+                    Some(n) => remaining = &remaining[error.valid_up_to() + n..],
+                    None => break,
+                }
+            }
+        }
+    }
+    charge(budget, len)?;
+    Ok(String::from_utf8_lossy(bytes).into_owned())
+}
+
 /// An LDAPResult's three leading components, and what follows them.
-fn ldap_result(content: &[u8]) -> Result<(LdapResult, &[u8]), BerError> {
+fn ldap_result<'a>(
+    content: &'a [u8],
+    budget: &mut usize,
+) -> Result<(LdapResult, &'a [u8]), BerError> {
     let (code, rest) = ber::expect(content, ber::ENUMERATED, "a result without its code")?;
     let rc = u32::try_from(ber::int_value(code)?)
         .map_err(|_| BerError::Malformed("a negative result code"))?;
     let (matched, rest) = ber::expect(rest, ber::OCTET_STRING, "a result without its matched DN")?;
     let (diag, rest) = ber::expect(rest, ber::OCTET_STRING, "a result without its diagnostic")?;
+    let matched = lossy_text(matched, budget)?;
+    let diag = lossy_text(diag, budget)?;
     Ok((
         LdapResult {
             rc,
             // Diagnostic and matched DN are LDAPStrings; a server that breaks UTF-8 in them still
             // answered its code, so they read lossily.
-            matched: String::from_utf8_lossy(matched).into_owned(),
-            text: String::from_utf8_lossy(diag).into_owned(),
+            matched,
+            text: diag,
         },
         rest,
     ))
@@ -269,7 +296,7 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
     charge(budget, dn.len())?;
     let dn = text(dn, "an entry DN that is not UTF-8")?;
     let (mut list, _) = ber::expect(rest, ber::SEQUENCE, "an entry without its attributes")?;
-    let mut attrs = HashMap::new();
+    let mut attrs: HashMap<String, Vec<String>> = HashMap::new();
     while !list.is_empty() {
         let (Tlv { tag, content }, next) = ber::read(list)?;
         list = next;
@@ -281,7 +308,7 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
         charge(budget, name.len())?;
         let name = text(name, "an attribute type that is not UTF-8")?;
         let (mut vals, _) = ber::expect(rest, ber::SET, "an attribute without its values")?;
-        let mut values = Vec::new();
+        let values = attrs.entry(name.clone()).or_default();
         let mut dropped = 0_usize;
         while !vals.is_empty() {
             let (v, next) = ber::read(vals)?;
@@ -294,7 +321,7 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
                     charge(budget, s.len())?;
                     values.push(s.to_owned());
                 }
-                // Past the cap a value is only counted: the module sees `MAX_VALUES_KEPT` and
+                // Past the cap a value is skipped: the module sees `MAX_VALUES_KEPT` and
                 // logs the truncation.
                 Ok(_) => {}
                 Err(_) => dropped += 1,
@@ -306,13 +333,12 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
             tracing::warn!(
                            module = "ldap",
             reason = "not-utf8-values",
-                           attribute = %name,
+                           attribute = %shown(&name),
                            dropped,
                            kept = values.len(),
                            "ldap attribute values that are not UTF-8 were dropped"
                        );
         }
-        attrs.insert(name, values);
     }
     Ok(Entry { dn, attrs })
 }
@@ -342,19 +368,23 @@ pub fn decode_within(bytes: &[u8], budget: &mut usize) -> Result<Message, BerErr
     let (id, rest) = ber::expect(content, ber::INTEGER, "a message without its id")?;
     let id = i32::try_from(ber::int_value(id)?)
         .map_err(|_| BerError::Malformed("a message id out of range"))?;
+    if id < 0 {
+        return Err(BerError::Malformed("a negative message id"));
+    }
     // What follows the op (response controls) is not read.
     let (op, _) = ber::read(rest)?;
     let reply = match op.tag {
-        BIND_RESPONSE => Reply::Bind(ldap_result(op.content)?.0),
+        BIND_RESPONSE => Reply::Bind(ldap_result(op.content, budget)?.0),
         SEARCH_RESULT_ENTRY => Reply::Entry(entry(op.content, budget)?),
         SEARCH_RESULT_REFERENCE => Reply::Reference,
-        SEARCH_RESULT_DONE => Reply::Done(ldap_result(op.content)?.0),
+        SEARCH_RESULT_DONE => Reply::Done(ldap_result(op.content, budget)?.0),
         EXTENDED_RESPONSE => {
-            let (result, mut rest) = ldap_result(op.content)?;
+            let (result, mut rest) = ldap_result(op.content, budget)?;
             let mut name = None;
             while !rest.is_empty() {
                 let (t, next) = ber::read(rest)?;
                 if t.tag == RESPONSE_NAME {
+                    charge(budget, t.content.len())?;
                     name = Some(text(t.content, "a response name that is not UTF-8")?);
                 }
                 rest = next;
