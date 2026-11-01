@@ -750,9 +750,9 @@ fn ldaps_with_a_private_ca_verifies() {
 
     let public = boot(&so_path, &ldaps, "");
     let refused = form_login(&client, &public.base, "alice", ALICE_PW);
-    assert!(
-        !refused.status().is_success(),
-        "no ca_cert_pem: the private CA is untrusted and no key is minted: {}",
-        refused.status()
+    assert_eq!(
+        refused.status().as_u16(),
+        503,
+        "no ca_cert_pem: TLS verification fails as an IdP outage"
     );
 }

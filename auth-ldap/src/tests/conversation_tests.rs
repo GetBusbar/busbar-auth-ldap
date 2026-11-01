@@ -1187,3 +1187,96 @@ fn the_deadline_is_checked_between_messages() {
         wire.sent
     );
 }
+
+#[test]
+fn a_sent_bind_drops_its_sealed_message_while_waiting_for_the_reply() {
+    let m = module("ldap://127.0.0.1", serde_json::json!({}));
+    let mut conv = Conversation::new();
+    let mut dir = Directory::new(Vec::new()).held();
+    assert!(m
+        .login_text(&mut conv, &mut dir, Some("alice"), Some("pw"), Some(0))
+        .is_pending());
+    assert_eq!(dir.written, chip_bind(1, ALICE, "pw"));
+    let doing = conv.doing.as_ref().expect("waiting for the bind reply");
+    assert_eq!(doing.stage, super::Stage::Read);
+    assert!(
+        doing.sealed.is_none(),
+        "the sent password-bearing message was wiped"
+    );
+}
+
+#[test]
+fn an_incomplete_reply_is_charged_as_its_bytes_arrive() {
+    let mut bytes = vec![0x30, 0x83, 0x0f, 0xff, 0xff];
+    bytes.extend_from_slice(&[0; 32]);
+    let mut dir = Directory::new(vec![bytes.clone()]).held();
+    let mut conv = Conversation::new();
+    let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, Some(0), 10);
+    over.request(|_| Ok(Vec::new())).unwrap();
+    // A prefix of this same operation has already consumed almost all its allowance.
+    over.conv.doing.as_mut().unwrap().read_bytes = super::OP_BYTES_CAP - bytes.len() + 1;
+    let result = over.receive();
+    assert!(
+        matches!(result, Err(crate::Io::Failed(ref e)) if e.contains("more than 16 MiB")),
+        "{result:?}"
+    );
+    assert!(
+        over.conv.inbound.is_empty(),
+        "over-budget bytes were never buffered"
+    );
+}
+
+#[test]
+fn every_group_description_contributes_in_stable_order() {
+    let m = module("ldap://127.0.0.1", serde_json::json!({}));
+    let mut attrs = Vec::new();
+    for (name, value) in [
+        ("memberOf;range=0-1", "CN=b"),
+        ("memberOf", "CN=a"),
+        ("MEMBEROF", "CN=c"),
+    ] {
+        let mut attr = Vec::new();
+        ber::tlv(&mut attr, ber::OCTET_STRING, name.as_bytes());
+        ber::tlv(
+            &mut attr,
+            ber::SET,
+            &ber::element(ber::OCTET_STRING, value.as_bytes()),
+        );
+        ber::tlv(&mut attrs, ber::SEQUENCE, &attr);
+    }
+    let mut content = Vec::new();
+    ber::tlv(&mut content, ber::OCTET_STRING, ALICE.as_bytes());
+    ber::tlv(&mut content, ber::SEQUENCE, &attrs);
+    let mut dir = Directory::new(vec![
+        bind_response(1, 0),
+        message(2, ber::element(0x64, &content)),
+        done(2, 0),
+    ])
+    .pending();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let (got, _) = tracing::subscriber::with_default(cap.clone(), || login(&m, &mut dir, "pw"));
+    let Login::Identity(p) = got else {
+        panic!("{got:?}")
+    };
+    assert_eq!(p.roles, ["c", "a", "b"]);
+    assert_eq!(cap.count("range-truncated"), 1, "{:?}", cap.messages());
+}
+
+#[test]
+fn a_group_read_refusal_warns_once_after_a_pending_unbind() {
+    let m = module("ldap://127.0.0.1", serde_json::json!({}));
+    let mut dir = Directory::new(vec![bind_response(1, 0), done(2, 50)]).pending();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let (answer, _) = tracing::subscriber::with_default(cap.clone(), || login(&m, &mut dir, "pw"));
+    assert!(matches!(answer, Login::Identity(ref p) if p.roles.is_empty()));
+    assert_eq!(cap.count("group-read-refused"), 1, "{:?}", cap.messages());
+}
+
+#[test]
+fn ldap_endpoints_refuse_signed_ports() {
+    assert!(Endpoint::parse("ldap://host:+389", false).is_err());
+    assert_eq!(
+        Endpoint::parse("ldap://host:389", false).unwrap().target,
+        "host:389"
+    );
+}

@@ -705,3 +705,313 @@ mod private_ca {
         }
     }
 }
+
+mod reached_clock_callbacks {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+    use std::sync::mpsc::{self, Sender};
+    use std::time::Duration;
+
+    use busbar_contract::abi::auth::{CompleteLoginIn, IdentifyOut, Ops};
+    use busbar_contract::abi::host::service::{ClockNowIn, ClockReading};
+    use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
+    use busbar_contract::abi::mechanism::lifecycle::{OpenIn, OpenOut};
+    use busbar_contract::abi::mechanism::ticket::Ticket;
+    use busbar_contract::abi::sdk::life::Held;
+    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use busbar_contract::abi::sdk::test_support::reply;
+    use busbar_contract::abi::sdk::test_support::test_in::TestIn;
+    use busbar_contract::abi::sdk::test_support::{zeroed, DoorView};
+    use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
+
+    thread_local! {
+        static PROBE: RefCell<Option<Sender<Sender<bool>>>> = const { RefCell::new(None) };
+        static SAMPLES: RefCell<Vec<bool>> = const { RefCell::new(Vec::new()) };
+        static RETAINED: Cell<bool> = const { Cell::new(false) };
+    }
+
+    struct Clock;
+    impl FakeService for Clock {
+        type In = ClockNowIn;
+        fn serve(call: &mut ServiceCall<ClockNowIn>) -> Outcome {
+            let unlocked = PROBE.with(|probe| {
+                let probe = probe.borrow();
+                probe
+                    .as_ref()
+                    .and_then(|ask| {
+                        let (reply, result) = mpsc::channel();
+                        ask.send(reply).ok()?;
+                        result.recv_timeout(Duration::from_secs(2)).ok()
+                    })
+                    .unwrap_or(false)
+            });
+            SAMPLES.with(|samples| samples.borrow_mut().push(unlocked));
+            call.put(
+                |i| &i.reading,
+                ClockReading {
+                    size: std::mem::size_of::<ClockReading>() as u32,
+                    _reserved: 0,
+                    wall_ns: 42,
+                    mono_ns: 42,
+                },
+            );
+            Outcome::Ready
+        }
+    }
+
+    struct Armed;
+    impl Drop for Armed {
+        fn drop(&mut self) {
+            PROBE.with(|probe| probe.borrow_mut().take());
+        }
+    }
+
+    struct ObserveComplete;
+    impl SafeSlot for ObserveComplete {
+        type In = CompleteLoginIn;
+        type Out = IdentifyOut;
+        type State = Held<Ldap>;
+        fn call(
+            instance: Instance<'_, Held<Ldap>>,
+            input: Lent<'_, CompleteLoginIn>,
+            out: Out<'_, IdentifyOut>,
+        ) -> Outcome {
+            let held = instance.get().expect("the opened LDAP state");
+            let ticket = instance.ticket();
+            let key = (ticket.slot, ticket.generation);
+            keep_reached(
+                &mut held.life().reached.lock().unwrap(),
+                super::super::REACHED_MAX,
+                key,
+                who("cached-alice"),
+                Some(42),
+            );
+            std::thread::scope(|scope| {
+                let (ask, requests) = mpsc::channel::<Sender<bool>>();
+                scope.spawn(move || {
+                    while let Ok(reply) = requests.recv() {
+                        // This never waits on the plugin's lock, even on the buggy path. The clock
+                        // callback receives a false observation and the real call can finish.
+                        let unlocked = held.life().reached.try_lock().is_ok();
+                        let _ = reply.send(unlocked);
+                    }
+                });
+                PROBE.with(|probe| *probe.borrow_mut() = Some(ask));
+                let armed = Armed;
+                let answer = crate::door::CompleteLogin::call(instance, input, out);
+                drop(armed);
+                RETAINED.with(|retained| {
+                    retained.set(held.life().reached.try_lock().ok().is_some_and(|reached| {
+                        reached
+                            .map
+                            .get(&key)
+                            .is_some_and(|(_, _, p)| p.id == "cached-alice")
+                    }))
+                });
+                answer
+            })
+        }
+    }
+
+    mod fixture {
+        busbar_contract::plugin_door! {
+            ops: busbar_contract::abi::auth::Ops,
+            statement: crate::door::STATEMENT,
+            lifecycle: life(crate::door::Ldap),
+            kind_ops: {
+                complete_login: busbar_contract::abi::sdk::Safe<super::ObserveComplete>,
+            },
+        }
+    }
+
+    #[test]
+    fn both_reached_cache_clock_callbacks_run_without_the_reached_lock() {
+        SAMPLES.with(|samples| samples.borrow_mut().clear());
+        RETAINED.with(|retained| retained.set(false));
+        let view = DoorView::of(fixture::MACRO_DOOR);
+        let host = FakeHost::new().serve(fake::host::CLOCK_NOW, Clock);
+        let open = host.lend_in(TestIn::<OpenIn>::new().settings(MINIMAL.as_bytes()));
+        let mut opened = reply::call_hosted_in(
+            view.op::<Ops>(|ops| &ops.head.open).unwrap(),
+            None,
+            &open,
+            zeroed::<OpenOut>(),
+        );
+        assert_eq!(opened.outcome, Outcome::Ready);
+        let instance = opened.take_instance().expect("the LDAP instance");
+        let input = TestIn::<CompleteLoginIn>::new().set(
+            |i| &i.head.ticket,
+            Ticket {
+                slot: 3,
+                generation: 1,
+            },
+        );
+        let answer = reply::call_in(
+            view.op::<Ops>(|ops| &ops.complete_login).unwrap(),
+            Some(&instance),
+            &input,
+            zeroed::<IdentifyOut>(),
+        );
+        let closed = reply::close_in(
+            view.op::<Ops>(|ops| &ops.head.close).unwrap(),
+            instance,
+            &TestIn::<InHead>::new(),
+            zeroed::<OutHead>(),
+        );
+        assert_eq!(closed.outcome, Outcome::Ready);
+        assert_eq!(
+            answer.outcome,
+            Outcome::Failed,
+            "the empty identity buffer requires a re-call"
+        );
+        assert!(answer.out.needed_bytes > 0, "the real identity writer ran");
+        assert!(
+            RETAINED.with(Cell::get),
+            "the short-answer identity was retained for its re-call"
+        );
+        assert_eq!(
+            SAMPLES.with(|samples| samples.borrow().clone()),
+            [true, true],
+            "the take and keep clock callbacks both observed the reached map unlocked"
+        );
+    }
+}
+
+mod timeout_stream_release {
+    use busbar_contract::abi::auth::{CompleteLoginIn, IdentifyOut, Ops, LOGIN_OUTAGE};
+    use busbar_contract::abi::host::conn::connector::{EstablishIn, IoIn, StreamIn};
+    use busbar_contract::abi::host::service::{ClockNowIn, ClockReading};
+    use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
+    use busbar_contract::abi::mechanism::lifecycle::{OpenIn, OpenOut};
+    use busbar_contract::abi::mechanism::ticket::Ticket;
+    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use busbar_contract::abi::sdk::test_support::{reply, test_in::TestIn, zeroed, DoorView};
+    use std::cell::{Cell, RefCell};
+
+    thread_local! {
+        static NOW: Cell<u64> = const { Cell::new(0) };
+        static CLOSES: RefCell<Vec<(u64, Ticket)>> = const { RefCell::new(Vec::new()) };
+        static READS: Cell<u32> = const { Cell::new(0) };
+    }
+    struct Clock;
+    impl FakeService for Clock {
+        type In = ClockNowIn;
+        fn serve(call: &mut ServiceCall<ClockNowIn>) -> Outcome {
+            call.put(
+                |i| &i.reading,
+                ClockReading {
+                    size: std::mem::size_of::<ClockReading>() as u32,
+                    _reserved: 0,
+                    wall_ns: 0,
+                    mono_ns: NOW.with(Cell::get),
+                },
+            );
+            Outcome::Ready
+        }
+    }
+    struct Establish;
+    impl FakeService for Establish {
+        type In = EstablishIn;
+        fn serve(call: &mut ServiceCall<EstablishIn>) -> Outcome {
+            call.set_value(71);
+            Outcome::Ready
+        }
+    }
+    struct Write;
+    impl FakeService for Write {
+        type In = IoIn;
+        fn serve(call: &mut ServiceCall<IoIn>) -> Outcome {
+            call.set_len(call.input().len as u64);
+            Outcome::Ready
+        }
+    }
+    struct Read;
+    impl FakeService for Read {
+        type In = IoIn;
+        fn serve(_: &mut ServiceCall<IoIn>) -> Outcome {
+            READS.with(|reads| reads.set(reads.get() + 1));
+            Outcome::Pending
+        }
+    }
+    struct Close;
+    impl FakeService for Close {
+        type In = StreamIn;
+        fn serve(call: &mut ServiceCall<StreamIn>) -> Outcome {
+            CLOSES.with(|closes| {
+                closes
+                    .borrow_mut()
+                    .push((call.input().stream, call.input().head.handle.ticket))
+            });
+            // A ticketed CLOSE can collide with the outstanding READ. Model that refusal;
+            // the no-ticket release is the host contract's synchronous retirement route.
+            if call.input().head.handle.ticket != Ticket::NONE {
+                Outcome::Failed
+            } else {
+                Outcome::Ready
+            }
+        }
+    }
+    #[test]
+    fn a_timed_out_pending_read_releases_the_stream_without_replaying_its_handle() {
+        NOW.with(|now| now.set(0));
+        READS.with(|reads| reads.set(0));
+        CLOSES.with(|closes| closes.borrow_mut().clear());
+        let host = FakeHost::new()
+            .serve(fake::host::CLOCK_NOW, Clock)
+            .serve(fake::conn::ESTABLISH, Establish)
+            .serve(fake::conn::WRITE, Write)
+            .serve(fake::conn::READ, Read)
+            .serve(fake::conn::CLOSE, Close);
+        let view = DoorView::of(crate::door::MACRO_DOOR);
+        let settings = br#"{"url":"ldap://127.0.0.1","bind_dn_template":"uid={username},dc=x","base_dn":"dc=x","timeout_secs":1}"#;
+        let open = host.lend_in(TestIn::<OpenIn>::new().settings(settings));
+        let mut opened = reply::call_hosted_in(
+            view.op::<Ops>(|ops| &ops.head.open).unwrap(),
+            None,
+            &open,
+            zeroed::<OpenOut>(),
+        );
+        assert_eq!(opened.outcome, Outcome::Ready);
+        let instance = opened.take_instance().unwrap();
+        let input = TestIn::<CompleteLoginIn>::new()
+            .set(
+                |i| &i.head.ticket,
+                Ticket {
+                    slot: 2,
+                    generation: 1,
+                },
+            )
+            .fields(
+                |i| &i.submitted,
+                |i| &i.submitted_len,
+                &[
+                    (b"username".as_slice(), b"alice".as_slice()),
+                    (b"password".as_slice(), b"pw".as_slice()),
+                ],
+            );
+        let op = view.op::<Ops>(|ops| &ops.complete_login).unwrap();
+        let first = reply::call_in(op, Some(&instance), &input, zeroed::<IdentifyOut>());
+        NOW.with(|now| now.set(1_000_000_000));
+        let timed_out = reply::call_in(op, Some(&instance), &input, zeroed::<IdentifyOut>());
+        let closed = reply::close_in(
+            view.op::<Ops>(|ops| &ops.head.close).unwrap(),
+            instance,
+            &TestIn::<InHead>::new(),
+            zeroed::<OutHead>(),
+        );
+        assert_eq!(closed.outcome, Outcome::Ready);
+        assert_eq!(first.outcome, Outcome::Pending);
+        assert_eq!(timed_out.outcome, Outcome::Ready);
+        assert_eq!(timed_out.out.verdict, LOGIN_OUTAGE);
+        assert_eq!(
+            READS.with(Cell::get),
+            1,
+            "timeout never reissues the abandoned read"
+        );
+        assert_eq!(
+            CLOSES.with(|closes| closes.borrow().clone()),
+            [(71, Ticket::NONE)],
+            "one synchronous stream release, independent of the pending service handle"
+        );
+    }
+}

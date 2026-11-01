@@ -532,6 +532,7 @@ fn filter_escaping_neutralizes_metachars() {
     assert_eq!(escape_filter("a(b)c"), "a\\28b\\29c");
     assert_eq!(escape_filter("a\\b"), "a\\5cb");
     assert_eq!(escape_filter("plain"), "plain");
+    assert_eq!(escape_filter("a\0b"), "a\\00b");
 }
 
 #[test]
@@ -1058,7 +1059,7 @@ fn a_ranged_group_attribute_is_read_and_its_truncation_warned() {
     };
     let (roles, cap) = read("memberOf;range=0-1499");
     assert_eq!(roles, vec!["engineers".to_string()]);
-    assert!(cap.contains("range=0-1499"), "{:?}", cap.messages());
+    assert!(cap.contains(" range=0-1499"), "{:?}", cap.messages());
     assert!(cap.contains("truncated"), "{:?}", cap.messages());
     let (roles, cap) = read("memberOf;range=0-*");
     assert_eq!(roles, vec!["engineers".to_string()]);
@@ -1205,8 +1206,14 @@ fn group_values_are_capped() {
         group_attr: "memberOf".to_string(),
         ..Default::default()
     };
-    let p = m.bind_and_identify_on(&mut fake, "alice", "pw").unwrap();
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let p = tracing::subscriber::with_default(cap.clone(), || {
+        m.bind_and_identify_on(&mut fake, "alice", "pw")
+    })
+    .unwrap();
     assert_eq!(p.roles.len(), 4096, "group values must be capped at 4096");
+    assert!(cap.contains("reason=groups-capped"), "{:?}", cap.messages());
+    assert!(cap.contains("cap=4096"), "{:?}", cap.messages());
 }
 
 // ── every Directory→Reject branch actually rejects ───────────────────────────────────────────────
@@ -1757,4 +1764,47 @@ fn the_service_password_is_held_by_the_chip() {
     let m = LdapModule::new(search_cfg()).unwrap();
     let pw = m.cfg.bind_service_password.as_ref().expect("set");
     assert_eq!(cred_text(pw), "svc-secret");
+}
+
+#[test]
+fn a_padded_ldaps_url_still_requires_a_secure_password_write() {
+    let mut cfg = base_cfg();
+    cfg.url = "  ldaps://ad.corp.example:636  ".into();
+    let module = LdapModule::new(cfg).unwrap();
+    assert!(module.guarded(&cred("pw")).secure_required());
+}
+
+#[test]
+fn unknown_url_schemes_do_not_echo_settings_values() {
+    let mut cfg = base_cfg();
+    cfg.url = "hunter2://ad.corp.example".into();
+    let refusal = LdapModule::new(cfg).err().expect("invalid scheme");
+    assert!(refusal.contains("settings.url:"));
+    assert!(!refusal.contains("hunter2"), "{refusal}");
+}
+
+#[test]
+fn escaped_trailing_spaces_in_group_names_are_preserved() {
+    assert_eq!(first_cn(r"CN=Ops\ ,OU=Groups").as_deref(), Some("Ops "));
+    assert_eq!(first_cn(r"CN=Ops\20,OU=Groups").as_deref(), Some("Ops "));
+    assert_eq!(first_cn(r"CN=Ops\\ ,OU=Groups").as_deref(), Some("Ops\\"));
+}
+
+#[test]
+fn distinct_invalid_group_name_bytes_do_not_merge_into_one_role() {
+    let roles = crate::groups::roles_from_group_dns(
+        &[r"CN=ops\FF,OU=Groups".into(), r"CN=ops\FE,OU=Groups".into()],
+        RoleFrom::Cn,
+    );
+    assert_eq!(roles, [r"CN=ops\FF,OU=Groups", r"CN=ops\FE,OU=Groups"]);
+}
+
+#[test]
+fn a_group_value_mapping_to_an_empty_role_is_named() {
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let roles = tracing::subscriber::with_default(cap.clone(), || {
+        crate::groups::roles_from_group_dns(&["CN=,OU=Groups".into()], RoleFrom::Cn)
+    });
+    assert!(roles.is_empty());
+    assert_eq!(cap.count("empty-group-role"), 1, "{:?}", cap.messages());
 }

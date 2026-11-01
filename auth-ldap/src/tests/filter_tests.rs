@@ -124,3 +124,24 @@ fn nesting_deeper_than_32_levels_is_refused() {
     assert_eq!(super::encode(&and), Err(super::PARSE_ERROR));
     assert_eq!(super::encode(&nested(200_000)), Err(super::PARSE_ERROR));
 }
+
+#[test]
+fn a_matching_rule_starting_with_dn_is_not_the_dn_flag() {
+    let encoded = super::encode("(cn:dnMatch:=value)").expect("valid matching rule");
+    let mut content = Vec::new();
+    crate::ber::tlv(&mut content, 0x81, b"dnMatch");
+    crate::ber::tlv(&mut content, 0x82, b"cn");
+    crate::ber::tlv(&mut content, 0x83, b"value");
+    assert_eq!(encoded, crate::ber::element(0xa9, &content));
+    let no_attr = super::encode("(:dnMatch:=value)").expect("rule without attribute");
+    let mut content = Vec::new();
+    crate::ber::tlv(&mut content, 0x81, b"dnMatch");
+    crate::ber::tlv(&mut content, 0x83, b"value");
+    assert_eq!(no_attr, crate::ber::element(0xa9, &content));
+}
+
+#[test]
+fn a_numeric_oid_has_at_least_two_components() {
+    assert_eq!(encode("(1=value)"), Err(PARSE_ERROR));
+    assert!(encode("(1.2=value)").is_ok());
+}

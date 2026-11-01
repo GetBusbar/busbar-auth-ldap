@@ -430,3 +430,108 @@ fn a_results_far_end_text_is_escaped_and_capped() {
         "LDAP operation result: rc=32 (noSuchObject), dn: \"dc=x\", text: \"no such entry\""
     );
 }
+
+#[test]
+fn directory_result_strings_and_response_names_share_the_decode_budget() {
+    let bind = msg(1, &tlv(0x61, &result(0, b"dn", b"diagnostic")));
+    let mut budget = 2 * super::PER_STRING + 2 + 10;
+    assert!(super::decode_within(&bind, &mut budget).is_ok());
+    assert_eq!(budget, 0);
+    let mut short = 2 * super::PER_STRING + 2 + 9;
+    assert_eq!(
+        super::decode_within(&bind, &mut short),
+        Err(BerError::OverBudget)
+    );
+
+    let extended = msg(
+        1,
+        &tlv(0x78, &[result(0, b"", b""), tlv(0x8a, b"name")].concat()),
+    );
+    let mut short = 3 * super::PER_STRING + 3;
+    assert_eq!(
+        super::decode_within(&extended, &mut short),
+        Err(BerError::OverBudget)
+    );
+    // Lossy UTF-8 expands each invalid byte into a three-byte replacement character.
+    let lossy = msg(1, &tlv(0x61, &result(0, b"\xff", b"")));
+    let mut budget = 2 * super::PER_STRING + 3;
+    assert!(super::decode_within(&lossy, &mut budget).is_ok());
+    assert_eq!(budget, 0);
+}
+
+#[test]
+fn repeated_attribute_descriptions_preserve_all_values() {
+    let attr = |value: &[u8]| {
+        tlv(
+            0x30,
+            &[tlv(0x04, b"memberOf"), tlv(0x31, &tlv(0x04, value))].concat(),
+        )
+    };
+    let attrs = [attr(b"CN=a"), attr(b"CN=b")].concat();
+    let message = msg(
+        1,
+        &tlv(0x64, &[tlv(0x04, b"uid=a"), tlv(0x30, &attrs)].concat()),
+    );
+    let Reply::Entry(entry) = decode(&message).unwrap().reply else {
+        panic!("entry")
+    };
+    assert_eq!(entry.attrs["memberOf"], ["CN=a", "CN=b"]);
+}
+
+#[test]
+fn a_directory_attribute_cannot_inject_a_warning_line() {
+    let name = b"memberOf\n\x1b[31m";
+    let attr = tlv(
+        0x30,
+        &[tlv(0x04, name), tlv(0x31, &tlv(0x04, b"\xff"))].concat(),
+    );
+    let message = msg(
+        1,
+        &tlv(0x64, &[tlv(0x04, b"uid=a"), tlv(0x30, &attr)].concat()),
+    );
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    tracing::subscriber::with_default(cap.clone(), || decode(&message)).unwrap();
+    assert!(cap.contains("\\n"), "{:?}", cap.messages());
+    assert!(!cap
+        .messages()
+        .iter()
+        .any(|line| line.contains('\n') || line.contains('\u{1b}')));
+}
+
+#[test]
+fn a_user_search_entry_with_no_requested_attributes_decodes() {
+    let message = msg(
+        1,
+        &tlv(0x64, &[tlv(0x04, b"cn=a"), tlv(0x30, &[])].concat()),
+    );
+    let Reply::Entry(entry) = decode(&message).unwrap().reply else {
+        panic!("entry")
+    };
+    assert_eq!(entry.dn, "cn=a");
+    assert!(entry.attrs.is_empty());
+}
+
+#[test]
+fn definite_nonminimal_ber_lengths_still_decode() {
+    let message = [
+        vec![0x30, 0x84, 0, 0, 0, 14],
+        vec![
+            0x02, 0x81, 1, 1, 0x61, 0x81, 7, 0x0a, 1, 0, 0x04, 0, 0x04, 0,
+        ],
+    ]
+    .concat();
+    assert_eq!(ber::frame(&message), Ok(Some(message.len())));
+    assert!(matches!(
+        decode(&message),
+        Ok(Message {
+            id: 1,
+            reply: Reply::Bind(LdapResult { rc: 0, .. })
+        })
+    ));
+}
+
+#[test]
+fn a_negative_message_id_is_malformed() {
+    let message = msg(0xff, &tlv(0x61, &result(0, b"", b"")));
+    assert!(matches!(decode(&message), Err(BerError::Malformed(_))));
+}
