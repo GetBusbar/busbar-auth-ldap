@@ -1059,7 +1059,7 @@ fn a_ranged_group_attribute_is_read_and_its_truncation_warned() {
     };
     let (roles, cap) = read("memberOf;range=0-1499");
     assert_eq!(roles, vec!["engineers".to_string()]);
-    assert!(cap.contains(" range=0-1499"), "{:?}", cap.messages());
+    assert!(cap.contains(" range=range=0-1499"), "{:?}", cap.messages());
     assert!(cap.contains("truncated"), "{:?}", cap.messages());
     let (roles, cap) = read("memberOf;range=0-*");
     assert_eq!(roles, vec!["engineers".to_string()]);

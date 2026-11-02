@@ -691,10 +691,10 @@ mod reached_clock_callbacks {
     use std::sync::mpsc::{self, Sender};
     use std::time::Duration;
 
-    use busbar_contract::abi::auth::{CompleteLoginIn, IdentifyOut, Ops};
+    use busbar_contract::abi::auth::{slot as auth_slot, CompleteLoginIn, IdentifyOut, Ops};
     use busbar_contract::abi::host::service::{ClockNowIn, ClockReading};
     use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
-    use busbar_contract::abi::mechanism::lifecycle::{OpenIn, OpenOut};
+    use busbar_contract::abi::mechanism::lifecycle::{slot as life_slot, OpenIn, OpenOut};
     use busbar_contract::abi::mechanism::ticket::Ticket;
     use busbar_contract::abi::sdk::life::Held;
     use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
@@ -809,7 +809,11 @@ mod reached_clock_callbacks {
         RETAINED.with(|retained| retained.set(false));
         let view = DoorView::of(fixture::MACRO_DOOR);
         let host = FakeHost::new().serve(fake::host::CLOCK_NOW, Clock);
-        let open = host.lend_in(TestIn::<OpenIn>::new().settings(MINIMAL.as_bytes()));
+        let open = host.lend_in(
+            TestIn::<OpenIn>::new()
+                .set(|i| &i.head.op, life_slot::OPEN)
+                .settings(MINIMAL.as_bytes()),
+        );
         let mut opened = reply::call_hosted_in(
             view.op::<Ops>(|ops| &ops.head.open).unwrap(),
             None,
@@ -818,13 +822,15 @@ mod reached_clock_callbacks {
         );
         assert_eq!(opened.outcome, Outcome::Ready);
         let instance = opened.take_instance().expect("the LDAP instance");
-        let input = TestIn::<CompleteLoginIn>::new().set(
-            |i| &i.head.ticket,
-            Ticket {
-                slot: 3,
-                generation: 1,
-            },
-        );
+        let input = TestIn::<CompleteLoginIn>::new()
+            .set(|i| &i.head.op, auth_slot::COMPLETE_LOGIN)
+            .set(
+                |i| &i.head.ticket,
+                Ticket {
+                    slot: 3,
+                    generation: 1,
+                },
+            );
         let answer = reply::call_in(
             view.op::<Ops>(|ops| &ops.complete_login).unwrap(),
             Some(&instance),
@@ -834,7 +840,7 @@ mod reached_clock_callbacks {
         let closed = reply::close_in(
             view.op::<Ops>(|ops| &ops.head.close).unwrap(),
             instance,
-            &TestIn::<InHead>::new(),
+            &TestIn::<InHead>::new().set(|i| &i.op, life_slot::CLOSE),
             zeroed::<OutHead>(),
         );
         assert_eq!(closed.outcome, Outcome::Ready);
@@ -857,13 +863,15 @@ mod reached_clock_callbacks {
 }
 
 mod timeout_stream_release {
-    use busbar_contract::abi::auth::{CompleteLoginIn, IdentifyOut, NamedValue, Ops, LOGIN_OUTAGE};
+    use busbar_contract::abi::auth::{
+        slot as auth_slot, CompleteLoginIn, IdentifyOut, NamedValue, Ops, LOGIN_OUTAGE,
+    };
     use busbar_contract::abi::host::conn::connector::{EstablishIn, IoIn, StreamIn};
     use busbar_contract::abi::host::service::{ClockNowIn, ClockReading};
     use busbar_contract::abi::mechanism::call::{
         AbiStr, Blob, InHead, OutHead, Outcome, BLOB_SECRET,
     };
-    use busbar_contract::abi::mechanism::lifecycle::{OpenIn, OpenOut};
+    use busbar_contract::abi::mechanism::lifecycle::{slot as life_slot, OpenIn, OpenOut};
     use busbar_contract::abi::mechanism::ticket::Ticket;
     use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
     use busbar_test_kit::test_support::{reply, test_in::TestIn, zeroed, DoorView};
@@ -945,7 +953,11 @@ mod timeout_stream_release {
             .serve(fake::conn::CLOSE, Close);
         let view = DoorView::of(crate::door::MACRO_DOOR);
         let settings = br#"{"url":"ldap://127.0.0.1","bind_dn_template":"uid={username},dc=x","base_dn":"dc=x","timeout_secs":1}"#;
-        let open = host.lend_in(TestIn::<OpenIn>::new().settings(settings));
+        let open = host.lend_in(
+            TestIn::<OpenIn>::new()
+                .set(|i| &i.head.op, life_slot::OPEN)
+                .settings(settings),
+        );
         let mut opened = reply::call_hosted_in(
             view.op::<Ops>(|ops| &ops.head.open).unwrap(),
             None,
@@ -965,6 +977,7 @@ mod timeout_stream_release {
             },
         ];
         let input = TestIn::<CompleteLoginIn>::new()
+            .set(|i| &i.head.op, auth_slot::COMPLETE_LOGIN)
             .set(
                 |i| &i.head.ticket,
                 Ticket {
@@ -980,7 +993,7 @@ mod timeout_stream_release {
         let closed = reply::close_in(
             view.op::<Ops>(|ops| &ops.head.close).unwrap(),
             instance,
-            &TestIn::<InHead>::new(),
+            &TestIn::<InHead>::new().set(|i| &i.op, life_slot::CLOSE),
             zeroed::<OutHead>(),
         );
         assert_eq!(closed.outcome, Outcome::Ready);
