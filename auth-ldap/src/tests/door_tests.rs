@@ -934,6 +934,9 @@ mod reached_clock_callbacks {
         }
     }
     impl busbar_contract::conn::DeclaredConns for Clock {
+        fn serves_scheme(&self, _: &str) -> bool {
+            false
+        }
         fn declare(
             &self,
             _: busbar_contract::conn::InstanceId,
