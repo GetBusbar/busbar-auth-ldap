@@ -1200,7 +1200,7 @@ fn red_a_networked_door_with_no_connection_table_is_refused() {
     ] {
         let refused = refused.expect("serving LDAP without a connection table refuses");
         assert_eq!(refused, wanted);
-        assert!(refused.to_string().contains("busbar-auth-ldap"));
+        assert!(refused.to_string().contains("plugin 'busbar-auth-ldap'"));
     }
     load_linked::<Auth>(
         &row,
