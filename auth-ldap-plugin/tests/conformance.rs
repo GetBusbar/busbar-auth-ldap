@@ -398,7 +398,7 @@ fn login(
 /// host's clock, as the kernel serves it.
 struct ClockOnly;
 
-impl busbar_contract::services::double::ServicesDouble for ClockOnly {
+impl busbar_test_kit::services_double::ServicesDouble for ClockOnly {
     fn now(&self) -> busbar_contract::services::Reading {
         busbar_contract::services::Reading {
             wall_ns: 0,
@@ -428,7 +428,7 @@ fn red_a_directory_that_never_answers_is_an_outage_at_the_deadline() {
     for leg in [Leg::Linked, Leg::Dropped] {
         let d = Arc::new(Dispatcher::with_services(
             DispatchConfig::default(),
-            Arc::new(ClockOnly),
+            Arc::new(busbar_test_kit::services_double::Double(ClockOnly)),
         ));
         let p = conformance::load::<Auth>(&s, leg, s.bind(&d, "ldap-silent"))
             .unwrap_or_else(|e| panic!("{leg:?}: the door loads: {e}"));

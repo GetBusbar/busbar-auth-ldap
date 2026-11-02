@@ -697,11 +697,11 @@ mod reached_clock_callbacks {
     use busbar_contract::abi::mechanism::lifecycle::{OpenIn, OpenOut};
     use busbar_contract::abi::mechanism::ticket::Ticket;
     use busbar_contract::abi::sdk::life::Held;
-    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
-    use busbar_contract::abi::sdk::test_support::reply;
-    use busbar_contract::abi::sdk::test_support::test_in::TestIn;
-    use busbar_contract::abi::sdk::test_support::{zeroed, DoorView};
     use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
+    use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use busbar_test_kit::test_support::reply;
+    use busbar_test_kit::test_support::test_in::TestIn;
+    use busbar_test_kit::test_support::{zeroed, DoorView};
 
     thread_local! {
         static PROBE: RefCell<Option<Sender<Sender<bool>>>> = const { RefCell::new(None) };
@@ -863,8 +863,8 @@ mod timeout_stream_release {
     use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
     use busbar_contract::abi::mechanism::lifecycle::{OpenIn, OpenOut};
     use busbar_contract::abi::mechanism::ticket::Ticket;
-    use busbar_contract::abi::sdk::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
-    use busbar_contract::abi::sdk::test_support::{reply, test_in::TestIn, zeroed, DoorView};
+    use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
+    use busbar_test_kit::test_support::{reply, test_in::TestIn, zeroed, DoorView};
     use std::cell::{Cell, RefCell};
 
     thread_local! {
