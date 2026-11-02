@@ -166,7 +166,7 @@ fn timed_out_pending_read_release(close_fails: bool) {
             value: Blob::of(b"pw").with_flags(BLOB_SECRET),
         },
     ];
-    let input = CompleteLoginIn {
+    let mut input = CompleteLoginIn {
         head: InHead {
             size: size_of::<CompleteLoginIn>() as u32,
             op: auth_slot::COMPLETE_LOGIN,
@@ -197,6 +197,8 @@ fn timed_out_pending_read_release(close_fails: bool) {
     }
     .outcome();
     NOW.with(|now| now.set(1_000_000_000));
+    // Continue the pending login rather than starting a new operation on its ticket.
+    input.head.flags = busbar_contract::abi::mechanism::call::FLAG_RESUME;
     let mut timed_out = IdentifyOut {
         head: OutHead {
             size: size_of::<IdentifyOut>() as u32,
