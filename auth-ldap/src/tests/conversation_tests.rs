@@ -640,6 +640,17 @@ fn an_endpoint_reads_its_target_and_security() {
     assert!(Endpoint::parse("h:389", false).is_err());
 }
 
+/// Bytes after a bracketed IPv6 host that are not `:port` are a malformed URL, not the default port.
+#[test]
+fn a_bracketed_ipv6_host_followed_by_junk_is_refused() {
+    assert_eq!(
+        Endpoint::parse("ldaps://[fd00::5]3269", false),
+        Err("url parse error: invalid port number".to_string())
+    );
+    assert!(Endpoint::parse("ldaps://[fd00::5]:3269", false).is_ok());
+    assert!(Endpoint::parse("ldaps://[fd00::5]", false).is_ok());
+}
+
 /// An operation gives up `timeout_secs` after it begins: a directory that never answers is an
 /// outage once the clock passes the deadline, and the conversation states that deadline.
 #[test]

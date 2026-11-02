@@ -93,6 +93,9 @@ impl Endpoint {
             let (h, after) = v6
                 .split_once(']')
                 .ok_or_else(|| "url parse error: invalid IPv6 address".to_string())?;
+            if !after.is_empty() && !after.starts_with(':') {
+                return Err("url parse error: invalid port number".to_string());
+            }
             (h, after.strip_prefix(':'))
         } else {
             match hostport.split_once(':') {
@@ -193,9 +196,9 @@ impl fmt::Debug for Doing {
     }
 }
 
-/// What an operation that passed its deadline answers, after its operation's prefix (`bind: `, ...):
-/// The words for an operation timeout (as ldap3's `LdapError::Timeout`, whose `Elapsed` reads
-/// "deadline has elapsed").
+/// What an operation that passed its deadline answers, after its operation's prefix (`bind: `,
+/// ...): the words for an operation timeout, as ldap3's `LdapError::Timeout` (whose `Elapsed`
+/// reads "deadline has elapsed").
 pub const TIMEOUT: &str = "timeout: deadline has elapsed";
 
 /// How many entries of one search are kept: the module reads the first entry and needs to know
