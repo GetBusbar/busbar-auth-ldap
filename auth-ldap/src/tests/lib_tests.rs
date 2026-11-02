@@ -724,6 +724,8 @@ struct FakeLdap {
     group_values: Vec<String>,
     /// The attribute name under which `group_values` are returned.
     group_attr: String,
+    /// Further attribute descriptions returned on the group read, beside `group_values`.
+    extra_attrs: Vec<(String, Vec<String>)>,
     /// Every bind DN attempted, in order.
     binds: Vec<String>,
     /// Every search filter the module actually sent, in order, so the RFC 4515 escaping is tested
@@ -813,6 +815,9 @@ impl LdapBackend for FakeLdap {
                 let mut attrs = HashMap::new();
                 if !self.group_values.is_empty() {
                     attrs.insert(self.group_attr.clone(), self.group_values.clone());
+                }
+                for (k, v) in &self.extra_attrs {
+                    attrs.insert(k.clone(), v.clone());
                 }
                 Ok(vec![DirEntry {
                     dn: self
@@ -1089,6 +1094,45 @@ fn a_ranged_group_attribute_is_read_and_its_truncation_warned() {
     let (roles, cap) = read("memberOf;range=0-*");
     assert_eq!(roles, vec!["engineers".to_string()]);
     assert!(!cap.contains("truncated"), "{:?}", cap.messages());
+}
+
+/// An entry may carry several descriptions of the group attribute's type (`memberOf` and
+/// `memberOf;x-opt`, two spellings). Every one is read, in a fixed order, so the roles never vary
+/// from one login to the next, and each ranged description is warned.
+#[test]
+fn every_description_of_the_group_attribute_is_read_deterministically() {
+    use busbar_test_kit::warn_capture::WarnCapture;
+    let m = LdapModule::new(base_cfg()).unwrap();
+    for _ in 0..40 {
+        let mut fake = FakeLdap {
+            group_values: vec!["CN=a,DC=x".to_string()],
+            group_attr: "memberOf".to_string(),
+            extra_attrs: vec![
+                ("memberOf;x-opt".to_string(), vec!["CN=b,DC=x".to_string()]),
+                (
+                    "MEMBEROF;range=0-1499".to_string(),
+                    vec!["CN=c,DC=x".to_string()],
+                ),
+            ],
+            ..Default::default()
+        };
+        let cap = WarnCapture::default();
+        let p = tracing::subscriber::with_default(cap.clone(), || {
+            m.bind_and_identify_on(&mut fake, "alice", "pw")
+        })
+        .expect("binds");
+        assert_eq!(
+            p.roles,
+            vec!["c".to_string(), "a".to_string(), "b".to_string()],
+            "all matching descriptions are read, in description order"
+        );
+        assert!(cap.contains("truncated"), "{:?}", cap.messages());
+        assert!(
+            !cap.contains("group attribute is absent"),
+            "{:?}",
+            cap.messages()
+        );
+    }
 }
 
 /// M5: a user entry that carries no group attribute at all logs in with no roles, and says so at

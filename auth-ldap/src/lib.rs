@@ -954,50 +954,60 @@ impl LdapModule {
             // The description is matched on its attribute TYPE, ignoring options: Active Directory
             // answers an attribute past its MaxValRange as `memberOf;range=0-1499`.
             let want = attribute_type(&self.cfg.group_attr);
-            let vals = entry
+            // An entry may carry several descriptions of that type (`memberOf`, `memberOf;x-opt`,
+            // another spelling): every one is read, in description order (the entry is a randomly
+            // seeded map), so the roles do not vary from one login to the next.
+            let mut matched: Vec<(&String, &Vec<String>)> = entry
                 .attrs
                 .iter()
-                .find(|(k, _)| attribute_type(k).eq_ignore_ascii_case(want));
-            if let Some((description, _)) = vals {
+                .filter(|(k, _)| attribute_type(k).eq_ignore_ascii_case(want))
+                .collect();
+            matched.sort_by(|a, b| a.0.cmp(b.0));
+            for (description, _) in &matched {
                 if let Some(range) = partial_range(description) {
                     // Fail-safe: the values returned are read (fewer roles than the user holds);
                     // paging the rest (`;range=1500-*`) is not done.
                     tracing::warn!(
-                                           module = "ldap",
-                    reason = "range-truncated",
-                                           attribute = %description,
-                                           range = %range,
-                                           "ldap group attribute truncated by the directory's MaxValRange; only the \
-                                            returned values are mapped to roles"
-                                       );
+                        module = "ldap",
+                        reason = "range-truncated",
+                        attribute = %description,
+                        range = %range,
+                        "ldap group attribute truncated by the directory's MaxValRange; only the \
+                         returned values are mapped to roles"
+                    );
                 }
             }
-            if vals.is_none() {
+            if matched.is_empty() {
                 // A misnamed `group_attr` would otherwise be a silent no-roles login for every
                 // user (a directory omits an attribute with no values, so a user in no group also
                 // lands here).
                 tracing::warn!(
-                                   module = "ldap",
-                reason = "no-group-attribute",
-                                   group_attr = %self.cfg.group_attr,
-                                   "ldap group attribute is absent from the bound user's entry; the login \
-                                    carries no roles"
-                               );
+                    module = "ldap",
+                    reason = "no-group-attribute",
+                    group_attr = %self.cfg.group_attr,
+                    "ldap group attribute is absent from the bound user's entry; the login \
+                     carries no roles"
+                );
             }
-            if let Some((_, vals)) = vals {
-                // Cap the number of group values collected so a hostile/huge memberOf cannot exhaust
-                // memory (see MAX_GROUP_VALUES). Log when truncating so an operator can spot it.
-                if vals.len() > MAX_GROUP_VALUES {
-                    tracing::warn!(
-                        module = "ldap",
-                        reason = "groups-capped",
-                        count = vals.len(),
-                        cap = MAX_GROUP_VALUES,
-                        "memberOf exceeded cap; truncating group values"
-                    );
-                }
-                group_dns.extend(vals.iter().take(MAX_GROUP_VALUES).cloned());
+            // Cap the number of group values collected so a hostile/huge memberOf cannot exhaust
+            // memory (see MAX_GROUP_VALUES). Log when truncating so an operator can spot it.
+            let total: usize = matched.iter().map(|(_, v)| v.len()).sum();
+            if total > MAX_GROUP_VALUES {
+                tracing::warn!(
+                    module = "ldap",
+                    reason = "groups-capped",
+                    count = total,
+                    cap = MAX_GROUP_VALUES,
+                    "memberOf exceeded cap; truncating group values"
+                );
             }
+            group_dns.extend(
+                matched
+                    .iter()
+                    .flat_map(|(_, v)| v.iter())
+                    .take(MAX_GROUP_VALUES)
+                    .cloned(),
+            );
         }
 
         if ldap.unbind() == Err(Io::Pending) {
