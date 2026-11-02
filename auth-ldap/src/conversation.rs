@@ -3,7 +3,7 @@
 
 //! One login's conversation with the directory, resumable: the codec's bytes ([`crate::codec`])
 //! over a byte stream someone else owns ([`Wire`]: in the plugin, the host connector's raw stream
-//! on the declared need; the plugin opens no socket, dials, binds or does TLS).
+//! on the module's need; the plugin opens no socket, dials, binds or does TLS).
 //!
 //! A wire service may answer PENDING. The module's bind/search logic ([`crate::LdapModule`]) then
 //! stops, the op answers PENDING, and on the wake the logic runs again from the top. The

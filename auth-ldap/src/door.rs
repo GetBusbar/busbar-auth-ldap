@@ -12,8 +12,9 @@
 //!   states the login family alone (`CAP_LOGIN`, as busbar-auth-github's) and `verify` answers
 //!   REFUSED, never called;
 //! * `begin_login` answers the credential form (`username` text, `password` password), `'static`;
-//! * `complete_login` BINDs the submitted credential over the host connector's stream on the ONE
-//!   declared need ([`NEEDS`]) and writes the principal into the host's identity buffer:
+//! * `complete_login` BINDs the submitted credential over the host connector's stream on the
+//!   module's need ([`LdapModule::need`]: [`NEED`], or [`NEED_ANCHORED`] when `ca_cert_pem` is
+//!   set; [`NEEDS`] declares both) and writes the principal into the host's identity buffer:
 //!   `LOGIN_IDENTITY`, `LOGIN_BAD_CREDENTIAL`, or `LOGIN_OUTAGE` when the directory could not
 //!   answer. While a stream service pends it answers PENDING, its [`Conversation`] parked on the
 //!   ticket, and resumes on the wake (THE REPLAY RULE, `abi::sdk::conn`): the connector is made

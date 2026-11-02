@@ -9,7 +9,7 @@
 //!
 //! 1. A dev types username + password on the hosted login page.
 //! 2. The core calls the door's `complete_login` ([`door`]) with those credentials.
-//! 3. The module asks the host connector for a stream on its declared need, secured by the
+//! 3. The module asks the host connector for a stream on the module's need ([`LdapModule::need`]), secured by the
 //!    connector for `ldaps://` or after the StartTLS extended operation, and performs a **BIND**
 //!    with the user's DN + password over it ([`codec`], [`conversation`]).
 //! 4. On a successful bind it reads the user's group memberships (the `group_attr`
