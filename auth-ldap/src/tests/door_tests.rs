@@ -881,81 +881,6 @@ mod reached_clock_callbacks {
         }
     }
 
-    impl busbar_contract::conn::Conns for Clock {
-        fn open(
-            &self,
-            _: busbar_contract::conn::InstanceId,
-            _: busbar_contract::conn::NeedId,
-            _: &busbar_contract::conn::OpenDesc<'_>,
-        ) -> Result<busbar_contract::conn::ConnId, busbar_contract::conn::ConnError> {
-            panic!("cache-only call must not open a connection")
-        }
-        fn write(
-            &self,
-            _: busbar_contract::conn::InstanceId,
-            _: busbar_contract::conn::ConnId,
-            _: &[u8],
-            _: bool,
-            _: bool,
-        ) -> Result<usize, busbar_contract::conn::ConnError> {
-            panic!("cache-only call must not write")
-        }
-        fn read(
-            &self,
-            _: busbar_contract::conn::InstanceId,
-            _: busbar_contract::conn::ConnId,
-            _: busbar_contract::conn::Ticket,
-            _: &mut [u8],
-        ) -> Result<busbar_contract::conn::Piece, busbar_contract::conn::ConnError> {
-            panic!("cache-only call must not read")
-        }
-        fn wait(
-            &self,
-            _: busbar_contract::conn::InstanceId,
-            _: &[busbar_contract::conn::ConnId],
-            _: busbar_contract::conn::Ticket,
-        ) -> Result<usize, busbar_contract::conn::ConnError> {
-            panic!("cache-only call must not wait")
-        }
-        fn facts(
-            &self,
-            _: busbar_contract::conn::InstanceId,
-            _: busbar_contract::conn::ConnId,
-        ) -> Result<busbar_contract::transport::ConnFacts, busbar_contract::conn::ConnError>
-        {
-            panic!("cache-only call must not inspect a connection")
-        }
-        fn close(
-            &self,
-            _: busbar_contract::conn::InstanceId,
-            _: busbar_contract::conn::ConnId,
-        ) -> Result<(), busbar_contract::conn::ConnError> {
-            panic!("cache-only call must not close a connection")
-        }
-    }
-    impl busbar_contract::conn::DeclaredConns for Clock {
-        fn serves_scheme(&self, _: &str) -> bool {
-            false
-        }
-        fn declare(
-            &self,
-            _: busbar_contract::conn::InstanceId,
-            _: busbar_contract::conn::NeedId,
-            _: &busbar_contract::abi::mechanism::rendering::ReadNeed,
-            _: Option<&str>,
-            _: Option<&str>,
-        ) -> Result<(), busbar_contract::conn::ConnError> {
-            Ok(())
-        }
-        fn declared(
-            &self,
-            _: busbar_contract::conn::InstanceId,
-            _: busbar_contract::conn::NeedId,
-        ) -> Option<Result<(), busbar_contract::conn::ConnError>> {
-            Some(Ok(()))
-        }
-    }
-
     struct Armed;
     impl Drop for Armed {
         fn drop(&mut self) {
@@ -1036,7 +961,7 @@ mod reached_clock_callbacks {
         SAMPLES.with(|samples| samples.borrow_mut().clear());
         RETAINED.with(|retained| retained.set(false));
         let host = Arc::new(Clock);
-        let d = Dispatcher::with_services(DispatchConfig::default(), host.clone());
+        let d = Dispatcher::with_services(DispatchConfig::default(), host);
         let p = load_linked::<Auth>(
             &LinkedRow::of_macro(fixture::MACRO_DOOR).unwrap(),
             Bind {
@@ -1044,7 +969,7 @@ mod reached_clock_callbacks {
                 max_inflight_cap: 8,
                 sink: Arc::new(NoSink),
                 dispatcher: d.adopter(),
-                conns: ConnTable::Host(host),
+                conns: ConnTable::Probe,
             },
         )
         .unwrap();
