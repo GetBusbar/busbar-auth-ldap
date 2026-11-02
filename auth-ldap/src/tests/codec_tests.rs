@@ -464,6 +464,31 @@ fn a_repeated_attribute_description_keeps_every_value() {
     );
 }
 
+/// An attribute name the directory supplies is far-end text: a hostile name with a newline and an
+/// ESC never reaches the log line raw, in the not-UTF-8 warn or the over-cap warn.
+#[test]
+fn a_hostile_attribute_name_is_escaped_in_the_logged_warnings() {
+    let name = b"evil\n<forged line>\x1b[2J";
+    let vals = [tlv(0x04, b"\xff"), tlv(0x04, b"ok")].concat();
+    let attrs = tlv(0x30, &[tlv(0x04, name), tlv(0x31, &vals)].concat());
+    let m = msg(
+        2,
+        &tlv(
+            0x64,
+            &[tlv(0x04, b"uid=alice,dc=x"), tlv(0x30, &attrs)].concat(),
+        ),
+    );
+    let text = crate::tests::logged_text(|| {
+        assert!(decode(&m).is_ok());
+    });
+    assert!(text.contains("not-utf8-values"), "{text:?}");
+    assert!(
+        !text.contains('\u{1b}') && !text.contains("evil\n"),
+        "the attribute name reached the log raw: {text:?}"
+    );
+    assert!(text.contains("evil\\n"), "{text:?}");
+}
+
 /// Values past the per-attribute cap are counted and the loss is logged once per attribute, with
 /// the real number skipped.
 #[test]

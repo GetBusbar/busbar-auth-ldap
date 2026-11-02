@@ -970,8 +970,8 @@ impl LdapModule {
                     tracing::warn!(
                         module = "ldap",
                         reason = "range-truncated",
-                        attribute = %description,
-                        range = %range,
+                        attribute = %codec::shown(description),
+                        range = %codec::shown(range),
                         "ldap group attribute truncated by the directory's MaxValRange; only the \
                          returned values are mapped to roles"
                     );

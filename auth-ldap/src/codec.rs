@@ -175,7 +175,7 @@ const SHOWN_TEXT: usize = 128;
 
 /// The directory's text `t` as a result shows it: its first [`SHOWN_TEXT`] characters (then `...`),
 /// escaped (`\n`, `\u{1b}`, ...) so no newline or control character reaches a log line raw.
-fn shown(t: &str) -> String {
+pub(crate) fn shown(t: &str) -> String {
     let mut out: String = t
         .chars()
         .take(SHOWN_TEXT)
@@ -307,7 +307,7 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
             tracing::warn!(
                            module = "ldap",
             reason = "not-utf8-values",
-                           attribute = %name,
+                           attribute = %shown(&name),
                            dropped,
                            kept = values.len(),
                            "ldap attribute values that are not UTF-8 were dropped"
@@ -317,7 +317,7 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
             tracing::warn!(
                 module = "ldap",
                 reason = "over-cap",
-                attribute = %name,
+                attribute = %shown(&name),
                 kept = values.len(),
                 skipped,
                 "ldap attribute values past the per-attribute cap were skipped"

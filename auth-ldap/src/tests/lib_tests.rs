@@ -1135,6 +1135,27 @@ fn every_description_of_the_group_attribute_is_read_deterministically() {
     }
 }
 
+/// The attribute description and range the directory supplies are far-end text: a hostile one
+/// (newline, ESC) never reaches the range-truncated warn raw.
+#[test]
+fn a_hostile_group_description_is_escaped_in_the_range_warning() {
+    let m = LdapModule::new(base_cfg()).unwrap();
+    let mut fake = FakeLdap {
+        group_values: vec!["CN=a,DC=x".to_string()],
+        group_attr: "memberOf;range=0-1\n<forged line>\u{1b}[2J".to_string(),
+        ..Default::default()
+    };
+    let text = logged_text(|| {
+        m.bind_and_identify_on(&mut fake, "alice", "pw")
+            .expect("binds");
+    });
+    assert!(text.contains("range-truncated"), "{text:?}");
+    assert!(
+        !text.contains('\u{1b}') && !text.contains("0-1\n"),
+        "the description reached the log raw: {text:?}"
+    );
+}
+
 /// M5: a user entry that carries no group attribute at all logs in with no roles, and says so at
 /// warn (a misnamed `group_attr` is otherwise a silent no-roles login for everyone).
 #[test]
