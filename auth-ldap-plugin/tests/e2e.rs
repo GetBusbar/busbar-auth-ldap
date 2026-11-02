@@ -64,6 +64,78 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         "CARGO_TARGET_DIR must name the existing absolute assigned target"
     );
 
+    let metadata = std::process::Command::new("cargo")
+        .args([
+            "+1.98.0",
+            "metadata",
+            "--locked",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+        ])
+        .arg(root.join("Cargo.toml"))
+        .current_dir(&root)
+        .output()
+        .expect("read actual busbar checkout Cargo metadata");
+    assert!(
+        metadata.status.success(),
+        "actual checkout metadata must resolve with its lock: {}",
+        String::from_utf8_lossy(&metadata.stderr)
+    );
+    let metadata: serde_json::Value =
+        serde_json::from_slice(&metadata.stdout).expect("actual checkout Cargo metadata is JSON");
+    let mut owners = Vec::new();
+    for package in metadata["packages"].as_array().expect("metadata packages") {
+        for binary in package["targets"].as_array().expect("package targets") {
+            if binary["name"].as_str() == Some("busbar-plugin-pack")
+                && binary["kind"]
+                    .as_array()
+                    .expect("target kinds")
+                    .iter()
+                    .any(|kind| kind.as_str() == Some("bin"))
+            {
+                let features = binary
+                    .get("required-features")
+                    .map_or_else(Vec::new, |features| {
+                        features
+                            .as_array()
+                            .expect("required target features")
+                            .iter()
+                            .map(|feature| feature.as_str().expect("feature name").to_owned())
+                            .collect::<Vec<_>>()
+                    });
+                owners.push((
+                    package["name"]
+                        .as_str()
+                        .expect("owning package name")
+                        .to_owned(),
+                    features,
+                ));
+            }
+        }
+    }
+    assert_eq!(
+        owners.len(),
+        1,
+        "actual checkout must have one busbar-plugin-pack binary owner: {owners:?}"
+    );
+    let (pack_owner, pack_features) = owners.pop().unwrap();
+    let pack_features = pack_features.join(",");
+    let mut pack_args = vec![
+        "+1.98.0",
+        "build",
+        "--locked",
+        "-j2",
+        "--release",
+        "-p",
+        pack_owner.as_str(),
+        "--bin",
+        "busbar-plugin-pack",
+    ];
+    if !pack_features.is_empty() {
+        pack_args.extend(["--features", pack_features.as_str()]);
+    }
     for args in [
         &[
             "+1.98.0",
@@ -76,19 +148,7 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
             "--bin",
             "busbar",
         ][..],
-        &[
-            "+1.98.0",
-            "build",
-            "--locked",
-            "-j2",
-            "--release",
-            "-p",
-            "busbar-plugin-loader",
-            "--features",
-            "pack",
-            "--bin",
-            "busbar-plugin-pack",
-        ][..],
+        pack_args.as_slice(),
     ] {
         let status = std::process::Command::new("cargo")
             .args(args)
