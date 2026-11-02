@@ -1009,12 +1009,24 @@ mod reached_clock_callbacks {
     }
 
     mod fixture {
+        use crate::door::{BeginLogin, NotServed};
+        use busbar_contract::abi::auth::{
+            FieldsIn, FieldsOut, IdentifyOut, OpenOutboundIn, OpenOutboundOut, OutboundReadyIn,
+            OutboundReadyOut, VerifyIn,
+        };
+        use busbar_contract::abi::sdk::Safe;
+
         busbar_contract::plugin_door! {
             ops: busbar_contract::abi::auth::Ops,
             statement: crate::door::STATEMENT,
             lifecycle: life(crate::door::Ldap),
             kind_ops: {
-                complete_login: busbar_contract::abi::sdk::Safe<super::ObserveComplete>,
+                verify: Safe<NotServed<VerifyIn, IdentifyOut>>,
+                begin_login: Safe<BeginLogin>,
+                complete_login: Safe<super::ObserveComplete>,
+                open_outbound: Safe<NotServed<OpenOutboundIn, OpenOutboundOut>>,
+                outbound_ready: Safe<NotServed<OutboundReadyIn, OutboundReadyOut>>,
+                fields: Safe<NotServed<FieldsIn, FieldsOut>>,
             },
         }
     }
