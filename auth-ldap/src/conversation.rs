@@ -13,7 +13,6 @@ use crate::codec::{self, Message, Reply};
 use crate::{DirEntry, Io, LdapBackend, SearchScope};
 
 /// THE BYTE STREAM a conversation runs over. Every call answers [`Poll::Pending`] when it cannot
-
 pub trait Wire {
     /// Open the stream to `target` (`host:port`).
     fn establish(&mut self, target: &str) -> Poll<Result<(), String>>;
@@ -24,10 +23,8 @@ pub trait Wire {
     /// Read into `buf`: how many bytes arrived; `0` = the far end closed.
     fn read(&mut self, buf: &mut [u8]) -> Poll<Result<usize, String>>;
     /// Write the chip's whole message `w` (a BIND, its password sealed): `Ready(Ok(()))` once all
-
     fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>>;
     /// The stream owner's monotonic clock now, when it offers one: read between the messages of
-
     fn now_ns(&mut self) -> Option<u64> {
         None
     }
@@ -57,7 +54,6 @@ pub struct Endpoint {
 
 impl Endpoint {
     /// Read an `ldap://` or `ldaps://` URL (the port defaults to 389 and 636; userinfo, a path
-
     pub fn parse(url: &str, start_tls: bool) -> Result<Self, String> {
         let url = url.trim();
         let (scheme, rest) = url
@@ -141,7 +137,6 @@ enum Stage {
 }
 
 /// The operation in progress: its stage, its request bytes and how many went, its message id,
-
 struct Doing {
     stage: Stage,
     out: Vec<u8>,
@@ -177,19 +172,15 @@ impl fmt::Debug for Doing {
 }
 
 /// What an operation that passed its deadline answers, after its operation's prefix (`bind: `, ...):
-
 pub const TIMEOUT: &str = "timeout: deadline has elapsed";
 
 /// How many entries of one search are kept: the module reads the first entry and needs to know
-
 const MAX_ENTRIES_KEPT: usize = 2;
 
 /// The most messages one operation reads. Its deadline is checked between entries of the op, so a
-
 const MAX_MESSAGES: u32 = 1024;
 
 /// The most bytes one operation reads from the directory in all, however many messages carry them:
-
 const OP_BYTES_CAP: usize = 16 * 1024 * 1024;
 
 /// How much one read asks for.
@@ -253,7 +244,6 @@ impl Conversation {
 }
 
 /// The module's [`LdapBackend`] over a [`Wire`], for one entry of the op: operations the
-
 pub(crate) struct Over<'a, W: Wire> {
     conv: &'a mut Conversation,
     wire: &'a mut W,
@@ -265,7 +255,6 @@ pub(crate) struct Over<'a, W: Wire> {
 
 impl<'a, W: Wire> Over<'a, W> {
     /// The backend for one entry: `url`/`start_tls` name the directory; `now_ns` is the caller's
-
     pub(crate) fn new(
         conv: &'a mut Conversation,
         wire: &'a mut W,
@@ -364,7 +353,6 @@ impl<'a, W: Wire> Over<'a, W> {
     }
 
     /// Whether the operation in progress is past its deadline, on the stream owner's clock now
-
     fn expired(&mut self) -> bool {
         let Some(deadline) = self.conv.deadline_ns else {
             return false;
@@ -376,7 +364,6 @@ impl<'a, W: Wire> Over<'a, W> {
     }
 
     /// The next whole message off the stream. The deadline is checked before every read and every
-
     fn receive(&mut self) -> Result<Message, Io> {
         loop {
             if self.expired() {
@@ -426,7 +413,6 @@ impl<'a, W: Wire> Over<'a, W> {
     }
 
     /// The next message for the operation in progress: an unsolicited notice (id 0) ends it, a
-
     fn reply(&mut self) -> Result<Reply, Io> {
         let want = self.conv.doing.as_ref().map_or(0, |d| d.id);
         loop {

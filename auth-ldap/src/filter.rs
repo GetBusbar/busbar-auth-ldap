@@ -32,11 +32,9 @@ const MRA_DN_ATTRIBUTES: u8 = 0x84;
 pub const PARSE_ERROR: &str = "filter parse error";
 
 /// The deepest a filter may nest (`(a=b)` is one level, `(!(a=b))` two): the parser recurses once
-
 pub const MAX_DEPTH: usize = 32;
 
 /// `filter` as BER, or [`PARSE_ERROR`].
-
 pub fn encode(filter: &str) -> Result<Vec<u8>, &'static str> {
     match filtexpr(filter.as_bytes()) {
         Some((ber, [])) => Ok(ber),
@@ -69,7 +67,6 @@ fn filtercomp(i: &[u8], depth: usize) -> Parsed<'_> {
 }
 
 /// An AND or OR of ONE OR MORE filters (RFC 4515 §3, `filterlist = 1*filter`): the empty `(&)` and
-
 fn and_or(i: &[u8], op: u8, tag: u8, depth: usize) -> Parsed<'_> {
     let mut i = i.strip_prefix(&[op])?;
     let mut content = Vec::new();

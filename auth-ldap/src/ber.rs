@@ -149,7 +149,6 @@ fn header(input: &[u8]) -> Result<Option<(u8, u64, usize)>, BerError> {
 }
 
 /// How many bytes the first message at the head of `input` takes, once all of them are there:
-
 pub fn frame(input: &[u8]) -> Result<Option<usize>, BerError> {
     let Some((tag, len, head)) = header(input)? else {
         return Ok(None);
@@ -166,7 +165,6 @@ pub fn frame(input: &[u8]) -> Result<Option<usize>, BerError> {
 }
 
 /// Read the element at the head of `input` (a whole parent's content): the element and what
-
 pub fn read(input: &[u8]) -> Result<(Tlv<'_>, &[u8]), BerError> {
     let (tag, len, head) = match header(input)? {
         Some(h) => h,
@@ -188,7 +186,6 @@ pub fn read(input: &[u8]) -> Result<(Tlv<'_>, &[u8]), BerError> {
 }
 
 /// Read the element at the head of `input`, which must carry `tag`.
-
 pub fn expect<'a>(
     input: &'a [u8],
     tag: u8,
@@ -202,7 +199,6 @@ pub fn expect<'a>(
 }
 
 /// An INTEGER-shaped content as an `i64`.
-
 pub fn int_value(content: &[u8]) -> Result<i64, BerError> {
     if content.is_empty() {
         return Err(BerError::Malformed("an empty integer"));
@@ -220,7 +216,6 @@ pub fn int_value(content: &[u8]) -> Result<i64, BerError> {
 
 #[cfg(test)]
 /// Every element of a constructed element's `content`, in order.
-
 pub fn items(mut content: &[u8]) -> Result<Vec<Tlv<'_>>, BerError> {
     let mut out = Vec::new();
     while !content.is_empty() {

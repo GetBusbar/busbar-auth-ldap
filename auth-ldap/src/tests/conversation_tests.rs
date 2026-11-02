@@ -42,7 +42,6 @@ impl Directory {
     }
 
     /// Once the replies run out the stream stays open and a read pends (no EOF), so only a
-
     fn held(mut self) -> Self {
         self.hold = true;
         self
@@ -179,7 +178,6 @@ fn module(url: &str, extra: serde_json::Value) -> LdapModule {
 }
 
 /// Drive one login to its answer, re-entering on every PENDING with the same conversation: the
-
 fn login(m: &LdapModule, dir: &mut Directory, password: &str) -> (Login, u32) {
     let mut conv = Conversation::new();
     for entries in 1..=200 {
@@ -345,7 +343,6 @@ fn start_tls_sends_the_extended_request_then_secures() {
 }
 
 /// A MITM appends forged bind replies to the plaintext StartTLS success: whatever arrived before
-
 #[test]
 fn data_sent_with_the_start_tls_response_is_never_honoured() {
     let m = module(
@@ -430,7 +427,6 @@ fn search_then_bind_speaks_in_1_5_5s_order() {
 }
 
 /// A search keeps at most two entries (the module needs only whether a second exists); the rest
-
 #[test]
 fn a_search_keeps_at_most_two_entries() {
     use crate::{LdapBackend, SearchScope};
@@ -466,7 +462,6 @@ fn a_search_keeps_at_most_two_entries() {
 }
 
 /// A SearchResultReference (RFC 4511 §4.5.3) is a referral the module does not chase, and a client
-
 #[test]
 fn a_search_reference_is_skipped() {
     let m = module(
@@ -616,7 +611,6 @@ fn an_endpoint_reads_its_target_and_security() {
 }
 
 /// An operation gives up `timeout_secs` after it begins: a directory that never answers is an
-
 #[test]
 fn a_directory_that_never_answers_is_an_outage_after_the_timeout() {
     let m = module("ldap://127.0.0.1", serde_json::json!({"timeout_secs": 2}));
@@ -651,7 +645,6 @@ fn a_directory_that_never_answers_is_an_outage_after_the_timeout() {
 }
 
 /// A directory on a clock: the first service of each directory operation (the dial, then each
-
 struct Slow {
     dir: Directory,
     owed: bool,
@@ -685,7 +678,6 @@ impl Wire for Slow {
 }
 
 /// `timeout_secs` bounds each directory operation, as 1.5.5 did (the connect, and each bind and
-
 #[test]
 fn the_timeout_bounds_each_operation_not_the_whole_login() {
     let m = module("ldap://127.0.0.1", serde_json::json!({"timeout_secs": 10}));
@@ -723,7 +715,6 @@ fn the_timeout_bounds_each_operation_not_the_whole_login() {
 }
 
 /// The order 1.5.5 had (seam 6): the connection is opened before the DN template refuses a
-
 #[test]
 fn a_username_the_dn_template_refuses_is_refused_after_the_dial() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
@@ -766,7 +757,6 @@ impl Wire for Mute {
 }
 
 /// The timeout answers as 1.5.5 answered an ldap3 operation timeout: an outage (1.5.5's Reject),
-
 #[test]
 fn a_timeout_reads_in_1_5_5s_words() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
@@ -848,7 +838,6 @@ fn a_timeout_reads_in_1_5_5s_words() {
 }
 
 /// The resolved service password (the kernel's secret, over the settings literal) is what the
-
 #[test]
 fn the_resolved_service_secret_reaches_only_the_bind() {
     const SECRET: &str = "s3cr3t-resolved";
@@ -881,7 +870,6 @@ fn the_resolved_service_secret_reaches_only_the_bind() {
 }
 
 /// The BIND request in flight holds the cleartext password: a `Debug` of the conversation (it is
-
 #[test]
 fn a_conversation_in_flight_never_debug_prints_the_password() {
     const PW: &str = "hunter2-s3cret";
@@ -909,7 +897,6 @@ fn a_conversation_in_flight_never_debug_prints_the_password() {
 }
 
 /// A SearchResultEntry and its SearchResultDone arrive in ONE read (the normal wire shape): the
-
 #[test]
 fn two_messages_in_one_read_are_both_read() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
@@ -926,7 +913,6 @@ fn two_messages_in_one_read_are_both_read() {
 }
 
 /// A TLS handshake the connector fails (`ldaps://`, or StartTLS after the directory agreed) is an
-
 #[test]
 fn a_failed_secure_is_an_outage_and_never_binds() {
     let m = module("ldaps://ad.corp.example", serde_json::json!({}));
@@ -1042,7 +1028,6 @@ fn chip_bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
 }
 
 /// LDO D4b: one entry of the op never runs unbounded. A directory that streams Ready messages for
-
 #[test]
 fn an_operation_that_never_ends_its_messages_is_cut_off() {
     use crate::{Io, LdapBackend, SearchScope};

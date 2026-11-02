@@ -25,11 +25,9 @@ const REQUEST_NAME: u8 = 0x80;
 const RESPONSE_NAME: u8 = 0x8a;
 
 /// The most values one attribute keeps: one past the group cap, so the module still sees (and
-
 pub const MAX_VALUES_KEPT: usize = crate::MAX_GROUP_VALUES + 1;
 
 /// What one operation's replies may decode into memory (DNs, attribute names, values): 4 MiB. A
-
 pub const DECODE_BUDGET: usize = 4 * 1024 * 1024;
 
 /// What each decoded string is charged on top of its bytes: its allocation's bookkeeping.
@@ -57,7 +55,6 @@ fn message(id: i32, op: &[u8]) -> Vec<u8> {
 }
 
 /// A SEARCH under `base` at `scope` (`SCOPE_*`) for `filter`, asking for `attrs`.
-
 pub fn search(
     id: i32,
     base: &str,
@@ -165,7 +162,6 @@ pub const fn rc_name(rc: u32) -> &'static str {
 const SHOWN_TEXT: usize = 128;
 
 /// The directory's text `t` as a result shows it: its first [`SHOWN_TEXT`] characters (then `...`),
-
 pub(crate) fn shown(t: &str) -> String {
     let mut out: String = t
         .chars()
@@ -180,7 +176,6 @@ pub(crate) fn shown(t: &str) -> String {
 
 impl std::fmt::Display for LdapResult {
     /// The words for an operation that did not succeed (as `LdapError::LdapResult` words it), the
-
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -279,7 +274,6 @@ fn ldap_result<'a>(
 }
 
 /// An entry, decoded within `budget` ([`DECODE_BUDGET`]): every string it keeps is charged as it
-
 fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
     let (dn, rest) = ber::expect(content, ber::OCTET_STRING, "an entry without its DN")?;
     charge(budget, dn.len())?;
@@ -331,14 +325,12 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
 
 #[cfg(test)]
 /// Decode one whole message (exactly the bytes [`ber::frame`] measured), within a fresh
-
 pub fn decode(bytes: &[u8]) -> Result<Message, BerError> {
     let mut budget = DECODE_BUDGET;
     decode_within(bytes, &mut budget)
 }
 
 /// [`decode`], charging what it decodes to `budget`: what remains of one operation's
-
 pub fn decode_within(bytes: &[u8], budget: &mut usize) -> Result<Message, BerError> {
     let (content, rest) = ber::expect(bytes, ber::SEQUENCE, "a message that is not a SEQUENCE")?;
     if !rest.is_empty() {

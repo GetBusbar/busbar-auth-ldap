@@ -62,7 +62,6 @@ fn settings_accept_a_minimal_config() {
 }
 
 /// A direct-bind UPN template (`{username}@corp.example`) is not a DN, so the group read off the
-
 #[test]
 fn settings_refuse_a_direct_bind_upn_template() {
     let blob = br#"{
@@ -136,7 +135,6 @@ fn a_failing_host_clock_says_why() {
 }
 
 /// The Statement states a credential login that never blocks (no `MARK_BLOCKS`: every call is
-
 #[test]
 fn the_statement_states_a_non_blocking_credential_login_over_one_need() {
     assert_eq!(TAIL.caps, CAP_LOGIN);
@@ -225,7 +223,6 @@ fn who(id: &str) -> busbar_contract::auth::Principal {
 }
 
 /// An abandoned ticket's kept identity goes with the next op on its slot; other slots stay, and the
-
 #[test]
 fn a_later_generation_on_the_slot_drops_the_abandoned_identity() {
     let mut reached = Reached::default();
@@ -250,7 +247,6 @@ fn a_later_generation_on_the_slot_drops_the_abandoned_identity() {
 }
 
 /// A call on no ticket (generation 0, never minted) proves nothing about slot 0: a kept identity on
-
 #[test]
 fn a_ticketless_call_leaves_slot_zeros_kept_identity() {
     let mut reached = Reached::default();
@@ -263,7 +259,6 @@ fn a_ticketless_call_leaves_slot_zeros_kept_identity() {
 }
 
 /// THE REACHED MAP IS BOUNDED (auth standard S3): at the cap the OLDEST kept identity goes, never
-
 #[test]
 fn the_reached_map_is_bounded_and_evicts_the_oldest() {
     let mut reached = Reached::default();
@@ -315,7 +310,6 @@ fn a_kept_identity_expires_after_the_ttl() {
 }
 
 /// LDAP is a login method and judges no bearer credential on the data plane: its tail states the
-
 #[test]
 fn the_tail_states_the_login_family_alone() {
     assert_eq!(TAIL.caps, CAP_LOGIN);
@@ -325,7 +319,6 @@ fn the_tail_states_the_login_family_alone() {
 }
 
 /// Search-then-bind settings whose service password is a secret reference (no literal in the
-
 #[test]
 fn validate_accepts_search_then_bind_whose_password_is_a_secret() {
     let blob = br#"{
@@ -367,7 +360,6 @@ fn validate_accepts_search_then_bind_whose_password_is_a_secret() {
 }
 
 /// A settings value of the wrong type is refused WITHOUT quoting it (it may be a secret pasted
-
 #[test]
 fn a_mistyped_setting_is_refused_without_echoing_its_value() {
     for blob in [
@@ -452,7 +444,6 @@ fn a_given_up_login_releases_its_stream() {
 }
 
 /// THE REFUSAL LINES (auth standard S2): every settings refusal is one or more lines in the
-
 mod refusal_lines {
     use super::*;
     use busbar_contract::abi::mechanism::lifecycle::check_validate_refusal;
@@ -597,7 +588,6 @@ mod refusal_lines {
 }
 
 /// CA-1 / SEC-LDAPCA: a private directory CA (`ca_cert_pem`) is SUPPORTED. A blob that holds a
-
 mod private_ca {
     use super::*;
     use busbar_contract::abi::sdk::life::Life;

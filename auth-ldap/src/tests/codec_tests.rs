@@ -44,7 +44,6 @@ fn unbind_and_start_tls_are_their_textbook_bytes() {
 }
 
 /// The group read exactly as 1.5.5 sent it: base scope, never deref, no limits, types and values,
-
 #[test]
 fn the_group_read_is_1_5_5s_search() {
     let op = [
@@ -315,7 +314,6 @@ fn a_reply_past_the_cap_is_refused_from_its_header() {
 }
 
 /// The chip's BIND message (`Cred::ldap_simple_bind`), as the wire carries it: the bytes above are
-
 fn bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
     let mut w = busbar_contract::abi::sdk::cred::SealedWrite::message(
         crate::tests::cred(password).ldap_simple_bind(id, dn),

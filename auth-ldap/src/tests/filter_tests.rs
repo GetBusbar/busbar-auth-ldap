@@ -87,7 +87,6 @@ fn the_filters_this_module_sends_encode() {
 }
 
 /// The search-then-bind username as applied: `escape_filter` neutralises every metacharacter, and
-
 #[test]
 fn an_escaped_username_is_one_equality_value() {
     let hostile = "a*)(uid=*))(|(uid=*\\\0";

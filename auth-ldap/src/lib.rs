@@ -52,7 +52,6 @@ pub(crate) mod groups;
 use conversation::{Conversation, Over, Wire};
 
 /// THE COMPILED-IN ENTRY, in the fleet's one form: a busbar build that links this crate as a row
-
 pub mod compiled_in {
     /// The door and its macro door.
     pub mod door {
@@ -65,11 +64,9 @@ pub mod compiled_in {
 mod tests;
 
 /// The maximum number of `memberOf` group values read off a user entry. A hostile or misconfigured
-
 const MAX_GROUP_VALUES: usize = 4096;
 
 /// `url` with any userinfo cut to `***`, safe for a refusal, a log line or `Debug`. The authority ends where the dialer ends it (`/`, `?` or `#`) and its
-
 pub(crate) fn shown_url(url: &str) -> String {
     let (scheme, rest) = match url.split_once("://") {
         Some((scheme, rest)) => (Some(scheme), rest),
@@ -208,14 +205,12 @@ impl fmt::Debug for LdapConfig {
 }
 
 /// The LDAP auth module: a login-only method (it authenticates a form POST, it does not verify
-
 pub struct LdapModule {
     cfg: LdapConfig,
 }
 
 impl LdapModule {
     /// Build the module from parsed config: every settings check ([`check_settings`]) so a
-
     pub fn new(cfg: LdapConfig) -> Result<Self, String> {
         check_settings(&cfg)?;
 
@@ -245,14 +240,12 @@ impl LdapModule {
     }
 
     /// Expand `bind_dn_template` with a validated username. Returns `Err` if the username contains
-
     pub(crate) fn bind_dn_for(&self, username: &str) -> Result<String, String> {
         let safe = groups::validate_username(username)?;
         Ok(self.cfg.bind_dn_template.replace("{username}", safe))
     }
 
     /// The declared need this module's logins dial on: the anchored one when the operator names a
-
     #[must_use]
     pub fn need(&self) -> u32 {
         if self.cfg.ca_cert_pem.is_some() {
@@ -263,7 +256,6 @@ impl LdapModule {
     }
 
     /// `password` as a BIND carries it: an `ldaps://` URL, or STARTTLS, lets it go out only on a
-
     fn guarded(&self, password: &Cred) -> Cred {
         let password = password.clone().secure_for(self.cfg.url.trim());
         if self.cfg.start_tls {
@@ -275,7 +267,6 @@ impl LdapModule {
 }
 
 /// The SETTINGS-ONLY checks: every refusal a settings blob earns on its own, with no secret in
-
 fn check_settings(cfg: &LdapConfig) -> Result<(), String> {
     let mut lines: Vec<String> = Vec::new();
     let mut refuse = |key: &str, why: &str| lines.push(format!("settings.{key}: {why}"));
@@ -380,7 +371,6 @@ fn check_settings(cfg: &LdapConfig) -> Result<(), String> {
 }
 
 /// Whether `pem` holds at least one certificate: every `CERTIFICATE` block's body is base64 of a
-
 fn holds_a_certificate(pem: &str) -> bool {
     use base64::Engine as _;
     const BEGIN: &str = "-----BEGIN CERTIFICATE-----";
@@ -403,7 +393,6 @@ fn holds_a_certificate(pem: &str) -> bool {
 }
 
 /// Would binding over this URL send credentials in CLEARTEXT on the network? True only for a
-
 fn is_insecure_transport(url: &str, start_tls: bool) -> bool {
     let url = url.trim();
 
@@ -419,7 +408,6 @@ fn is_insecure_transport(url: &str, start_tls: bool) -> bool {
 }
 
 /// Is this host a loopback address that never leaves the machine? Matches the canonical trio only —
-
 fn is_loopback_host(host: &str) -> bool {
     let host = host.trim();
     host.eq_ignore_ascii_case("localhost") || host == "127.0.0.1" || host == "::1"
@@ -444,7 +432,6 @@ pub enum Login {
 
 impl LdapModule {
     /// `validate`'s check of a settings blob: everything the blob earns on its own, with no secret
-
     pub fn validate_settings(settings: &[u8]) -> Result<(), String> {
         let cfg = parse_settings(settings)?;
         refuse_a_literal_secret(&cfg)?;
@@ -452,7 +439,6 @@ impl LdapModule {
     }
 
     /// The module from a settings blob, with the secrets the kernel resolved for the Statement's
-
     pub fn from_settings_with(settings: &[u8], secrets: &[&[u8]]) -> Result<Self, String> {
         let mut cfg = parse_settings(settings)?;
         refuse_a_literal_secret(&cfg)?;
@@ -466,7 +452,6 @@ impl LdapModule {
     }
 
     /// One credential submission over `wire`, resumable: the `username` and `password` the form
-
     pub fn login_over<W: Wire>(
         &self,
         conv: &mut Conversation,
@@ -533,7 +518,6 @@ impl LdapModule {
 }
 
 /// The service password is a secret REFERENCE, never a literal (auth standard S1): busbar resolves
-
 fn refuse_a_literal_secret(cfg: &LdapConfig) -> Result<(), String> {
     if cfg.bind_service_password.is_some() {
         return Err(
@@ -546,7 +530,6 @@ fn refuse_a_literal_secret(cfg: &LdapConfig) -> Result<(), String> {
 }
 
 /// The settings blob as an [`LdapConfig`], parsed by the chip ([`cred::settings`]): the service
-
 fn parse_settings(settings: &[u8]) -> Result<LdapConfig, String> {
     if settings.trim_ascii().is_empty() {
         return Err("settings: none provided; requires url, bind_dn_template, base_dn".to_string());
@@ -567,7 +550,6 @@ fn attribute_type(description: &str) -> &str {
 }
 
 /// The `range=<low>-<high>` option of an attribute description, when it is a PARTIAL range (its
-
 fn partial_range(description: &str) -> Option<&str> {
     description.split(';').skip(1).find(|option| {
         option.len() > 6
@@ -577,7 +559,6 @@ fn partial_range(description: &str) -> Option<&str> {
 }
 
 /// The attribute list that asks for no attributes (RFC 4511 §4.5.1.8): the user search needs only
-
 const NO_ATTRIBUTES: &str = "1.1";
 
 /// LDAP result code 49, invalidCredentials (RFC 4511 §4.1.9).
@@ -588,7 +569,6 @@ const LDAP_NO_SUCH_OBJECT: u32 = 32;
 const LDAP_INSUFFICIENT_ACCESS: u32 = 50;
 
 /// Is a (non-49) user-bind result code a SERVER or SESSION condition, one
-
 pub(crate) const fn is_outage(rc: u32) -> bool {
     matches!(
         rc,
@@ -672,7 +652,6 @@ pub(crate) enum SearchScope {
 pub(crate) use codec::Entry as DirEntry;
 
 /// The minimal LDAP operations `LdapModule::bind_and_identify` needs, abstracted behind a trait
-
 pub(crate) trait LdapBackend {
     /// Open (and secure) the connection to the directory.
     fn connect(&mut self) -> Result<(), Io> {
@@ -680,11 +659,9 @@ pub(crate) trait LdapBackend {
     }
 
     /// Bind with the given DN + password. `Ok(rc)` is the LDAP result code (0 = success, e.g. 49 =
-
     fn simple_bind(&mut self, dn: &str, password: &Cred) -> Result<u32, Io>;
 
     /// Run a search and return the matched entries. `Err` is an operational failure (which includes a
-
     fn search(
         &mut self,
         base: &str,
@@ -698,7 +675,6 @@ pub(crate) trait LdapBackend {
 }
 
 /// Build the STABLE principal id from the user entry's DN: the DN the directory RETURNED for the
-
 fn principal_id(user_dn: &str) -> String {
     let mut id = String::with_capacity(user_dn.len() + 5);
     id.push_str("ldap:");
@@ -719,7 +695,6 @@ fn principal_id(user_dn: &str) -> String {
 
 impl LdapModule {
     /// Connect to the directory, BIND with the credentials, read the user's groups, and build a
-
     fn bind_and_identify<B: LdapBackend>(
         &self,
         ldap: &mut B,

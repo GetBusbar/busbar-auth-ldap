@@ -43,7 +43,6 @@ busbar_test_kit::conformance_suite! {
 }
 
 /// The live directory's address (`BUSBAR_TEST_LDAP_URL`'s authority; the service container's
-
 fn upstream() -> &'static str {
     static AT: OnceLock<String> = OnceLock::new();
     AT.get_or_init(|| {
@@ -94,7 +93,6 @@ fn first(content: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 /// LDAP's cleartext negotiation: the client's StartTLS extended request (an `LDAPMessage` whose
-
 fn start_tls(tcp: &mut TcpStream) -> bool {
     let Some((0x30, message)) = element(tcp) else {
         return false;
@@ -130,11 +128,9 @@ const USER_DN: &str = "cn=conformance,dc=example,dc=org";
 const USER_PW: &str = "conformance-password";
 
 /// How long the suite waits for a named live directory to take its administrator's bind. A service
-
 const DIRECTORY_WAIT: Duration = Duration::from_secs(180);
 
 /// The live directory at `at`, bound as its administrator, retried until `until`.
-
 fn admin_bound(at: &str, until: Instant) -> Result<ldap3::LdapConn, String> {
     let settings = ldap3::LdapConnSettings::new().set_conn_timeout(Duration::from_secs(5));
     loop {
@@ -159,7 +155,6 @@ fn admin_bound(at: &str, until: Instant) -> Result<ldap3::LdapConn, String> {
 }
 
 /// The suite's user in the live directory, added once over plaintext LDAP on loopback by the
-
 fn seed_user() {
     static SEEDED: OnceLock<Result<(), String>> = OnceLock::new();
     let seeded = SEEDED.get_or_init(|| {
@@ -197,7 +192,6 @@ fn seed_user() {
 }
 
 /// The host the suite binds the module over, with the TLS front its settings name already
-
 fn host(
     wake: busbar_contract::conn::ConnWake,
     anchors: Option<&str>,
@@ -235,7 +229,6 @@ fn red_the_statement_declares_a_public_and_an_anchored_stream_and_never_blocks()
 }
 
 /// A loopback listener that takes every connection and never answers (the connections are held
-
 fn silent_directory() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a local listener");
     let at = listener.local_addr().expect("its address").to_string();
@@ -275,7 +268,6 @@ fn red_a_directory_port_with_no_directory_behind_it_is_named_at_the_deadline() {
 }
 
 /// THE MEMORY ONE `complete_login` LENDS THE PLUGIN: the submitted form fields and the host's
-
 struct LoginLend {
     _fields: [Vec<u8>; 2],
     named: Vec<NamedValue>,
@@ -291,7 +283,6 @@ unsafe impl Send for LoginLend {}
 unsafe impl Sync for LoginLend {}
 
 /// One credential login SUBMITTED on a ticket (as the host submits it) and awaited: the answer and
-
 fn login(
     p: &busbar_plugin_loader::dispatch::Plugin<Auth>,
     d: &Dispatcher,
@@ -349,7 +340,6 @@ fn login(
 }
 
 /// Host services offering the clock alone (the dispatcher's own timebase), refusing the rest (busbar's
-
 struct ClockOnly;
 
 impl busbar_test_kit::services_double::ServicesDouble for ClockOnly {

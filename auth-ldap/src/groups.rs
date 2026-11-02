@@ -8,7 +8,6 @@ use std::collections::HashSet;
 use crate::RoleFrom;
 
 /// Map the raw group-membership DN values off the directory to [`crate::Principal`] role strings,
-
 pub fn roles_from_group_dns(group_dns: &[String], mode: RoleFrom) -> Vec<String> {
     let mut out: Vec<String> = Vec::with_capacity(group_dns.len());
 
@@ -36,7 +35,6 @@ pub fn roles_from_group_dns(group_dns: &[String], mode: RoleFrom) -> Vec<String>
 }
 
 /// Extract the value of the first `CN=` attribute of a DN, unescaping the handful of DN escapes we
-
 pub(crate) fn first_cn(dn: &str) -> Option<String> {
     for rdn in split_unescaped(dn, ',') {
         for ava in split_unescaped(&rdn, '+') {
@@ -52,7 +50,6 @@ pub(crate) fn first_cn(dn: &str) -> Option<String> {
 }
 
 /// Split a DN at every unescaped `sep` (`,` between RDNs, `+` between the attribute-value
-
 fn split_unescaped(dn: &str, sep: char) -> Vec<String> {
     let mut parts = Vec::new();
     let mut cur = String::new();
@@ -91,7 +88,6 @@ fn trim_rdn_value(value: &str) -> &str {
 }
 
 /// Unescape the DN-value escapes that survive [`split_unescaped`], per RFC 4514:
-
 fn unescape_rdn_value(v: &str) -> Option<String> {
     let bytes = v.as_bytes();
     let mut out = String::with_capacity(v.len());
@@ -139,7 +135,6 @@ fn unescape_rdn_value(v: &str) -> Option<String> {
 }
 
 /// Validate a username destined for a BIND-DN TEMPLATE. A DN component cannot safely contain the DN
-
 pub fn validate_username(username: &str) -> Result<&str, String> {
     if username.is_empty() {
         return Err("empty username".to_string());
@@ -160,7 +155,6 @@ pub fn validate_username(username: &str) -> Result<&str, String> {
 }
 
 /// Escape a username for inclusion in an LDAP SEARCH FILTER (RFC4515). Used on the search-then-bind
-
 pub fn escape_filter(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for c in value.chars() {

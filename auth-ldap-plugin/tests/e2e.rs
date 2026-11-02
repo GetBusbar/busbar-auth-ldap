@@ -20,7 +20,6 @@ fn ldap_url() -> Option<String> {
 }
 
 /// The live directory's URL, or `None` to skip (loudly) outside CI. Under CI an unset URL panics,
-
 fn live_ldap_url() -> Option<String> {
     let url = ldap_url();
     if url.is_none() {
@@ -39,7 +38,6 @@ fn live_ldap_url() -> Option<String> {
 }
 
 /// The busbar checkout the live e2e builds the REAL `busbar` and `busbar-plugin-pack` binaries from:
-
 fn busbar_root() -> std::path::PathBuf {
     let dir = std::env::var_os("BUSBAR_CHECKOUT").expect(
         "BUSBAR_CHECKOUT is unset: the live e2e builds the real busbar binaries from a checkout of \
@@ -94,7 +92,6 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
 }
 
 /// THE TEST-ONLY FIRST-PARTY KEYPAIR (ed25519, `busbar-plugin-pack keygen`), never the release key.
-
 const E2E_RELEASE_PUBKEY: &str = "9209607c315f66473c8cca8bf9a7b8031115d01bb47341613cebf57f0e4f271c";
 const E2E_RELEASE_PRIVKEY: &str =
     "290f2453f236650ab21b85a95d49b9dab088518e829e4d524b01e441636ab327";
@@ -166,7 +163,6 @@ fn free_port() -> u16 {
 }
 
 /// Seed the test directory over LDAP (idempotent): ou=people, ou=groups, uid=alice (bindable
-
 fn seed_directory(url: &str) {
     use ldap3::{LdapConn, Scope, SearchEntry};
 
@@ -253,7 +249,6 @@ fn seed_directory(url: &str) {
 }
 
 /// THE TEST'S OWN STREAM to the live directory: a plaintext TCP socket in this test only (the
-
 struct TestStream(Option<std::net::TcpStream>);
 
 impl busbar_auth_ldap::conversation::Wire for TestStream {
@@ -288,7 +283,6 @@ impl busbar_auth_ldap::conversation::Wire for TestStream {
 }
 
 /// Run one credential login on the library module directly (no busbar boot): the module's codec
-
 fn live_login(settings: serde_json::Value, username: &str, password: &str) -> Login {
     let cfg: busbar_auth_ldap::LdapConfig =
         serde_json::from_value(settings).expect("live ldap settings parse");
@@ -310,7 +304,6 @@ fn live_login(settings: serde_json::Value, username: &str, password: &str) -> Lo
 }
 
 /// The module's codec against the live directory, in BOTH directory shapes: direct bind and
-
 #[test]
 fn ldap_module_binds_live_in_both_modes_and_maps_the_group() {
     let Some(url) = live_ldap_url() else {
@@ -418,7 +411,6 @@ fn wait_for_health(
 }
 
 /// A real busbar booted with the packed plugin as `identity-providers.ldap` over `url`, its settings
-
 struct Booted {
     child: Busbar,
     base: String,
@@ -529,7 +521,6 @@ fn boot(so_path: &std::path::Path, url: &str, extra: &str) -> Booted {
 }
 
 /// THE plugin-side proof: a REAL busbar boot drives the ldap credential-form flow; the plugin BINDs
-
 #[test]
 fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
     let Some(url) = live_ldap_url() else {
@@ -630,7 +621,6 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
 }
 
 /// One credential-form login on a booted busbar: begin, then POST `username`/`password`; the
-
 fn form_login(
     client: &reqwest::blocking::Client,
     base: &str,
@@ -657,7 +647,6 @@ fn form_login(
 }
 
 /// CA-1 / SEC-LDAPCA, LIVE: a directory behind LDAPS whose certificate chains to a PRIVATE CA (the
-
 #[test]
 fn ldaps_with_a_private_ca_verifies() {
     let Some(url) = live_ldap_url() else {
