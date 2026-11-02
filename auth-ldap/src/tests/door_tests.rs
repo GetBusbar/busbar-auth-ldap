@@ -857,10 +857,12 @@ mod reached_clock_callbacks {
 }
 
 mod timeout_stream_release {
-    use busbar_contract::abi::auth::{CompleteLoginIn, IdentifyOut, Ops, LOGIN_OUTAGE};
+    use busbar_contract::abi::auth::{CompleteLoginIn, IdentifyOut, NamedValue, Ops, LOGIN_OUTAGE};
     use busbar_contract::abi::host::conn::connector::{EstablishIn, IoIn, StreamIn};
     use busbar_contract::abi::host::service::{ClockNowIn, ClockReading};
-    use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
+    use busbar_contract::abi::mechanism::call::{
+        AbiStr, Blob, InHead, OutHead, Outcome, BLOB_SECRET,
+    };
     use busbar_contract::abi::mechanism::lifecycle::{OpenIn, OpenOut};
     use busbar_contract::abi::mechanism::ticket::Ticket;
     use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
@@ -952,6 +954,16 @@ mod timeout_stream_release {
         );
         assert_eq!(opened.outcome, Outcome::Ready);
         let instance = opened.take_instance().unwrap();
+        let submitted = [
+            NamedValue {
+                name: AbiStr::of("username"),
+                value: Blob::of(b"alice").with_flags(BLOB_SECRET),
+            },
+            NamedValue {
+                name: AbiStr::of("password"),
+                value: Blob::of(b"pw").with_flags(BLOB_SECRET),
+            },
+        ];
         let input = TestIn::<CompleteLoginIn>::new()
             .set(
                 |i| &i.head.ticket,
@@ -960,14 +972,7 @@ mod timeout_stream_release {
                     generation: 1,
                 },
             )
-            .fields(
-                |i| &i.submitted,
-                |i| &i.submitted_len,
-                &[
-                    (b"username".as_slice(), b"alice".as_slice()),
-                    (b"password".as_slice(), b"pw".as_slice()),
-                ],
-            );
+            .list(|i| &i.submitted, |i| &i.submitted_len, &submitted);
         let op = view.op::<Ops>(|ops| &ops.complete_login).unwrap();
         let first = reply::call_in(op, Some(&instance), &input, zeroed::<IdentifyOut>());
         NOW.with(|now| now.set(1_000_000_000));
