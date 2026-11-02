@@ -91,7 +91,7 @@ unsafe extern "C" fn close(_: HostCtx, input: *const c_void, out: *mut ServiceOu
     RawOutcome::of(outcome)
 }
 
-fn timed_out_pending_read_release(close_fails: bool) {
+fn timed_out_pending_read_release(close_fails: bool) -> String {
     CLOSE_FAILS.with(|fails| fails.set(close_fails));
     NOW.with(|now| now.set(0));
     READS.with(|reads| reads.set(0));
@@ -215,6 +215,19 @@ fn timed_out_pending_read_release(close_fails: bool) {
         )
     }
     .outcome();
+    // Read the actual door reply's captured logs before CLOSE retires the instance.
+    let envelope = timed_out.head.envelope;
+    let mut logs = String::new();
+    for n in 0..envelope.diags_len {
+        // SAFETY: the synchronous reply owns this envelope until the next door call.
+        let diag = unsafe { &*envelope.diags.add(n) };
+        if diag.id_idx == busbar_contract::abi::mechanism::call::DIAG_LOG {
+            // SAFETY: the diagnostic's stated text remains live with this reply.
+            let bytes = unsafe { std::slice::from_raw_parts(diag.text.ptr, diag.text.len) };
+            logs.push_str(std::str::from_utf8(bytes).expect("diagnostic is UTF-8"));
+            logs.push('\n');
+        }
+    }
     let close = InHead {
         size: size_of::<InHead>() as u32,
         op: life_slot::CLOSE,
@@ -247,6 +260,7 @@ fn timed_out_pending_read_release(close_fails: bool) {
         [(71, Ticket::NONE)],
         "one synchronous stream release, independent of the pending service handle"
     );
+    logs
 }
 
 #[test]
@@ -256,27 +270,7 @@ fn a_timed_out_pending_read_releases_the_stream_without_replaying_its_handle() {
 
 #[test]
 fn a_failed_close_is_logged_not_swallowed() {
-    #[derive(Clone, Default)]
-    struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-    impl std::io::Write for Log {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(bytes);
-            Ok(bytes.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-    let log = Log::default();
-    let writer = log.clone();
-    let capture = tracing_subscriber::fmt()
-        .without_time()
-        .with_ansi(false)
-        .with_max_level(tracing::Level::WARN)
-        .with_writer(move || writer.clone())
-        .finish();
-    tracing::subscriber::with_default(capture, || timed_out_pending_read_release(true));
-    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    let text = timed_out_pending_read_release(true);
     assert!(text.contains("close-failed"), "{text}");
     assert!(text.contains("close refused"), "{text}");
 }
