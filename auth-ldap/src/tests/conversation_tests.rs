@@ -955,8 +955,6 @@ fn a_failed_secure_is_an_outage_and_never_binds() {
     );
 }
 
-/// OWNER RULING (non-49 user bind), through `login_over` so the verdict is the one the door
-
 #[test]
 fn a_non_49_user_bind_is_a_bad_credential_unless_the_server_is_failing() {
     use busbar_test_kit::warn_capture::WarnCapture;

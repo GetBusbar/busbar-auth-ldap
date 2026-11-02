@@ -849,8 +849,6 @@ fn bind_wrong_password_is_invalid_credentials() {
     assert!(matches!(r, Err(BindError::InvalidCredentials)));
 }
 
-/// OWNER RULING (non-49 user bind): a user-bind result code is an OUTAGE only when it names a
-
 #[test]
 fn a_non_49_user_bind_rc_is_an_outage_only_for_a_server_condition() {
     let m = LdapModule::new(base_cfg()).unwrap();
