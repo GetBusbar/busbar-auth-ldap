@@ -535,7 +535,9 @@ fn the_signed_differences_fail_closed_as_an_outage() {
     let malformed = message(1, ber::element(0x61, &ber::element(0x04, b"")));
     let overrun = message(1, vec![0x61, 0x7f, 0x0a, 0x01, 0x00]);
     let past_cap = [&[0x30, 0x84][..], &(16_u32 * 1024 * 1024).to_be_bytes()[..]].concat();
-    for reply in [malformed, overrun, past_cap] {
+    // A well-formed reply of the wrong type to the BIND (message 1) is never a bind result, rc 0 or
+    // not: it must not authenticate.
+    for reply in [malformed, overrun, past_cap, done(1, 0), extended(1, 0)] {
         let mut dir = Directory::new(vec![reply.clone()]).held();
         assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage, "{reply:02x?}");
     }
