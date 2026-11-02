@@ -1,10 +1,457 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
-//
-// RENDERED by `busbar-release plugin heal busbar-auth-ldap` from GetBusbar/busbar-release
-// template/conformance-host/kit-stream.rs, because this repo's declares file states network needs
-// (`needs`: `tcp`); a hand edit is overwritten by the next sync.
 
-//! THE SUITE'S HOST, IN THIS PLUGIN'S OWN TEST: busbar's test kit's stream form
+//! Test-side socket I/O for the actual LDAP directory. No LDAP requests or replies are invented.
+use busbar_contract::abi::host::conn::connector::DIRECTION_OUTBOUND;
+use busbar_contract::abi::mechanism::rendering::ReadNeed;
+use busbar_contract::conn::{
+    ConnError, ConnId, ConnSlab, ConnWake, Conns, DeclaredConns, InstanceId, NeedId, OpenDesc,
+    Piece, PieceKind, Ticket,
+};
+use busbar_contract::ids::StreamId;
+use busbar_contract::transport::{ConnFacts, EgressTrust};
+use busbar_core_connector::test_support::{certs_from_pem, ClientTls, StdClientSession};
+use busbar_core_connector::DialJudge;
+use std::collections::BTreeMap;
+use std::io::{Read, Write};
+use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
+#[path = "ldap_tls.rs"]
+mod ldap_tls;
+pub use ldap_tls::anchors;
+pub const FAR_END: &str = "localhost:41859";
 
-busbar_test_kit::conformance_host! { far_end: "localhost:41859" }
+pub fn tls_front(preamble: fn(&mut TcpStream) -> bool, upstream: &'static str) {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    STARTED.get_or_init(|| ldap_tls::start(FAR_END, preamble, upstream));
+}
+
+#[derive(Clone)]
+struct Need {
+    answer: Result<(), ConnError>,
+    target: Option<String>,
+    class: u32,
+    tls: Option<ClientTls>,
+}
+enum Wire {
+    Plain(TcpStream),
+    Secure(StdClientSession),
+}
+struct Socket {
+    first_read: bool,
+    wire: Option<Wire>,
+    server: String,
+    tls: ClientTls,
+}
+struct DirectoryIo {
+    wake: ConnWake,
+    needs: Mutex<BTreeMap<(InstanceId, NeedId), Need>>,
+    sockets: ConnSlab<Mutex<Socket>>,
+    anchors: Option<String>,
+    judge: Option<Arc<dyn DialJudge>>,
+}
+
+pub fn host(wake: ConnWake, anchors: Option<&str>) -> Arc<dyn DeclaredConns> {
+    Arc::new(DirectoryIo {
+        wake,
+        needs: Mutex::default(),
+        sockets: ConnSlab::default(),
+        anchors: anchors.map(str::to_owned),
+        judge: None,
+    })
+}
+pub fn guarded_host(wake: ConnWake, anchors: Option<&str>) -> Arc<dyn DeclaredConns> {
+    // The production destination policy's default blocks private destinations; operator
+    // infrastructure retains its production exception and metadata is still refused.
+    let dest = busbar_core_connector::process::dest_judge(&Default::default())
+        .expect("default destination guard");
+    Arc::new(DirectoryIo {
+        wake,
+        needs: Mutex::default(),
+        sockets: ConnSlab::default(),
+        anchors: anchors.map(str::to_owned),
+        judge: Some(busbar_core_connector::process::judge(dest, &[])),
+    })
+}
+fn io_error(e: std::io::Error) -> ConnError {
+    match e.kind() {
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => ConnError::Pending,
+        _ => ConnError::Closed,
+    }
+}
+impl DirectoryIo {
+    fn wake_later(&self, owner: InstanceId, ticket: Ticket) {
+        let wake = self.wake.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(2));
+            wake(owner, ticket);
+        });
+    }
+}
+impl Conns for DirectoryIo {
+    fn open(
+        &self,
+        owner: InstanceId,
+        need: NeedId,
+        desc: &OpenDesc<'_>,
+    ) -> Result<ConnId, ConnError> {
+        let n = self
+            .needs
+            .lock()
+            .unwrap()
+            .get(&(owner, need))
+            .cloned()
+            .ok_or(ConnError::UndeclaredNeed)?;
+        n.answer?;
+        if n.target.as_deref().is_some_and(|t| t != desc.target) {
+            return Err(ConnError::Refused);
+        }
+        let at = if let Some(judge) = &self.judge {
+            let (tx, rx) = std::sync::mpsc::channel();
+            judge
+                .judge_dial(
+                    desc.target,
+                    n.class,
+                    Box::new(move |v| {
+                        let _ = tx.send(v);
+                    }),
+                )
+                .unwrap_or_else(|| rx.recv_timeout(Duration::from_secs(10)).unwrap_or(Err(0)))
+                .map_err(|_| ConnError::Refused)?
+        } else {
+            desc.target
+                .to_socket_addrs()
+                .map_err(|_| ConnError::Fault)?
+                .find(|a| a.ip().is_loopback())
+                .ok_or(ConnError::Refused)?
+        };
+        if !desc.within.is_empty() && !desc.within.contains(&at.ip()) {
+            return Err(ConnError::Refused);
+        }
+        let tcp = TcpStream::connect_timeout(
+            &at,
+            Duration::from_millis(if desc.timeout_ms == 0 {
+                5000
+            } else {
+                desc.timeout_ms
+            }),
+        )
+        .map_err(io_error)?;
+        tcp.set_read_timeout(Some(Duration::from_millis(2)))
+            .map_err(io_error)?;
+        tcp.set_write_timeout(Some(Duration::from_secs(5)))
+            .map_err(io_error)?;
+        self.sockets.insert(
+            owner,
+            need,
+            Mutex::new(Socket {
+                first_read: true,
+                wire: Some(Wire::Plain(tcp)),
+                server: desc
+                    .target
+                    .rsplit_once(':')
+                    .map_or(desc.target, |v| v.0)
+                    .to_owned(),
+                tls: n.tls.ok_or(ConnError::Refused)?,
+            }),
+        )
+    }
+    fn write(
+        &self,
+        owner: InstanceId,
+        conn: ConnId,
+        bytes: &[u8],
+        _: bool,
+        _: bool,
+    ) -> Result<usize, ConnError> {
+        let (_, socket) = self.sockets.get(owner, conn)?;
+        let mut socket = socket.lock().unwrap();
+        let n = match socket.wire.as_mut().ok_or(ConnError::Closed)? {
+            Wire::Plain(s) => s.write(bytes),
+            Wire::Secure(s) => s.write(bytes).and_then(|n| s.flush().map(|()| n)),
+        };
+        n.map_err(io_error)
+    }
+    fn read(
+        &self,
+        owner: InstanceId,
+        conn: ConnId,
+        ticket: Ticket,
+        buf: &mut [u8],
+    ) -> Result<Piece, ConnError> {
+        let (_, socket) = self.sockets.get(owner, conn)?;
+        let mut socket = socket.lock().unwrap();
+        // Model host scheduling at the first actual socket read: return PENDING with a
+        // registered ticket wake before delivering directory bytes on the resumed call.
+        if socket.first_read {
+            socket.first_read = false;
+            self.wake_later(owner, ticket);
+            return Err(ConnError::Pending);
+        }
+        let n = match socket.wire.as_mut().ok_or(ConnError::Closed)? {
+            Wire::Plain(s) => s.read(buf),
+            Wire::Secure(s) => s.read(buf),
+        }
+        .map_err(io_error);
+        let n = match n {
+            Err(ConnError::Pending) => {
+                self.wake_later(owner, ticket);
+                return Err(ConnError::Pending);
+            }
+            other => other?,
+        };
+        Ok(Piece {
+            kind: if n == 0 {
+                PieceKind::Completion
+            } else {
+                PieceKind::Body
+            },
+            stream: StreamId(0),
+            len: n,
+            end: true,
+            status: None,
+            status_code: None,
+            reason: None,
+            status_namespace: None,
+            declared_len: None,
+            fault: None,
+            retry_after_secs: None,
+        })
+    }
+    fn wait(&self, owner: InstanceId, set: &[ConnId], ticket: Ticket) -> Result<usize, ConnError> {
+        for id in set {
+            self.sockets.get(owner, *id)?;
+        }
+        self.wake_later(owner, ticket);
+        Err(ConnError::Pending)
+    }
+    fn facts(&self, owner: InstanceId, conn: ConnId) -> Result<ConnFacts, ConnError> {
+        self.sockets.get(owner, conn)?;
+        Ok(ConnFacts::default())
+    }
+    fn close(&self, owner: InstanceId, conn: ConnId) -> Result<(), ConnError> {
+        self.sockets.remove(owner, conn)?;
+        Ok(())
+    }
+}
+impl DeclaredConns for DirectoryIo {
+    fn declare(
+        &self,
+        owner: InstanceId,
+        need: NeedId,
+        spec: &ReadNeed,
+        target: Option<&str>,
+        trust: Option<&str>,
+    ) -> Result<(), ConnError> {
+        let mut answer = if spec.direction != DIRECTION_OUTBOUND
+            || spec.transport != "tcp"
+            || (!spec.target_from.is_empty() && target.is_none())
+            || (!spec.trust_from.is_empty() && trust.is_none())
+        {
+            Err(ConnError::Refused)
+        } else {
+            Ok(())
+        };
+        let pem = trust.or(self.anchors.as_deref());
+        let tls = ClientTls::new(&EgressTrust {
+            extra_anchors: pem.map(certs_from_pem).unwrap_or_default(),
+            ..EgressTrust::default()
+        })
+        .ok();
+        if tls.is_none() {
+            answer = Err(ConnError::Refused);
+        }
+        self.needs.lock().unwrap().insert(
+            (owner, need),
+            Need {
+                answer,
+                target: target.map(str::to_owned),
+                class: spec.egress_class,
+                tls,
+            },
+        );
+        if answer.is_ok() {
+            self.sockets.declare(owner, need);
+        }
+        answer
+    }
+    fn declared(&self, owner: InstanceId, need: NeedId) -> Option<Result<(), ConnError>> {
+        self.needs
+            .lock()
+            .unwrap()
+            .get(&(owner, need))
+            .map(|n| n.answer)
+    }
+    fn serves_scheme(&self, scheme: &str) -> bool {
+        scheme == "tcp"
+    }
+    fn upgrade_secure(
+        &self,
+        owner: InstanceId,
+        conn: ConnId,
+        name: Option<&str>,
+        trust: Option<&str>,
+        verify_off: bool,
+        _: Ticket,
+    ) -> Result<(), ConnError> {
+        if verify_off || trust.is_some() {
+            return Err(ConnError::Refused);
+        }
+        let (_, socket) = self.sockets.get(owner, conn)?;
+        let mut socket = socket.lock().unwrap();
+        let Some(Wire::Plain(tcp)) = socket.wire.take() else {
+            return Err(ConnError::Refused);
+        };
+        tcp.set_read_timeout(Some(Duration::from_secs(5)))
+            .map_err(io_error)?;
+        let secured = socket
+            .tls
+            .connect_std(name.unwrap_or(&socket.server), tcp)
+            .map_err(|_| ConnError::Refused)?;
+        secured
+            .tcp()
+            .set_read_timeout(Some(Duration::from_millis(2)))
+            .map_err(io_error)?;
+        socket.wire = Some(Wire::Secure(secured));
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use busbar_contract::abi::host::conn::connector::{
+        EGRESS_DEFAULT, EGRESS_OPERATOR_INFRASTRUCTURE,
+    };
+    use busbar_contract::abi::mechanism::rendering::ReadBlob;
+    const OWNER: InstanceId = InstanceId(7);
+    fn declare(c: &dyn DeclaredConns, id: u32, class: u32) {
+        c.declare(
+            OWNER,
+            NeedId(id),
+            &ReadNeed {
+                direction: DIRECTION_OUTBOUND,
+                egress_class: class,
+                transport: "tcp".into(),
+                auth: String::new(),
+                target_from: String::new(),
+                trust_from: String::new(),
+                details: ReadBlob {
+                    fmt: 0,
+                    flags: 0,
+                    bytes: Vec::new(),
+                },
+                timeout_ms: 0,
+                keep_mode: busbar_contract::abi::host::conn::connector::KEEP_NAMED,
+                keep_response_headers: Vec::new(),
+                deny_response_headers: Vec::new(),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    }
+    fn upgraded_echo(trust: Option<&str>) -> Result<Vec<u8>, ConnError> {
+        let echo = TcpListener::bind("127.0.0.1:0").unwrap();
+        let backend = echo.local_addr().unwrap().to_string();
+        std::thread::spawn(move || {
+            let (mut s, _) = echo.accept().unwrap();
+            let mut bytes = [0; 5];
+            if s.read_exact(&mut bytes).is_ok() {
+                let _ = s.write_all(&bytes);
+            }
+        });
+        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = reservation.local_addr().unwrap().to_string();
+        drop(reservation);
+        ldap_tls::start(&address, |_| true, &backend);
+        let c = host(Arc::new(|_, _| {}), trust);
+        declare(c.as_ref(), 0, EGRESS_OPERATOR_INFRASTRUCTURE);
+        let id = c.open(
+            OWNER,
+            NeedId(0),
+            &OpenDesc {
+                target: &address,
+                timeout_ms: 5000,
+                ..OpenDesc::default()
+            },
+        )?;
+        c.upgrade_secure(OWNER, id, Some("localhost"), None, false, 0)?;
+        let mut at = 0;
+        while at < 5 {
+            at += c.write(OWNER, id, &b"hello"[at..], false, false)?;
+        }
+        let until = std::time::Instant::now() + Duration::from_secs(10);
+        let mut answer = Vec::new();
+        let mut buf = [0; 5];
+        while answer.len() < 5 {
+            match c.read(OWNER, id, 0, &mut buf) {
+                Ok(piece) if piece.kind == PieceKind::Body => {
+                    answer.extend_from_slice(&buf[..piece.len])
+                }
+                Err(ConnError::Pending) if std::time::Instant::now() < until => {}
+                other => panic!("TLS echo failed: {other:?}"),
+            }
+        }
+        c.close(OWNER, id)?;
+        Ok(answer)
+    }
+    #[test]
+    fn the_hosts_tls_upgrade_verifies_against_the_suites_test_anchors() {
+        assert_eq!(upgraded_echo(Some(anchors())), Ok(b"hello".to_vec()));
+    }
+    #[test]
+    fn red_with_the_anchors_withheld_the_hosts_tls_upgrade_is_refused() {
+        let answer = upgraded_echo(None);
+        assert!(answer.is_err(), "upgraded over an untrusted CA: {answer:?}");
+    }
+    #[test]
+    fn the_conformance_host_guard_refuses_a_private_destination() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let address = listener.local_addr().unwrap().to_string();
+        let c = guarded_host(Arc::new(|_, _| {}), Some(anchors()));
+        for (id, class, target) in [
+            (0, EGRESS_DEFAULT, "10.0.0.1:443"),
+            (1, EGRESS_DEFAULT, address.as_str()),
+            (2, EGRESS_OPERATOR_INFRASTRUCTURE, "169.254.169.254:80"),
+        ] {
+            declare(c.as_ref(), id, class);
+            assert_eq!(
+                c.open(
+                    OWNER,
+                    NeedId(id),
+                    &OpenDesc {
+                        target,
+                        timeout_ms: 2000,
+                        ..OpenDesc::default()
+                    }
+                )
+                .map(|_| ()),
+                Err(ConnError::Refused)
+            );
+        }
+        assert!(
+            listener.accept().is_err(),
+            "refused destination was dialled"
+        );
+        declare(c.as_ref(), 3, EGRESS_OPERATOR_INFRASTRUCTURE);
+        let id = c
+            .open(
+                OWNER,
+                NeedId(3),
+                &OpenDesc {
+                    target: &address,
+                    timeout_ms: 2000,
+                    ..OpenDesc::default()
+                },
+            )
+            .expect("production operator-infrastructure class allows loopback");
+        assert!(
+            listener.accept().is_ok(),
+            "admitted dial reached the real listener"
+        );
+        c.close(OWNER, id).unwrap();
+    }
+}

@@ -6,6 +6,7 @@
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
+use super::{bind, close, load, open, Leg};
 use busbar_contract::abi::auth::LOGIN_IDENTITY;
 use busbar_contract::abi::mechanism::rendering::ReadNeed;
 use busbar_contract::conn::{
@@ -15,7 +16,6 @@ use busbar_contract::conn::{
 use busbar_contract::ids::StreamId;
 use busbar_contract::transport::{CertFacts, ConnFacts};
 use busbar_plugin_loader::dispatch::{ConnTable, DispatchConfig, Dispatcher};
-use busbar_test_kit::conformance::{self, Leg, Subject};
 
 struct State {
     ticket: Ticket,
@@ -28,7 +28,7 @@ struct State {
     closes: usize,
 }
 
-struct Carrier {
+pub(super) struct Carrier {
     wake: ConnWake,
     partial: bool,
     pend: bool,
@@ -36,7 +36,7 @@ struct Carrier {
 }
 
 impl Carrier {
-    fn new(wake: ConnWake, partial: bool, pend: bool) -> Self {
+    pub(super) fn new(wake: ConnWake, partial: bool, pend: bool) -> Self {
         Self {
             wake,
             partial,
@@ -233,7 +233,7 @@ fn sealed_bind_resumes_the_last_service_through_the_real_completion_store() {
         ] {
             let d = Arc::new(Dispatcher::with_services(
                 DispatchConfig::default(),
-                Arc::new(busbar_test_kit::services_double::Double(super::ClockOnly)),
+                Arc::new(super::ClockOnly),
             ));
             let carrier = Arc::new(Carrier::new(d.conn_waker(), partial, pend));
             let settings = serde_json::json!({
@@ -243,17 +243,13 @@ fn sealed_bind_resumes_the_last_service_through_the_real_completion_store() {
                 "timeout_secs": 1,
             })
             .to_string();
-            let subject = Subject::of_macro(super::MACRO_DOOR, "busbar_auth_ldap_plugin", "{}");
             let binding = busbar_plugin_loader::dispatch::Bind {
                 conns: ConnTable::Host(carrier.clone()),
-                ..conformance::bind(&d, "ldap-sealed-replay")
+                ..bind(&d, "ldap-sealed-replay")
             };
-            let plugin = conformance::load::<busbar_plugin_loader::dispatch::kinds::auth::Auth>(
-                &subject, leg, binding,
-            )
-            .unwrap();
+            let plugin = load(leg, binding);
             assert_eq!(
-                conformance::open(&plugin, settings.as_bytes()).outcome,
+                open(&plugin, settings.as_bytes()).outcome,
                 super::Outcome::Ready
             );
             let answer = super::login(&plugin, &d, "alice", "pw");
@@ -272,7 +268,7 @@ fn sealed_bind_resumes_the_last_service_through_the_real_completion_store() {
             assert_eq!(state.facts, usize::from(secure), "one secure FACTS check");
             assert_eq!(state.closes, 1, "the login released its stream");
             drop(state);
-            assert_eq!(conformance::close(&plugin).outcome, super::Outcome::Ready);
+            assert_eq!(close(&plugin).outcome, super::Outcome::Ready);
         }
     }
 }

@@ -151,8 +151,8 @@ fn a_search_entry_keeps_its_text_values_and_warns_of_the_rest() {
     ]
     .into_iter()
     .collect();
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
-    let got = tracing::subscriber::with_default(cap.clone(), || decode(&m));
+    let cap = crate::diagnostics::Diagnostics::default();
+    let got = tracing::subscriber::with_default(cap.subscriber(), || decode(&m));
     assert_eq!(
         got,
         Ok(Message {
@@ -461,8 +461,8 @@ fn a_directory_attribute_cannot_inject_a_warning_line() {
         1,
         &tlv(0x64, &[tlv(0x04, b"uid=a"), tlv(0x30, &attr)].concat()),
     );
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
-    tracing::subscriber::with_default(cap.clone(), || decode(&message)).unwrap();
+    let cap = crate::diagnostics::Diagnostics::default();
+    tracing::subscriber::with_default(cap.subscriber(), || decode(&message)).unwrap();
     assert!(cap.contains("\\n"), "{:?}", cap.messages());
     assert!(!cap
         .messages()

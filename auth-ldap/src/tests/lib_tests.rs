@@ -783,10 +783,10 @@ fn a_failed_unbind_is_ignored() {
 
 #[test]
 fn a_ca_bundle_with_a_non_der_block_holds_no_certificate() {
-    let good = busbar_test_kit::conformance_host::anchors();
+    let good = include_str!("ca.pem");
     assert!(
         crate::holds_a_certificate(good),
-        "the kit's CA is a certificate"
+        "the LDAP test CA is a certificate"
     );
     let not_der = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
     assert!(!crate::holds_a_certificate(not_der));
@@ -975,7 +975,7 @@ fn the_group_attr_is_matched_case_insensitively() {
 
 #[test]
 fn a_ranged_group_attribute_is_read_and_its_truncation_warned() {
-    use busbar_test_kit::warn_capture::WarnCapture;
+    use crate::diagnostics::Diagnostics;
     let m = LdapModule::new(base_cfg()).unwrap();
     let read = |attr: &str| {
         let mut fake = FakeLdap {
@@ -983,8 +983,8 @@ fn a_ranged_group_attribute_is_read_and_its_truncation_warned() {
             group_attr: attr.to_string(),
             ..Default::default()
         };
-        let cap = WarnCapture::default();
-        let p = tracing::subscriber::with_default(cap.clone(), || {
+        let cap = Diagnostics::default();
+        let p = tracing::subscriber::with_default(cap.subscriber(), || {
             m.bind_and_identify_on(&mut fake, "alice", "pw")
         })
         .expect("binds");
@@ -1001,11 +1001,11 @@ fn a_ranged_group_attribute_is_read_and_its_truncation_warned() {
 
 #[test]
 fn an_absent_group_attribute_is_warned() {
-    use busbar_test_kit::warn_capture::WarnCapture;
+    use crate::diagnostics::Diagnostics;
     let m = LdapModule::new(base_cfg()).unwrap();
     let mut fake = FakeLdap::default();
-    let cap = WarnCapture::default();
-    let p = tracing::subscriber::with_default(cap.clone(), || {
+    let cap = Diagnostics::default();
+    let p = tracing::subscriber::with_default(cap.subscriber(), || {
         m.bind_and_identify_on(&mut fake, "alice", "pw")
     })
     .expect("binds");
@@ -1130,13 +1130,17 @@ fn group_values_are_capped() {
         group_attr: "memberOf".to_string(),
         ..Default::default()
     };
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
-    let p = tracing::subscriber::with_default(cap.clone(), || {
+    let cap = crate::diagnostics::Diagnostics::default();
+    let p = tracing::subscriber::with_default(cap.subscriber(), || {
         m.bind_and_identify_on(&mut fake, "alice", "pw")
     })
     .unwrap();
     assert_eq!(p.roles.len(), 4096, "group values must be capped at 4096");
-    assert!(cap.contains("reason=groups-capped"), "{:?}", cap.messages());
+    assert!(
+        cap.contains("reason=\"groups-capped\""),
+        "{:?}",
+        cap.messages()
+    );
     assert!(cap.contains("cap=4096"), "{:?}", cap.messages());
 }
 
@@ -1470,12 +1474,12 @@ fn debug_of_the_config_never_prints_the_url_password() {
 
 mod logging {
     use super::*;
-    use busbar_test_kit::warn_capture::WarnCapture;
+    use crate::diagnostics::Diagnostics;
 
     /// Run `f` under an INFO-and-above capture: what it answered, and the capture.
-    fn captured<T>(f: impl FnOnce() -> T) -> (T, WarnCapture) {
-        let cap = WarnCapture::capturing_debug();
-        let got = tracing::subscriber::with_default(cap.clone(), f);
+    fn captured<T>(f: impl FnOnce() -> T) -> (T, Diagnostics) {
+        let cap = Diagnostics::capturing_debug();
+        let got = tracing::subscriber::with_default(cap.subscriber(), f);
         (got, cap)
     }
 
@@ -1493,7 +1497,7 @@ mod logging {
         let (m, cap) = captured(|| LdapModule::new(cfg));
         assert!(m.is_ok());
         assert!(cap.contains("root DSE"), "{:?}", cap.messages());
-        assert!(cap.contains("module=ldap"), "{:?}", cap.messages());
+        assert!(cap.contains("module=\"ldap\""), "{:?}", cap.messages());
         let (_, cap) = captured(|| LdapModule::new(search_cfg()));
         assert!(!cap.contains("root DSE"), "{:?}", cap.messages());
         let mut cfg = base_cfg();
@@ -1510,7 +1514,7 @@ mod logging {
         let (r, cap) = captured(|| m.bind_and_identify_on(&mut fake, "ghost", "pw-s3cret"));
         assert!(matches!(r, Err(BindError::InvalidCredentials)), "{r:?}");
         assert!(cap.contains("no search match"), "{:?}", cap.messages());
-        assert!(cap.contains("module=ldap"), "{:?}", cap.messages());
+        assert!(cap.contains("module=\"ldap\""), "{:?}", cap.messages());
         assert!(!cap.contains("pw-s3cret"), "{:?}", cap.messages());
         assert!(!cap.contains("ghost"), "{:?}", cap.messages());
     }
@@ -1523,8 +1527,8 @@ mod logging {
             base_empty: true,
             ..Default::default()
         };
-        let cap = WarnCapture::default();
-        let r = tracing::subscriber::with_default(cap.clone(), || {
+        let cap = Diagnostics::default();
+        let r = tracing::subscriber::with_default(cap.subscriber(), || {
             m.bind_and_identify_on(&mut fake, "alice", "pw-s3cret")
         });
         let p = r.expect("the bind identifies");
@@ -1534,7 +1538,7 @@ mod logging {
             "{:?}",
             cap.messages()
         );
-        assert!(cap.contains("module=ldap"), "{:?}", cap.messages());
+        assert!(cap.contains("module=\"ldap\""), "{:?}", cap.messages());
         assert!(
             !cap.contains("alice"),
             "the DN leaked: {:?}",
@@ -1553,8 +1557,8 @@ mod logging {
         let (r, cap) = captured(|| m.bind_and_identify_on(&mut fake(), "alice", "pw-s3cret"));
         assert!(matches!(r, Err(BindError::InvalidCredentials)), "{r:?}");
         assert_eq!(cap.count("ambiguous"), 1, "{:?}", cap.messages());
-        let warn = WarnCapture::default();
-        tracing::subscriber::with_default(warn.clone(), || {
+        let warn = Diagnostics::default();
+        tracing::subscriber::with_default(warn.subscriber(), || {
             m.bind_and_identify_on(&mut fake(), "alice", "pw-s3cret")
         })
         .ok();
@@ -1629,8 +1633,8 @@ mod logging {
     #[test]
     fn no_host_clock_is_an_outage() {
         let m = LdapModule::new(base_cfg()).unwrap();
-        let cap = WarnCapture::default();
-        let got = tracing::subscriber::with_default(cap.clone(), || {
+        let cap = Diagnostics::default();
+        let got = tracing::subscriber::with_default(cap.subscriber(), || {
             let mut conv = crate::conversation::Conversation::new();
             m.login_text(&mut conv, &mut Untouched, Some("alice"), Some("pw"), None)
         });
@@ -1686,8 +1690,8 @@ fn distinct_invalid_group_name_bytes_do_not_merge_into_one_role() {
 
 #[test]
 fn a_group_value_mapping_to_an_empty_role_is_named() {
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
-    let roles = tracing::subscriber::with_default(cap.clone(), || {
+    let cap = crate::diagnostics::Diagnostics::default();
+    let roles = tracing::subscriber::with_default(cap.subscriber(), || {
         crate::groups::roles_from_group_dns(&["CN=,OU=Groups".into()], RoleFrom::Cn)
     });
     assert!(roles.is_empty());

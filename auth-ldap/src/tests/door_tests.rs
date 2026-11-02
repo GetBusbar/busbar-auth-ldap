@@ -601,7 +601,7 @@ mod private_ca {
     }
 
     fn pem() -> &'static str {
-        busbar_test_kit::conformance_host::anchors()
+        include_str!("ca.pem")
     }
 
     #[test]
@@ -654,17 +654,21 @@ mod reached_clock_callbacks {
     use std::sync::mpsc::{self, Sender};
     use std::time::Duration;
 
-    use busbar_contract::abi::auth::{slot as auth_slot, CompleteLoginIn, IdentifyOut, Ops};
-    use busbar_contract::abi::host::service::{ClockNowIn, ClockReading};
+    use busbar_contract::abi::auth::{slot as auth_slot, CompleteLoginIn, IdentifyOut};
     use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
     use busbar_contract::abi::mechanism::lifecycle::{slot as life_slot, OpenIn, OpenOut};
-    use busbar_contract::abi::mechanism::ticket::Ticket;
     use busbar_contract::abi::sdk::life::Held;
+    use busbar_contract::abi::sdk::test_support::zeroed;
     use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
-    use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
-    use busbar_test_kit::test_support::reply;
-    use busbar_test_kit::test_support::test_in::TestIn;
-    use busbar_test_kit::test_support::{zeroed, DoorView};
+    use busbar_contract::services::{
+        Caller, DiskDest, HookAsk, HostServices, Later, NestAsk, Ran, Reading, RecordsList,
+        Snapshot, Stored, TrustKeyRef, UNSERVED,
+    };
+    use busbar_plugin_loader::dispatch::kinds::auth::Auth;
+    use busbar_plugin_loader::dispatch::{
+        load_linked, Bind, ConnTable, DispatchConfig, Dispatcher, Frame, LinkedRow, NoSink,
+    };
+    use std::sync::Arc;
 
     thread_local! {
         static PROBE: RefCell<Option<Sender<Sender<bool>>>> = const { RefCell::new(None) };
@@ -673,12 +677,11 @@ mod reached_clock_callbacks {
     }
 
     struct Clock;
-    impl FakeService for Clock {
-        type In = ClockNowIn;
-        fn serve(call: &mut ServiceCall<ClockNowIn>) -> Outcome {
+    impl HostServices for Clock {
+        fn now(&self) -> Reading {
             let unlocked = PROBE.with(|probe| {
-                let probe = probe.borrow();
                 probe
+                    .borrow()
                     .as_ref()
                     .and_then(|ask| {
                         let (reply, result) = mpsc::channel();
@@ -688,16 +691,265 @@ mod reached_clock_callbacks {
                     .unwrap_or(false)
             });
             SAMPLES.with(|samples| samples.borrow_mut().push(unlocked));
-            call.put(
-                |i| &i.reading,
-                ClockReading {
-                    size: std::mem::size_of::<ClockReading>() as u32,
-                    _reserved: 0,
-                    wall_ns: 42,
-                    mono_ns: 42,
-                },
-            );
-            Outcome::Ready
+            Reading {
+                wall_ns: 42,
+                mono_ns: 42,
+            }
+        }
+        fn dest_judge(&self, _dest: &str, _class: u32, _flags: u32, _later: Option<Later>) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn records_get(&self, _caller: &Caller, _kind: &str, _key: &[u8], _later: Later) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn records_list(&self, _caller: &Caller, _list: RecordsList, _later: Later) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn records_claim(
+            &self,
+            _caller: &Caller,
+            _kind: &str,
+            _key: &[u8],
+            _ttl_ms: u64,
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn sign(&self, _caller: &Caller, _data: &[u8]) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_sight(
+            &self,
+            _caller: &Caller,
+            _counterparty: &str,
+            _hash: &str,
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn trust_unreached(&self, _caller: &Caller, _counterparty: &str) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_sight_item(
+            &self,
+            _caller: &Caller,
+            _counterparty: &str,
+            _item: &str,
+            _digest: &str,
+        ) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_decide(
+            &self,
+            _caller: &Caller,
+            _key: TrustKeyRef<'_>,
+            _expected: Option<&str>,
+            _approve: bool,
+        ) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_state(&self, _caller: &Caller, _counterparty: &str) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_serves(
+            &self,
+            _caller: &Caller,
+            _counterparty: &str,
+            _item: Option<&str>,
+            _digest: Option<&str>,
+        ) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_due(&self, _caller: &Caller) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn trust_verify(
+            &self,
+            _caller: &Caller,
+            _counterparty: &str,
+            _payload: &[u8],
+            _signatures: &[u8],
+        ) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn entitlement_check(&self, _caller: &Caller, _unit: Option<u64>, _target: &str) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn session_emit(&self, _caller: &Caller, _session: u64, _bytes: &[u8]) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn ticket_mint(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _ttl_secs: u64,
+            _record: &[u8],
+        ) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn ticket_take(&self, _caller: &Caller, _unit: Option<u64>) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn random_fill(&self, _len: u64) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn records_secret(&self, _kind: &str, _id: &str, _later: Later) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn unit_nest(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _ask: NestAsk,
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_open(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _kind: &str,
+            _record: &[u8],
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_find(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _reference: &[u8],
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_settle(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _handle: u64,
+            _record: &[u8],
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn work_resume(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _handle: u64,
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn disk_append(&self, _dest: &DiskDest, _bytes: Vec<u8>, _later: Later) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn verify_lookup(&self, _caller: &Caller, _key: &[u8], _later: Later) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn verify_store(
+            &self,
+            _caller: &Caller,
+            _key: &[u8],
+            _entry: &[u8],
+            _ttl_ms: u64,
+        ) -> Stored {
+            Stored::refused(UNSERVED)
+        }
+        fn content_scan(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _content: &[u8],
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn hook_call(
+            &self,
+            _caller: &Caller,
+            _unit: Option<u64>,
+            _ask: HookAsk,
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
+        }
+        fn snapshot_read(&self, _caller: &Caller, _scope: u32) -> Snapshot {
+            Snapshot::Refused(UNSERVED)
+        }
+    }
+
+    impl busbar_contract::conn::Conns for Clock {
+        fn open(
+            &self,
+            _: busbar_contract::conn::InstanceId,
+            _: busbar_contract::conn::NeedId,
+            _: &busbar_contract::conn::OpenDesc<'_>,
+        ) -> Result<busbar_contract::conn::ConnId, busbar_contract::conn::ConnError> {
+            panic!("cache-only call must not open a connection")
+        }
+        fn write(
+            &self,
+            _: busbar_contract::conn::InstanceId,
+            _: busbar_contract::conn::ConnId,
+            _: &[u8],
+            _: bool,
+            _: bool,
+        ) -> Result<usize, busbar_contract::conn::ConnError> {
+            panic!("cache-only call must not write")
+        }
+        fn read(
+            &self,
+            _: busbar_contract::conn::InstanceId,
+            _: busbar_contract::conn::ConnId,
+            _: busbar_contract::conn::Ticket,
+            _: &mut [u8],
+        ) -> Result<busbar_contract::conn::Piece, busbar_contract::conn::ConnError> {
+            panic!("cache-only call must not read")
+        }
+        fn wait(
+            &self,
+            _: busbar_contract::conn::InstanceId,
+            _: &[busbar_contract::conn::ConnId],
+            _: busbar_contract::conn::Ticket,
+        ) -> Result<usize, busbar_contract::conn::ConnError> {
+            panic!("cache-only call must not wait")
+        }
+        fn facts(
+            &self,
+            _: busbar_contract::conn::InstanceId,
+            _: busbar_contract::conn::ConnId,
+        ) -> Result<busbar_contract::transport::ConnFacts, busbar_contract::conn::ConnError>
+        {
+            panic!("cache-only call must not inspect a connection")
+        }
+        fn close(
+            &self,
+            _: busbar_contract::conn::InstanceId,
+            _: busbar_contract::conn::ConnId,
+        ) -> Result<(), busbar_contract::conn::ConnError> {
+            panic!("cache-only call must not close a connection")
+        }
+    }
+    impl busbar_contract::conn::DeclaredConns for Clock {
+        fn declare(
+            &self,
+            _: busbar_contract::conn::InstanceId,
+            _: busbar_contract::conn::NeedId,
+            _: &busbar_contract::abi::mechanism::rendering::ReadNeed,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<(), busbar_contract::conn::ConnError> {
+            Ok(())
+        }
+        fn declared(
+            &self,
+            _: busbar_contract::conn::InstanceId,
+            _: busbar_contract::conn::NeedId,
+        ) -> Option<Result<(), busbar_contract::conn::ConnError>> {
+            Some(Ok(()))
         }
     }
 
@@ -768,49 +1020,41 @@ mod reached_clock_callbacks {
     fn both_reached_cache_clock_callbacks_run_without_the_reached_lock() {
         SAMPLES.with(|samples| samples.borrow_mut().clear());
         RETAINED.with(|retained| retained.set(false));
-        let view = DoorView::of(fixture::MACRO_DOOR);
-        let host = FakeHost::new().serve(fake::host::CLOCK_NOW, Clock);
-        let open = host.lend_in(
-            TestIn::<OpenIn>::new()
-                .set(|i| &i.head.op, life_slot::OPEN)
-                .settings(MINIMAL.as_bytes()),
-        );
-        let mut opened = reply::call_hosted_in(
-            view.op::<Ops>(|ops| &ops.head.open).unwrap(),
-            None,
-            &open,
-            zeroed::<OpenOut>(),
-        );
-        assert_eq!(opened.outcome, Outcome::Ready);
-        let instance = opened.take_instance().expect("the LDAP instance");
-        let input = TestIn::<CompleteLoginIn>::new()
-            .set(|i| &i.head.op, auth_slot::COMPLETE_LOGIN)
-            .set(
-                |i| &i.head.ticket,
-                Ticket {
-                    slot: 3,
-                    generation: 1,
-                },
-            );
-        let answer = reply::call_in(
-            view.op::<Ops>(|ops| &ops.complete_login).unwrap(),
-            Some(&instance),
-            &input,
-            zeroed::<IdentifyOut>(),
-        );
-        let closed = reply::close_in(
-            view.op::<Ops>(|ops| &ops.head.close).unwrap(),
-            instance,
-            &TestIn::<InHead>::new().set(|i| &i.op, life_slot::CLOSE),
-            zeroed::<OutHead>(),
-        );
-        assert_eq!(closed.outcome, Outcome::Ready);
+        let host = Arc::new(Clock);
+        let d = Dispatcher::with_services(DispatchConfig::default(), host.clone());
+        let p = load_linked::<Auth>(
+            &LinkedRow::of_macro(fixture::MACRO_DOOR).unwrap(),
+            Bind {
+                instance: "ldap-private-cache-lock".into(),
+                max_inflight_cap: 8,
+                sink: Arc::new(NoSink),
+                dispatcher: d.adopter(),
+                conns: ConnTable::Host(host),
+            },
+        )
+        .unwrap();
+        let secret = [busbar_contract::abi::mechanism::call::Blob::of(b"")];
+        let mut open: Frame<OpenIn, OpenOut> = Frame::new(zeroed(), zeroed());
+        open.input.settings = busbar_contract::abi::mechanism::call::Blob {
+            fmt: busbar_contract::abi::mechanism::call::BLOB_JSON,
+            ..busbar_contract::abi::mechanism::call::Blob::of(MINIMAL.as_bytes())
+        };
+        open.input.secrets = secret.as_ptr();
+        open.input.secrets_len = secret.len();
+        open.input.generation = 1;
+        assert_eq!(p.call(life_slot::OPEN, &mut open).outcome, Outcome::Ready);
+        let ticket = d.mint(0).expect("cache call ticket");
+        let mut input: Frame<CompleteLoginIn, IdentifyOut> = Frame::new(zeroed(), zeroed());
+        let answer = p.call_inline(ticket, false, auth_slot::COMPLETE_LOGIN, &mut input);
+        d.recycle(ticket);
+        let mut close: Frame<InHead, OutHead> = Frame::new(zeroed(), zeroed());
+        assert_eq!(p.call(life_slot::CLOSE, &mut close).outcome, Outcome::Ready);
         assert_eq!(
             answer.outcome,
             Outcome::Failed,
             "the empty identity buffer requires a re-call"
         );
-        assert!(answer.out.needed_bytes > 0, "the real identity writer ran");
+        assert!(input.out.needed_bytes > 0, "the real identity writer ran");
         assert!(
             RETAINED.with(Cell::get),
             "the short-answer identity was retained for its re-call"
@@ -819,156 +1063,6 @@ mod reached_clock_callbacks {
             SAMPLES.with(|samples| samples.borrow().clone()),
             [true, true],
             "the take and keep clock callbacks both observed the reached map unlocked"
-        );
-    }
-}
-
-mod timeout_stream_release {
-    use busbar_contract::abi::auth::{
-        slot as auth_slot, CompleteLoginIn, IdentifyOut, NamedValue, Ops, LOGIN_OUTAGE,
-    };
-    use busbar_contract::abi::host::conn::connector::{EstablishIn, IoIn, StreamIn};
-    use busbar_contract::abi::host::service::{ClockNowIn, ClockReading};
-    use busbar_contract::abi::mechanism::call::{
-        AbiStr, Blob, InHead, OutHead, Outcome, BLOB_SECRET,
-    };
-    use busbar_contract::abi::mechanism::lifecycle::{slot as life_slot, OpenIn, OpenOut};
-    use busbar_contract::abi::mechanism::ticket::Ticket;
-    use busbar_test_kit::test_support::fake::{self, FakeHost, FakeService, ServiceCall};
-    use busbar_test_kit::test_support::{reply, test_in::TestIn, zeroed, DoorView};
-    use std::cell::{Cell, RefCell};
-
-    thread_local! {
-        static NOW: Cell<u64> = const { Cell::new(0) };
-        static CLOSES: RefCell<Vec<(u64, Ticket)>> = const { RefCell::new(Vec::new()) };
-        static READS: Cell<u32> = const { Cell::new(0) };
-    }
-    struct Clock;
-    impl FakeService for Clock {
-        type In = ClockNowIn;
-        fn serve(call: &mut ServiceCall<ClockNowIn>) -> Outcome {
-            call.put(
-                |i| &i.reading,
-                ClockReading {
-                    size: std::mem::size_of::<ClockReading>() as u32,
-                    _reserved: 0,
-                    wall_ns: 0,
-                    mono_ns: NOW.with(Cell::get),
-                },
-            );
-            Outcome::Ready
-        }
-    }
-    struct Establish;
-    impl FakeService for Establish {
-        type In = EstablishIn;
-        fn serve(call: &mut ServiceCall<EstablishIn>) -> Outcome {
-            call.set_value(71);
-            Outcome::Ready
-        }
-    }
-    struct Write;
-    impl FakeService for Write {
-        type In = IoIn;
-        fn serve(call: &mut ServiceCall<IoIn>) -> Outcome {
-            call.set_len(call.input().len as u64);
-            Outcome::Ready
-        }
-    }
-    struct Read;
-    impl FakeService for Read {
-        type In = IoIn;
-        fn serve(_: &mut ServiceCall<IoIn>) -> Outcome {
-            READS.with(|reads| reads.set(reads.get() + 1));
-            Outcome::Pending
-        }
-    }
-    struct Close;
-    impl FakeService for Close {
-        type In = StreamIn;
-        fn serve(call: &mut ServiceCall<StreamIn>) -> Outcome {
-            CLOSES.with(|closes| {
-                closes
-                    .borrow_mut()
-                    .push((call.input().stream, call.input().head.handle.ticket))
-            });
-
-            if call.input().head.handle.ticket != Ticket::NONE {
-                Outcome::Failed
-            } else {
-                Outcome::Ready
-            }
-        }
-    }
-    #[test]
-    fn a_timed_out_pending_read_releases_the_stream_without_replaying_its_handle() {
-        NOW.with(|now| now.set(0));
-        READS.with(|reads| reads.set(0));
-        CLOSES.with(|closes| closes.borrow_mut().clear());
-        let host = FakeHost::new()
-            .serve(fake::host::CLOCK_NOW, Clock)
-            .serve(fake::conn::ESTABLISH, Establish)
-            .serve(fake::conn::WRITE, Write)
-            .serve(fake::conn::READ, Read)
-            .serve(fake::conn::CLOSE, Close);
-        let view = DoorView::of(crate::door::MACRO_DOOR);
-        let settings = br#"{"url":"ldap://127.0.0.1","bind_dn_template":"uid={username},dc=x","base_dn":"dc=x","timeout_secs":1}"#;
-        let open = host.lend_in(
-            TestIn::<OpenIn>::new()
-                .set(|i| &i.head.op, life_slot::OPEN)
-                .settings(settings),
-        );
-        let mut opened = reply::call_hosted_in(
-            view.op::<Ops>(|ops| &ops.head.open).unwrap(),
-            None,
-            &open,
-            zeroed::<OpenOut>(),
-        );
-        assert_eq!(opened.outcome, Outcome::Ready);
-        let instance = opened.take_instance().unwrap();
-        let submitted = [
-            NamedValue {
-                name: AbiStr::of("username"),
-                value: Blob::of(b"alice").with_flags(BLOB_SECRET),
-            },
-            NamedValue {
-                name: AbiStr::of("password"),
-                value: Blob::of(b"pw").with_flags(BLOB_SECRET),
-            },
-        ];
-        let input = TestIn::<CompleteLoginIn>::new()
-            .set(|i| &i.head.op, auth_slot::COMPLETE_LOGIN)
-            .set(
-                |i| &i.head.ticket,
-                Ticket {
-                    slot: 2,
-                    generation: 1,
-                },
-            )
-            .list(|i| &i.submitted, |i| &i.submitted_len, &submitted);
-        let op = view.op::<Ops>(|ops| &ops.complete_login).unwrap();
-        let first = reply::call_in(op, Some(&instance), &input, zeroed::<IdentifyOut>());
-        NOW.with(|now| now.set(1_000_000_000));
-        let timed_out = reply::call_in(op, Some(&instance), &input, zeroed::<IdentifyOut>());
-        let closed = reply::close_in(
-            view.op::<Ops>(|ops| &ops.head.close).unwrap(),
-            instance,
-            &TestIn::<InHead>::new().set(|i| &i.op, life_slot::CLOSE),
-            zeroed::<OutHead>(),
-        );
-        assert_eq!(closed.outcome, Outcome::Ready);
-        assert_eq!(first.outcome, Outcome::Pending);
-        assert_eq!(timed_out.outcome, Outcome::Ready);
-        assert_eq!(timed_out.out.verdict, LOGIN_OUTAGE);
-        assert_eq!(
-            READS.with(Cell::get),
-            1,
-            "timeout never reissues the abandoned read"
-        );
-        assert_eq!(
-            CLOSES.with(|closes| closes.borrow().clone()),
-            [(71, Ticket::NONE)],
-            "one synchronous stream release, independent of the pending service handle"
         );
     }
 }

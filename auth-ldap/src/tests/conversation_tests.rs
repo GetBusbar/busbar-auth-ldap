@@ -263,12 +263,13 @@ fn rc_49_is_a_bad_credential_and_another_code_an_outage() {
 
 #[test]
 fn a_group_read_refused_for_access_is_a_login_with_no_roles() {
-    use busbar_test_kit::warn_capture::WarnCapture;
+    use crate::diagnostics::Diagnostics;
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
     for rc in [32_i64, 50] {
         let mut dir = Directory::new(vec![bind_response(1, 0), done(2, rc)]).pending();
-        let cap = WarnCapture::default();
-        let (got, _) = tracing::subscriber::with_default(cap.clone(), || login(&m, &mut dir, "pw"));
+        let cap = Diagnostics::default();
+        let (got, _) =
+            tracing::subscriber::with_default(cap.subscriber(), || login(&m, &mut dir, "pw"));
         let Login::Identity(p) = got else {
             panic!("rc {rc}: the bound user logs in: {got:?}");
         };
@@ -937,13 +938,14 @@ fn a_failed_secure_is_an_outage_and_never_binds() {
 
 #[test]
 fn a_non_49_user_bind_is_a_bad_credential_unless_the_server_is_failing() {
-    use busbar_test_kit::warn_capture::WarnCapture;
+    use crate::diagnostics::Diagnostics;
     const PW: &str = "hunter2-s3cret";
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
     for rc in [48_u32, 50, 53, 32, 19, 999] {
-        let cap = WarnCapture::capturing_debug();
+        let cap = Diagnostics::capturing_debug();
         let mut dir = Directory::new(vec![bind_response(1, i64::from(rc))]);
-        let (got, _) = tracing::subscriber::with_default(cap.clone(), || login(&m, &mut dir, PW));
+        let (got, _) =
+            tracing::subscriber::with_default(cap.subscriber(), || login(&m, &mut dir, PW));
         assert_eq!(got, Login::BadCredential, "rc {rc}");
         assert!(
             cap.contains(&format!("rc={rc}")),
@@ -951,11 +953,11 @@ fn a_non_49_user_bind_is_a_bad_credential_unless_the_server_is_failing() {
             cap.messages()
         );
         assert!(
-            cap.contains(&format!("result={}", codec::rc_name(rc))),
+            cap.contains(&format!("result=\"{}\"", codec::rc_name(rc))),
             "rc {rc}: {:?}",
             cap.messages()
         );
-        assert!(cap.contains("module=ldap"), "{:?}", cap.messages());
+        assert!(cap.contains("module=\"ldap\""), "{:?}", cap.messages());
         assert!(
             !cap.contains(PW),
             "the password leaked: {:?}",
@@ -968,23 +970,24 @@ fn a_non_49_user_bind_is_a_bad_credential_unless_the_server_is_failing() {
             "logged once: {:?}",
             cap.messages()
         );
-        let warn = WarnCapture::default();
+        let warn = Diagnostics::default();
         let mut dir = Directory::new(vec![bind_response(1, i64::from(rc))]);
-        tracing::subscriber::with_default(warn.clone(), || login(&m, &mut dir, PW));
+        tracing::subscriber::with_default(warn.subscriber(), || login(&m, &mut dir, PW));
         assert!(
             warn.messages().is_empty(),
             "rc {rc} at warn: {:?}",
             warn.messages()
         );
     }
-    let cap = WarnCapture::capturing_debug();
+    let cap = Diagnostics::capturing_debug();
     let mut dir = Directory::new(vec![bind_response(1, 53)]);
-    tracing::subscriber::with_default(cap.clone(), || login(&m, &mut dir, PW));
+    tracing::subscriber::with_default(cap.subscriber(), || login(&m, &mut dir, PW));
     assert!(cap.contains("unwillingToPerform"), "{:?}", cap.messages());
     for rc in [51_i64, 52, 80, 8] {
-        let warn = WarnCapture::default();
+        let warn = Diagnostics::default();
         let mut dir = Directory::new(vec![bind_response(1, rc)]);
-        let (got, _) = tracing::subscriber::with_default(warn.clone(), || login(&m, &mut dir, PW));
+        let (got, _) =
+            tracing::subscriber::with_default(warn.subscriber(), || login(&m, &mut dir, PW));
         assert_eq!(got, Login::Outage, "rc {rc}");
         assert!(
             warn.contains(&format!("rc={rc}")),
@@ -1199,8 +1202,9 @@ fn every_group_description_contributes_in_stable_order() {
         done(2, 0),
     ])
     .pending();
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
-    let (got, _) = tracing::subscriber::with_default(cap.clone(), || login(&m, &mut dir, "pw"));
+    let cap = crate::diagnostics::Diagnostics::default();
+    let (got, _) =
+        tracing::subscriber::with_default(cap.subscriber(), || login(&m, &mut dir, "pw"));
     let Login::Identity(p) = got else {
         panic!("{got:?}")
     };
@@ -1212,8 +1216,9 @@ fn every_group_description_contributes_in_stable_order() {
 fn a_group_read_refusal_warns_once_after_a_pending_unbind() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
     let mut dir = Directory::new(vec![bind_response(1, 0), done(2, 50)]).pending();
-    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
-    let (answer, _) = tracing::subscriber::with_default(cap.clone(), || login(&m, &mut dir, "pw"));
+    let cap = crate::diagnostics::Diagnostics::default();
+    let (answer, _) =
+        tracing::subscriber::with_default(cap.subscriber(), || login(&m, &mut dir, "pw"));
     assert!(matches!(answer, Login::Identity(ref p) if p.roles.is_empty()));
     assert_eq!(cap.count("group-read-refused"), 1, "{:?}", cap.messages());
 }

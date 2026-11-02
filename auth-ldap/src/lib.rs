@@ -60,6 +60,10 @@ pub mod compiled_in {
 }
 
 #[cfg(test)]
+#[path = "tests/diagnostics.rs"]
+mod diagnostics;
+
+#[cfg(test)]
 #[path = "tests/lib_tests.rs"]
 mod tests;
 

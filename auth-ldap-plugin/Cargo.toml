@@ -46,12 +46,10 @@ busbar-auth-ldap-plugin = { path = ".", features = ["dropped-in"] }
 # dev-only client: `sync` and no TLS feature, so no rustls 0.21 / ring 0.16 enters the lock; the
 # plugin itself speaks its own sans-IO codec).
 busbar-plugin-loader = { workspace = true }
-busbar-test-kit = { workspace = true }
 base64 = { workspace = true }
 reqwest = { workspace = true, features = ["json", "blocking"] }
 ldap3 = { workspace = true }
 serde_json = { workspace = true }
-# THE SUITE'S HOST (tests/support/conformance_host.rs, the test kit's stream form): busbar's
-# connector and its TLS test kit. No transport framer: the test kit's stream table serves the
-# plugin's plain `tcp` need. Dev-only.
+# The LDAP tests use the actual connector's TLS engine with their own loopback directory host.
+# No transport framer is needed for the plugin's plain `tcp` need. Dev-only.
 busbar-core-connector = { workspace = true }

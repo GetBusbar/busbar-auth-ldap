@@ -4,6 +4,12 @@
 //! Plugin-SIDE live end-to-end for the AD/LDAP login plugin — the mirror of `auth-oidc-plugin`'s
 
 use busbar_auth_ldap::Login;
+
+#[path = "support/artifact.rs"]
+mod artifact;
+#[path = "support/ldap_tls.rs"]
+mod ldap_tls;
+use artifact::plugin_path;
 use std::io::Write as _;
 
 const BASE_DN: &str = "dc=example,dc=org";
@@ -95,30 +101,6 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
 const E2E_RELEASE_PUBKEY: &str = "9209607c315f66473c8cca8bf9a7b8031115d01bb47341613cebf57f0e4f271c";
 const E2E_RELEASE_PRIVKEY: &str =
     "290f2453f236650ab21b85a95d49b9dab088518e829e4d524b01e441636ab327";
-
-fn plugin_path() -> Option<std::path::PathBuf> {
-    let candidate = (|| {
-        let exe = std::env::current_exe().ok()?;
-        let profile_dir = exe.parent()?.parent()?;
-        let name = busbar_plugin_loader::plugin_library_filename("busbar_auth_ldap_plugin");
-        let uplifted = profile_dir.join(&name);
-        let raw = profile_dir.join("deps").join(&name);
-        [uplifted, raw]
-            .into_iter()
-            .filter_map(|p| {
-                std::fs::metadata(&p)
-                    .and_then(|m| m.modified())
-                    .ok()
-                    .map(|mtime| (p, mtime))
-            })
-            .max_by_key(|(_, mtime)| *mtime)
-            .map(|(p, _)| p)
-    })();
-    if candidate.is_none() && std::env::var_os("CI").is_some() {
-        panic!("busbar_auth_ldap_plugin cdylib not built under CI (run `cargo test --workspace`)");
-    }
-    candidate
-}
 
 fn pack_ldap(
     pack_bin: &std::path::Path,
@@ -526,10 +508,7 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
     let Some(url) = live_ldap_url() else {
         return;
     };
-    let Some(so_path) = plugin_path() else {
-        eprintln!("skip: busbar_auth_ldap_plugin cdylib not built");
-        return;
-    };
+    let so_path = plugin_path();
     seed_directory(&url);
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
@@ -652,10 +631,7 @@ fn ldaps_with_a_private_ca_verifies() {
     let Some(url) = live_ldap_url() else {
         return;
     };
-    let Some(so_path) = plugin_path() else {
-        eprintln!("skip: busbar_auth_ldap_plugin cdylib not built");
-        return;
-    };
+    let so_path = plugin_path();
     seed_directory(&url);
     let upstream: &'static str = Box::leak(
         url.split_once("://")
@@ -667,14 +643,14 @@ fn ldaps_with_a_private_ca_verifies() {
             .into_boxed_str(),
     );
     let front: &'static str = Box::leak(format!("localhost:{}", free_port()).into_boxed_str());
-    busbar_test_kit::conformance_host::tls_front(front, |_| true, upstream);
+    ldap_tls::start(front, |_| true, upstream);
     let ldaps = format!("ldaps://{front}");
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .unwrap();
 
-    let ca = busbar_test_kit::conformance_host::anchors();
+    let ca = ldap_tls::anchors();
     let anchored = boot(&so_path, &ldaps, &format!("      ca_cert_pem: {ca:?}\n"));
     let ok = form_login(&client, &anchored.base, "alice", ALICE_PW);
     assert!(
