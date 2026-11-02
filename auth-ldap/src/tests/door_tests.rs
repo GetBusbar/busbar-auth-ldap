@@ -33,7 +33,6 @@ fn settings_refuse_an_empty_blob() {
     }
 }
 
-/// KIND B7: no settings at all read in the fleet's one form, naming what is required.
 #[test]
 fn no_settings_read_in_the_fleet_form() {
     let e = LdapModule::from_settings(b"").err().expect("refused");
@@ -97,8 +96,6 @@ fn a_field_is_found_by_its_declared_name_and_must_be_text() {
     assert_eq!(field(&fields, "missing"), None);
 }
 
-/// L5: a field submitted but not UTF-8 is refused in its own words, not as "not submitted" (the
-
 #[test]
 fn a_field_that_is_not_text_is_refused_in_its_own_words() {
     let bad_password: [(&[u8], &[u8]); 2] = [(b"username", b"alice"), (b"password", b"\xff")];
@@ -119,7 +116,6 @@ fn a_field_that_is_not_text_is_refused_in_its_own_words() {
     );
 }
 
-/// L5: a host clock that answers a failure says which, instead of collapsing into "no clock".
 #[test]
 fn a_failing_host_clock_says_why() {
     use busbar_contract::abi::sdk::conn::ConnFailure;
@@ -177,8 +173,6 @@ fn the_statement_states_a_non_blocking_credential_login_over_one_need() {
     assert_eq!(STATEMENT.secret_refs_len(), 1);
     assert!(!SECRET_REFS[0].is_absent());
 }
-
-/// L6 (S1): the service password is a secret REFERENCE, never a literal. busbar resolves the
 
 #[test]
 fn a_literal_service_password_refuses_boot() {
@@ -295,8 +289,6 @@ fn the_reached_map_is_bounded_and_evicts_the_oldest() {
     assert!(reached.map.contains_key(&(4, 1)));
 }
 
-/// KIND-REVIEW D6: the reached map is bounded AND time-expired: an identity kept for a re-call that
-
 #[test]
 fn a_kept_identity_expires_after_the_ttl() {
     let ttl = super::REACHED_TTL_NS;
@@ -403,8 +395,6 @@ fn a_mistyped_setting_is_refused_without_echoing_its_value() {
     assert!(e.contains("unknown field `bogus`"), "{e}");
     assert!(!e.contains("hunter2"), "{e}");
 }
-
-/// T8: the run `drive` begins from the submitted fields ([`super::begin`], what `drive` calls)
 
 #[test]
 fn a_begun_logins_password_is_the_chips_from_the_submitted_field() {

@@ -10,8 +10,6 @@ fn ber(filter: &str) -> Vec<u8> {
     encode(filter).unwrap_or_else(|e| panic!("{filter}: {e}"))
 }
 
-/// T6: the other two ordering/approximate choices, `>=` (greaterOrEqual, 0xa5) and `~=`
-
 #[test]
 fn greater_or_equal_and_approx_encode_their_own_choice() {
     assert_eq!(ber("(a>=2)"), b"\xa5\x06\x04\x01a\x04\x012");
@@ -100,8 +98,6 @@ fn an_escaped_username_is_one_equality_value() {
     crate::ber::tlv(&mut want, 0x04, hostile.as_bytes());
     assert_eq!(got, crate::ber::element(0xa3, &want));
 }
-
-/// M3: the parser's recursion is bounded: a filter nested deeper than 32 levels is refused (it
 
 #[test]
 fn nesting_deeper_than_32_levels_is_refused() {

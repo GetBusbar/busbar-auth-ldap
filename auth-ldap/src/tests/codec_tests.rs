@@ -121,8 +121,6 @@ fn a_bind_response_decodes() {
     );
 }
 
-/// M5: a value that is not UTF-8 is dropped ALONE: the attribute keeps its text values (a group
-
 #[test]
 fn a_search_entry_keeps_its_text_values_and_warns_of_the_rest() {
     fn attr(name: &[u8], vals: &[&[u8]]) -> Vec<u8> {
@@ -224,7 +222,6 @@ fn an_extended_response_decodes_with_its_name() {
     );
 }
 
-/// SIGNED DIFFERENCE 1: a malformed reply is an error, never a panic.
 #[test]
 fn a_malformed_reply_is_an_error_never_a_panic() {
     for bad in [
@@ -298,7 +295,6 @@ fn a_malformed_reply_is_an_error_never_a_panic() {
     }
 }
 
-/// SIGNED DIFFERENCE 2: an overrunning nested length inside a whole message fails at once.
 #[test]
 fn an_overrunning_nested_length_fails_fast() {
     let inner = [tlv(0x04, b"dn"), vec![0x30, 0x7f, 0x30, 0x00]].concat();
@@ -311,7 +307,6 @@ fn an_overrunning_nested_length_fails_fast() {
     assert_eq!(decode(&m), Err(BerError::Overrun));
 }
 
-/// SIGNED DIFFERENCE 3: a reply past 16 MiB is refused from its header.
 #[test]
 fn a_reply_past_the_cap_is_refused_from_its_header() {
     let len = (ber::INBOUND_CAP as u32).to_be_bytes();
@@ -353,8 +348,6 @@ fn big_entry(id: i32, n: usize, value: &[u8]) -> Vec<u8> {
     ber::element(ber::SEQUENCE, &content)
 }
 
-/// M6: a hostile entry is bounded WHILE it decodes, not after: one attribute keeps at most one
-
 #[test]
 fn an_attributes_values_are_capped_while_decoding() {
     let m = big_entry(2, 100_000, b"x");
@@ -368,8 +361,6 @@ fn an_attributes_values_are_capped_while_decoding() {
     assert_eq!(e.attrs["memberOf"].len(), crate::MAX_GROUP_VALUES + 1);
 }
 
-/// M6: what one operation decodes into memory is budgeted (4 MiB): an entry whose values pass it is
-
 #[test]
 fn decoded_values_past_the_budget_are_an_error() {
     let m = big_entry(2, 5, &vec![b'a'; 1024 * 1024]);
@@ -381,8 +372,6 @@ fn decoded_values_past_the_budget_are_an_error() {
         got.map(|m| m.id)
     );
 }
-
-/// L1: the directory's matched DN and diagnostic are far-end text: each is shown escaped (no raw
 
 #[test]
 fn a_results_far_end_text_is_escaped_and_capped() {

@@ -263,8 +263,6 @@ fn rc_49_is_a_bad_credential_and_another_code_an_outage() {
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
 }
 
-/// M4: the GROUP READ of a user the directory already bound answers 32 noSuchObject or 50
-
 #[test]
 fn a_group_read_refused_for_access_is_a_login_with_no_roles() {
     use busbar_test_kit::warn_capture::WarnCapture;
@@ -510,8 +508,6 @@ fn a_search_reference_is_skipped() {
     assert_eq!(login(&m, &mut dir, "pw").0, Login::BadCredential);
 }
 
-/// SIGNED DIFFERENCES 1–3, through the conversation: a malformed reply, an overrunning nested
-
 #[test]
 fn the_signed_differences_fail_closed_as_an_outage() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
@@ -529,8 +525,6 @@ fn the_signed_differences_fail_closed_as_an_outage() {
     let mut dir = Directory::new(vec![extended(0, 52)]).held();
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
 }
-
-/// SIGNED DIFFERENCE 1, the URL half: a hostless URL never dials (1.5.5 panicked). It is refused
 
 #[test]
 fn a_hostless_url_is_refused_before_any_dial() {
@@ -1079,8 +1073,6 @@ fn an_operation_that_never_ends_its_messages_is_cut_off() {
     }
 }
 
-/// M6: one operation reads at most 16 MiB from the directory in all, however it is split into
-
 #[test]
 fn an_operation_reads_at_most_16_mib_in_all() {
     use crate::{Io, LdapBackend, SearchScope};
@@ -1136,8 +1128,6 @@ impl Wire for Ticking {
         Some(self.now)
     }
 }
-
-/// M6: the deadline is checked on every message of one entry of the op, on the stream owner's
 
 #[test]
 fn the_deadline_is_checked_between_messages() {

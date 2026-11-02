@@ -185,8 +185,6 @@ fn new_requires_search_filter_placeholder() {
     assert!(LdapModule::new(cfg).is_err());
 }
 
-/// M3: a `user_search_filter` that does not parse would fail every login as an outage; it is
-
 #[test]
 fn an_unparseable_search_filter_is_refused_by_name() {
     for bad in [
@@ -452,8 +450,6 @@ fn bind_dn_rejects_rfc4514_must_escape_positions() {
     }
 }
 
-/// T2: a LONE backslash (trailing, or the whole username) is refused too: templated into a DN it
-
 #[test]
 fn a_lone_backslash_username_is_refused() {
     for bad in ["\\", "alice\\", "\\alice", "a\\b"] {
@@ -462,8 +458,6 @@ fn a_lone_backslash_username_is_refused() {
     let m = LdapModule::new(base_cfg()).unwrap();
     assert!(m.bind_dn_for("alice\\").is_err());
 }
-
-/// T1: a BIND password goes out only where it is safe. For an `ldaps://` URL or `start_tls` it is
 
 #[test]
 fn bind_passwords_are_secure_required_and_plaintext_never_binds() {
@@ -787,8 +781,6 @@ impl LdapBackend for FakeLdap {
     }
 }
 
-/// T3: the UNBIND is best effort: a directory that drops the connection after the group read (the
-
 #[test]
 fn a_failed_unbind_is_ignored() {
     let m = LdapModule::new(base_cfg()).unwrap();
@@ -804,8 +796,6 @@ fn a_failed_unbind_is_ignored() {
     assert!(fake.unbound, "the unbind was attempted");
     assert_eq!(p.roles, vec!["engineers".to_string()]);
 }
-
-/// T5: `ca_cert_pem` holds a certificate only when EVERY `CERTIFICATE` block is base64 of a DER
 
 #[test]
 fn a_ca_bundle_with_a_non_der_block_holds_no_certificate() {
@@ -1003,8 +993,6 @@ fn the_group_attr_is_matched_case_insensitively() {
     assert_eq!(p.roles, vec!["admins".to_string()]);
 }
 
-/// M2: Active Directory answers a multi-valued attribute past its MaxValRange (1500) as a RANGED
-
 #[test]
 fn a_ranged_group_attribute_is_read_and_its_truncation_warned() {
     use busbar_test_kit::warn_capture::WarnCapture;
@@ -1030,8 +1018,6 @@ fn a_ranged_group_attribute_is_read_and_its_truncation_warned() {
     assert_eq!(roles, vec!["engineers".to_string()]);
     assert!(!cap.contains("truncated"), "{:?}", cap.messages());
 }
-
-/// M5: a user entry that carries no group attribute at all logs in with no roles, and says so at
 
 #[test]
 fn an_absent_group_attribute_is_warned() {
@@ -1106,8 +1092,6 @@ fn username_casing_yields_same_principal_id() {
     );
 }
 
-/// M1: a direct-bind principal is the bound entry's DN AS THE DIRECTORY RETURNS IT (the group
-
 #[test]
 fn the_principal_is_the_dn_the_directory_returns() {
     let m = LdapModule::new(base_cfg()).unwrap();
@@ -1124,8 +1108,6 @@ fn the_principal_is_the_dn_the_directory_returns() {
     );
     assert_eq!(id_for("John  Smith"), id_for("john smith"));
 }
-
-/// M1: when the group read answers no entry (an ACL hides it), the principal falls back to the
 
 #[test]
 fn with_no_entry_the_principal_is_the_bound_dn_normalised() {
@@ -1530,8 +1512,6 @@ mod logging {
         }
     }
 
-    /// L4: an empty `base_dn` stays accepted for search-then-bind (the AD Global Catalog serves a
-
     #[test]
     fn an_empty_search_base_is_logged_at_open() {
         let mut cfg = search_cfg();
@@ -1560,8 +1540,6 @@ mod logging {
         assert!(!cap.contains("pw-s3cret"), "{:?}", cap.messages());
         assert!(!cap.contains("ghost"), "{:?}", cap.messages());
     }
-
-    /// LDO D10: the bound user's own entry read back as NO entry (an ACL hides it) is not silent:
 
     #[test]
     fn a_group_read_with_no_entry_is_logged_at_warn() {

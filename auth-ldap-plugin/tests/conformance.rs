@@ -207,8 +207,6 @@ fn host(
     conformance_host::host(wake, anchors)
 }
 
-/// RED: the Statement declares the module's TWO needs (each an outbound `tcp` stream of the
-
 #[test]
 fn red_the_statement_declares_a_public_and_an_anchored_stream_and_never_blocks() {
     let stated = LinkedRow::of_macro(MACRO_DOOR)
@@ -249,8 +247,6 @@ fn silent_directory() -> String {
     });
     at
 }
-
-/// RED: a directory whose port takes the connection and drops it (a service container's port proxy
 
 #[test]
 fn red_a_directory_port_with_no_directory_behind_it_is_named_at_the_deadline() {
@@ -364,8 +360,6 @@ impl busbar_test_kit::services_double::ServicesDouble for ClockOnly {
         }
     }
 }
-
-/// RED: a directory that takes the connection and never answers (and so never wakes the ticket) is
 
 #[test]
 fn red_a_directory_that_never_answers_is_an_outage_at_the_deadline() {

@@ -50,8 +50,6 @@ fn a_whole_element_reads_back_with_what_follows_it() {
     assert_eq!((t.content.len(), rest.len()), (300, 0));
 }
 
-/// SIGNED DIFFERENCE 2: a nested length that runs past its parent fails at once — the parent is
-
 #[test]
 fn an_overrunning_nested_length_fails_fast() {
     let msg = [0x30, 0x03, 0x04, 0x05, 0x41];
@@ -122,8 +120,6 @@ fn a_message_frames_once_whole() {
         Err(BerError::Malformed(_))
     ));
 }
-
-/// SIGNED DIFFERENCE 3: a message longer than 16 MiB is refused from its header, before its
 
 #[test]
 fn the_inbound_cap_is_sixteen_mib_from_the_header() {
