@@ -9,9 +9,10 @@ use busbar_contract::conn::{
     Piece, PieceKind, Ticket,
 };
 use busbar_contract::ids::StreamId;
-use busbar_contract::transport::{ConnFacts, EgressTrust};
-use busbar_core_connector::test_support::{certs_from_pem, ClientTls, StdClientSession};
+use busbar_contract::transport::{CertFacts, ConnFacts, EgressTrust};
+use busbar_core_connector::test_support::certs_from_pem;
 use busbar_core_connector::DialJudge;
+use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
@@ -36,13 +37,14 @@ struct Need {
 }
 enum Wire {
     Plain(TcpStream),
-    Secure(StdClientSession),
+    Secure(rustls::StreamOwned<rustls::ClientConnection, TcpStream>),
 }
 struct Socket {
     first_read: bool,
     wire: Option<Wire>,
     server: String,
-    tls: ClientTls,
+    tls: Arc<rustls::ClientConfig>,
+    facts: Option<ConnFacts>,
 }
 struct DirectoryIo {
     wake: ConnWake,
@@ -117,11 +119,13 @@ impl Conns for DirectoryIo {
             }
             None => Vec::new(),
         };
-        let tls = ClientTls::new(&EgressTrust {
-            extra_anchors,
-            ..EgressTrust::default()
-        })
-        .map_err(|_| ConnError::Refused)?;
+        let tls = Arc::new(
+            busbar_core_connector::tls::client::build_client_config(&EgressTrust {
+                extra_anchors,
+                ..EgressTrust::default()
+            })
+            .map_err(|_| ConnError::Refused)?,
+        );
         let at = if let Some(judge) = &self.judge {
             let (tx, rx) = std::sync::mpsc::channel();
             judge
@@ -169,6 +173,7 @@ impl Conns for DirectoryIo {
                     .map_or(desc.target, |v| v.0)
                     .to_owned(),
                 tls,
+                facts: None,
             }),
         )
     }
@@ -242,8 +247,13 @@ impl Conns for DirectoryIo {
         Err(ConnError::Pending)
     }
     fn facts(&self, owner: InstanceId, conn: ConnId) -> Result<ConnFacts, ConnError> {
-        self.sockets.get(owner, conn)?;
-        Ok(ConnFacts::default())
+        let (_, socket) = self.sockets.get(owner, conn)?;
+        let socket = socket.lock().unwrap();
+        match socket.wire.as_ref() {
+            Some(Wire::Secure(_)) => socket.facts.clone().ok_or(ConnError::Fault),
+            Some(Wire::Plain(_)) => Ok(ConnFacts::default()),
+            None => Err(ConnError::Closed),
+        }
     }
     fn close(&self, owner: InstanceId, conn: ConnId) -> Result<(), ConnError> {
         self.sockets.remove(owner, conn)?;
@@ -329,20 +339,50 @@ impl DeclaredConns for DirectoryIo {
         }
         let (_, socket) = self.sockets.get(owner, conn)?;
         let mut socket = socket.lock().unwrap();
-        let Some(Wire::Plain(tcp)) = socket.wire.take() else {
+        let Some(Wire::Plain(mut tcp)) = socket.wire.take() else {
             return Err(ConnError::Refused);
         };
         tcp.set_read_timeout(Some(Duration::from_secs(5)))
             .map_err(io_error)?;
-        let secured = socket
-            .tls
-            .connect_std(name.unwrap_or(&socket.server), tcp)
+        let server_name =
+            rustls::pki_types::ServerName::try_from(name.unwrap_or(&socket.server).to_owned())
+                .map_err(|_| ConnError::Refused)?;
+        let offered_sni = match &server_name {
+            rustls::pki_types::ServerName::DnsName(dns) => Some(dns.as_ref().to_owned()),
+            _ => None,
+        };
+        let mut tls = rustls::ClientConnection::new(socket.tls.clone(), server_name)
             .map_err(|_| ConnError::Refused)?;
-        secured
-            .tcp()
-            .set_read_timeout(Some(Duration::from_millis(2)))
+        while tls.is_handshaking() {
+            tls.complete_io(&mut tcp).map_err(|_| ConnError::Refused)?;
+        }
+        let leaf = tls
+            .peer_certificates()
+            .and_then(|certs| certs.first())
+            .ok_or(ConnError::Refused)?;
+        let fingerprint = Sha256::digest(leaf.as_ref())
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let facts = ConnFacts {
+            sni: offered_sni,
+            alpn: tls
+                .alpn_protocol()
+                .map(|alpn| String::from_utf8_lossy(alpn).into_owned()),
+            peer_cert: Some(CertFacts {
+                // DN rendering is not provided by this raw I/O adapter. The fingerprint
+                // is from the actual peer leaf, observed after chain/name verification.
+                subject: String::new(),
+                issuer: String::new(),
+                fingerprint,
+            }),
+            peer_key_pin: busbar_core_connector::tls::client::peer_key_pin(leaf.as_ref()),
+            ..ConnFacts::default()
+        };
+        tcp.set_read_timeout(Some(Duration::from_millis(2)))
             .map_err(io_error)?;
-        socket.wire = Some(Wire::Secure(secured));
+        socket.wire = Some(Wire::Secure(rustls::StreamOwned::new(tls, tcp)));
+        socket.facts = Some(facts);
         Ok(())
     }
 }
@@ -406,7 +446,19 @@ mod tests {
                 ..OpenDesc::default()
             },
         )?;
+        assert!(
+            c.facts(OWNER, id)?.peer_cert.is_none(),
+            "plain TCP has no TLS peer"
+        );
         c.upgrade_secure(OWNER, id, Some("localhost"), None, false, 0)?;
+        let facts = c.facts(OWNER, id)?;
+        assert!(
+            facts
+                .peer_cert
+                .as_ref()
+                .is_some_and(|cert| !cert.fingerprint.is_empty()),
+            "actual verified TLS must report its observed peer certificate"
+        );
         let mut at = 0;
         while at < 5 {
             at += c.write(OWNER, id, &b"hello"[at..], false, false)?;
