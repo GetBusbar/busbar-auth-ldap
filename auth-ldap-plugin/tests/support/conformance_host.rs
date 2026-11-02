@@ -37,7 +37,7 @@ struct Need {
 }
 enum Wire {
     Plain(TcpStream),
-    Secure(rustls::StreamOwned<rustls::ClientConnection, TcpStream>),
+    Secure(Box<rustls::StreamOwned<rustls::ClientConnection, TcpStream>>),
 }
 struct Socket {
     first_read: bool,
@@ -381,7 +381,7 @@ impl DeclaredConns for DirectoryIo {
         };
         tcp.set_read_timeout(Some(Duration::from_millis(2)))
             .map_err(io_error)?;
-        socket.wire = Some(Wire::Secure(rustls::StreamOwned::new(tls, tcp)));
+        socket.wire = Some(Wire::Secure(Box::new(rustls::StreamOwned::new(tls, tcp))));
         socket.facts = Some(facts);
         Ok(())
     }
