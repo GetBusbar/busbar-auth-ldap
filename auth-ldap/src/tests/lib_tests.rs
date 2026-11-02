@@ -577,6 +577,25 @@ fn first_cn_unescapes_hex_pairs() {
     );
 }
 
+/// RFC 4514: an escaped trailing space is part of the value; only unescaped whitespace is trimmed.
+#[test]
+fn first_cn_keeps_an_escaped_trailing_space() {
+    assert_eq!(
+        first_cn("CN=ops\\ ,OU=Groups,DC=corp").as_deref(),
+        Some("ops ")
+    );
+    assert_eq!(
+        roles_from_group_dns(
+            &["CN=Admins\\ ,OU=Groups,DC=corp".to_string()],
+            RoleFrom::Cn
+        ),
+        vec!["Admins ".to_string()]
+    );
+    // An escaped backslash then a real (unescaped) space: the space is trimmed.
+    assert_eq!(first_cn("CN=a\\\\ ,DC=x").as_deref(), Some("a\\"));
+    assert_eq!(first_cn("CN=  eng  ,DC=x").as_deref(), Some("eng"));
+}
+
 #[test]
 fn roles_cn_mode_maps_and_dedups() {
     let dns = vec![

@@ -59,11 +59,25 @@ pub(crate) fn first_cn(dn: &str) -> Option<String> {
                 continue;
             };
             if attr.trim().eq_ignore_ascii_case("cn") {
-                return Some(unescape_rdn_value(val.trim()));
+                return Some(unescape_rdn_value(trim_unescaped(val)));
             }
         }
     }
     None
+}
+
+/// Trim `v` of leading whitespace and of trailing whitespace that is not escaped (RFC 4514: a
+/// space after an odd run of backslashes is `\ `, part of the value).
+fn trim_unescaped(v: &str) -> &str {
+    let mut v = v.trim_start();
+    while let Some(head) = v.strip_suffix(char::is_whitespace) {
+        let backslashes = head.bytes().rev().take_while(|&b| b == b'\\').count();
+        if backslashes % 2 == 1 {
+            break;
+        }
+        v = head;
+    }
+    v
 }
 
 /// Split a DN at every unescaped `sep` (`,` between RDNs, `+` between the attribute-value
