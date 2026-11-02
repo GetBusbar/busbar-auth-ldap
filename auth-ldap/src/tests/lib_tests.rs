@@ -139,7 +139,6 @@ fn new_refuses_a_zero_timeout() {
     assert!(LdapModule::new(cfg).is_err());
 }
 
-/// A blank `group_attr` reads back no groups, so every login would bind no roles; refused at boot.
 /// L7: `timeout_secs` bounds each directory operation, and a login runs several; an unbounded one
 /// lets a hung directory pin every in-flight slot. It is capped at 120 seconds, by name.
 #[test]
@@ -153,6 +152,7 @@ fn new_refuses_a_timeout_past_120_seconds() {
     assert!(e.starts_with("settings.timeout_secs: "), "{e}");
 }
 
+/// A blank `group_attr` reads back no groups, so every login would bind no roles; refused at boot.
 #[test]
 fn new_refuses_an_empty_group_attr() {
     for attr in ["", "  "] {
@@ -306,6 +306,32 @@ fn loopback_ldap_allowed() {
     }
 }
 
+/// Hosts that only LOOK like loopback are remote: the guard is an exact match, not a prefix match.
+/// Matching is case-insensitive, as documented.
+#[test]
+fn loopback_lookalike_hosts_are_treated_as_remote() {
+    for host in [
+        "localhost.evil.example",
+        "127.0.0.1.evil.example",
+        "127.0.0.2",
+        "0.0.0.0",
+        "localhost6",
+    ] {
+        let mut cfg = base_cfg();
+        cfg.url = format!("ldap://{host}:389");
+        assert!(
+            LdapModule::new(cfg).is_err(),
+            "plaintext ldap:// to {host} must be refused"
+        );
+    }
+    let mut cfg = base_cfg();
+    cfg.url = "ldap://LOCALHOST/".to_string();
+    assert!(
+        LdapModule::new(cfg).is_ok(),
+        "loopback matches case-insensitively"
+    );
+}
+
 /// A userinfo component must not let a loopback-looking prefix bypass the plaintext guard.
 /// `ldap://127.0.0.1:389@evil.com` dials `evil.com` in cleartext (the userinfo is `127.0.0.1:389`),
 /// so the host is `evil.com` and the config must be REJECTED — not read as loopback.
@@ -437,6 +463,17 @@ fn bind_dn_rejects_injection_username() {
     ] {
         assert!(
             m.bind_dn_for(bad).is_err(),
+            "username {bad:?} should be rejected"
+        );
+    }
+}
+
+/// Control characters outside the explicit forbidden set (tab, BEL, DEL, C1) are still refused.
+#[test]
+fn bind_dn_rejects_other_control_characters() {
+    for bad in ["alice\tx", "al\u{7}ice", "alice\u{7f}", "a\u{85}b"] {
+        assert!(
+            validate_username(bad).is_err(),
             "username {bad:?} should be rejected"
         );
     }
@@ -613,6 +650,26 @@ fn roles_cn_mode_maps_and_dedups() {
     ];
     let roles = roles_from_group_dns(&dns, RoleFrom::Cn);
     assert_eq!(roles, vec!["engineers".to_string(), "sre".to_string()]);
+}
+
+/// A blank or CN-less-empty memberOf value yields no role; Dn mode trims and de-duplicates.
+#[test]
+fn roles_drop_blank_values_and_dn_mode_trims_and_dedups() {
+    let blank = vec!["  ".to_string(), String::new()];
+    assert!(roles_from_group_dns(&blank, RoleFrom::Cn).is_empty());
+    assert!(roles_from_group_dns(&blank, RoleFrom::Dn).is_empty());
+    // An empty CN falls back to the whole trimmed value, never an empty role.
+    assert_eq!(
+        roles_from_group_dns(&["CN=,DC=x".to_string()], RoleFrom::Cn),
+        vec!["CN=,DC=x".to_string()]
+    );
+    assert_eq!(
+        roles_from_group_dns(
+            &[" CN=A,DC=x ".to_string(), "cn=a,dc=x".to_string()],
+            RoleFrom::Dn
+        ),
+        vec!["cn=a,dc=x".to_string()]
+    );
 }
 
 /// The default `cn` mode keeps the directory's case, exactly as v1.0.3 (busbar 1.5.5) did. A 1.5.5
