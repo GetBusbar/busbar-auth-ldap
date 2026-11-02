@@ -10,8 +10,8 @@ use super::{bind, close, load, open, Leg};
 use busbar_contract::abi::auth::LOGIN_IDENTITY;
 use busbar_contract::abi::mechanism::rendering::ReadNeed;
 use busbar_contract::conn::{
-    ConnError, ConnId, ConnWake, Conns, DeclaredConns, InstanceId, NeedId, OpenDesc, Piece,
-    PieceKind, Ticket,
+    ConnError, ConnId, ConnSlab, ConnWake, Conns, DeclaredConns, InstanceId, NeedId, OpenDesc,
+    Piece, PieceKind, Ticket,
 };
 use busbar_contract::ids::StreamId;
 use busbar_contract::transport::{CertFacts, ConnFacts};
@@ -29,6 +29,7 @@ struct State {
 }
 
 pub(super) struct Carrier {
+    streams: ConnSlab<()>,
     wake: ConnWake,
     partial: bool,
     pend: bool,
@@ -38,6 +39,7 @@ pub(super) struct Carrier {
 impl Carrier {
     pub(super) fn new(wake: ConnWake, partial: bool, pend: bool) -> Self {
         Self {
+            streams: ConnSlab::default(),
             wake,
             partial,
             pend,
@@ -61,18 +63,19 @@ impl Carrier {
 }
 
 impl Conns for Carrier {
-    fn open(&self, _: InstanceId, _: NeedId, _: &OpenDesc<'_>) -> Result<ConnId, ConnError> {
-        Ok(ConnId(1))
+    fn open(&self, owner: InstanceId, need: NeedId, _: &OpenDesc<'_>) -> Result<ConnId, ConnError> {
+        self.streams.insert(owner, need, ())
     }
 
     fn write(
         &self,
         caller: InstanceId,
-        _: ConnId,
+        conn: ConnId,
         bytes: &[u8],
         _: bool,
         _: bool,
     ) -> Result<usize, ConnError> {
+        self.streams.get(caller, conn)?;
         let mut state = self.state.lock().unwrap();
         state.writes += 1;
         if self.partial && state.writes == 1 {
@@ -95,11 +98,12 @@ impl Conns for Carrier {
 
     fn read(
         &self,
-        _: InstanceId,
-        _: ConnId,
+        caller: InstanceId,
+        conn: ConnId,
         _: Ticket,
         buf: &mut [u8],
     ) -> Result<Piece, ConnError> {
+        self.streams.get(caller, conn)?;
         let reply = self.state.lock().unwrap().replies.pop_front().unwrap();
         assert!(reply.len() <= buf.len());
         buf[..reply.len()].copy_from_slice(&reply);
@@ -118,11 +122,15 @@ impl Conns for Carrier {
         })
     }
 
-    fn wait(&self, _: InstanceId, _: &[ConnId], _: Ticket) -> Result<usize, ConnError> {
+    fn wait(&self, caller: InstanceId, set: &[ConnId], _: Ticket) -> Result<usize, ConnError> {
+        for conn in set {
+            self.streams.get(caller, *conn)?;
+        }
         Err(ConnError::Pending)
     }
 
-    fn facts(&self, _: InstanceId, _: ConnId) -> Result<ConnFacts, ConnError> {
+    fn facts(&self, caller: InstanceId, conn: ConnId) -> Result<ConnFacts, ConnError> {
+        self.streams.get(caller, conn)?;
         let mut state = self.state.lock().unwrap();
         state.facts += 1;
         Ok(ConnFacts {
@@ -135,42 +143,61 @@ impl Conns for Carrier {
         })
     }
 
-    fn close(&self, _: InstanceId, _: ConnId) -> Result<(), ConnError> {
+    fn close(&self, caller: InstanceId, conn: ConnId) -> Result<(), ConnError> {
+        self.streams.remove(caller, conn)?;
         self.state.lock().unwrap().closes += 1;
         Ok(())
     }
 }
 
 impl DeclaredConns for Carrier {
+    fn open_request(
+        &self,
+        caller: InstanceId,
+        need: NeedId,
+        desc: &OpenDesc<'_>,
+        require_secure: bool,
+        _: u64,
+    ) -> Result<ConnId, ConnError> {
+        // Immediate test I/O accepts a separate dial budget without claiming TLS.
+        self.open_with_security(caller, need, desc, require_secure)
+    }
     fn declare(
         &self,
-        _: InstanceId,
-        _: NeedId,
+        owner: InstanceId,
+        need: NeedId,
         _: &ReadNeed,
         _: Option<&str>,
         _: Option<&str>,
     ) -> Result<(), ConnError> {
+        self.streams.declare(owner, need);
         Ok(())
     }
 
-    fn declared(&self, _: InstanceId, _: NeedId) -> Option<Result<(), ConnError>> {
-        Some(Ok(()))
+    fn declared(&self, owner: InstanceId, need: NeedId) -> Option<Result<(), ConnError>> {
+        self.streams.check_need(owner, need).ok().map(|()| Ok(()))
     }
 
-    fn landed(&self, _: InstanceId, _: ConnId, ticket: Ticket) -> Result<(), ConnError> {
+    fn forget(&self, owner: InstanceId) {
+        self.streams.forget(owner);
+    }
+
+    fn landed(&self, caller: InstanceId, conn: ConnId, ticket: Ticket) -> Result<(), ConnError> {
+        self.streams.get(caller, conn)?;
         self.state.lock().unwrap().ticket = ticket;
         Ok(())
     }
 
     fn upgrade_secure(
         &self,
-        _: InstanceId,
-        _: ConnId,
+        caller: InstanceId,
+        conn: ConnId,
         _: Option<&str>,
         _: Option<&str>,
         _: bool,
         ticket: Ticket,
     ) -> Result<(), ConnError> {
+        self.streams.get(caller, conn)?;
         let mut state = self.state.lock().unwrap();
         state.ticket = ticket;
         state.secured = true;

@@ -32,7 +32,7 @@ struct Need {
     answer: Result<(), ConnError>,
     target: Option<String>,
     class: u32,
-    tls: Option<ClientTls>,
+    anchors: Option<String>,
 }
 enum Wire {
     Plain(TcpStream),
@@ -64,8 +64,10 @@ pub fn host(wake: ConnWake, anchors: Option<&str>) -> Arc<dyn DeclaredConns> {
 pub fn guarded_host(wake: ConnWake, anchors: Option<&str>) -> Arc<dyn DeclaredConns> {
     // The production destination policy's default blocks private destinations; operator
     // infrastructure retains its production exception and metadata is still refused.
-    let dest = busbar_core_connector::process::dest_judge(&Default::default())
-        .expect("default destination guard");
+    let dest = Arc::new(busbar_core_connector::process::GuardJudge::new(
+        busbar_core_connector::guard::Guard::default(),
+        Arc::new(busbar_core_connector::guard::SystemResolver),
+    ));
     Arc::new(DirectoryIo {
         wake,
         needs: Mutex::default(),
@@ -107,6 +109,19 @@ impl Conns for DirectoryIo {
         if n.target.as_deref().is_some_and(|t| t != desc.target) {
             return Err(ConnError::Refused);
         }
+        let extra_anchors = match n.anchors.as_deref() {
+            Some(pem) => {
+                busbar_core_connector::tls::client::operator_ca_config(pem.as_bytes())
+                    .map_err(|_| ConnError::Refused)?;
+                certs_from_pem(pem)
+            }
+            None => Vec::new(),
+        };
+        let tls = ClientTls::new(&EgressTrust {
+            extra_anchors,
+            ..EgressTrust::default()
+        })
+        .map_err(|_| ConnError::Refused)?;
         let at = if let Some(judge) = &self.judge {
             let (tx, rx) = std::sync::mpsc::channel();
             judge
@@ -153,7 +168,7 @@ impl Conns for DirectoryIo {
                     .rsplit_once(':')
                     .map_or(desc.target, |v| v.0)
                     .to_owned(),
-                tls: n.tls.ok_or(ConnError::Refused)?,
+                tls,
             }),
         )
     }
@@ -236,6 +251,26 @@ impl Conns for DirectoryIo {
     }
 }
 impl DeclaredConns for DirectoryIo {
+    fn open_request(
+        &self,
+        owner: InstanceId,
+        need: NeedId,
+        desc: &OpenDesc<'_>,
+        require_secure: bool,
+        dial_timeout_ms: u64,
+    ) -> Result<ConnId, ConnError> {
+        // This raw adapter uses this copy's timeout only for connect_timeout; the
+        // original stream/request deadline remains with the actual dispatcher.
+        let mut dial = desc.clone();
+        if dial_timeout_ms != 0 {
+            dial.timeout_ms = if desc.timeout_ms == 0 {
+                dial_timeout_ms
+            } else {
+                dial_timeout_ms.min(desc.timeout_ms)
+            };
+        }
+        self.open_with_security(owner, need, &dial, require_secure)
+    }
     fn declare(
         &self,
         owner: InstanceId,
@@ -244,7 +279,7 @@ impl DeclaredConns for DirectoryIo {
         target: Option<&str>,
         trust: Option<&str>,
     ) -> Result<(), ConnError> {
-        let mut answer = if spec.direction != DIRECTION_OUTBOUND
+        let answer = if spec.direction != DIRECTION_OUTBOUND
             || spec.transport != "tcp"
             || (!spec.target_from.is_empty() && target.is_none())
             || (!spec.trust_from.is_empty() && trust.is_none())
@@ -253,22 +288,16 @@ impl DeclaredConns for DirectoryIo {
         } else {
             Ok(())
         };
-        let pem = trust.or(self.anchors.as_deref());
-        let tls = ClientTls::new(&EgressTrust {
-            extra_anchors: pem.map(certs_from_pem).unwrap_or_default(),
-            ..EgressTrust::default()
-        })
-        .ok();
-        if tls.is_none() {
-            answer = Err(ConnError::Refused);
-        }
+        // A declaration stores operator input; settings-only validation must still reach
+        // the real LDAP door. Validate/parse trust before an actual socket is opened.
+        let anchors = trust.or(self.anchors.as_deref()).map(str::to_owned);
         self.needs.lock().unwrap().insert(
             (owner, need),
             Need {
                 answer,
                 target: target.map(str::to_owned),
                 class: spec.egress_class,
-                tls,
+                anchors,
             },
         );
         if answer.is_ok() {
