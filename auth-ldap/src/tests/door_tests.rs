@@ -1155,7 +1155,8 @@ mod reached_clock_callbacks {
         open.input.secrets_len = secret.len();
         open.input.generation = 1;
         assert_eq!(p.call(life_slot::OPEN, &mut open).outcome, Outcome::Ready);
-        let ticket = d.driver(&p, 0).expect("registered cache driver ticket");
+        let inline = d.inline_ticket().expect("registered cache inline ticket");
+        let ticket = inline.ticket();
         let mut input: Frame<CompleteLoginIn, IdentifyOut> = Frame::new(zeroed(), zeroed());
         let answer = p.call_inline(ticket, false, auth_slot::COMPLETE_LOGIN, &mut input);
         let mut close: Frame<InHead, OutHead> = Frame::new(zeroed(), zeroed());
@@ -1178,6 +1179,6 @@ mod reached_clock_callbacks {
             "the take and keep clock callbacks both observed the reached map unlocked"
         );
         drop(answer);
-        d.recycle(ticket);
+        drop(inline);
     }
 }
