@@ -750,9 +750,20 @@ fn ldaps_with_a_private_ca_verifies() {
 
     let public = boot(&so_path, &ldaps, "");
     let refused = form_login(&client, &public.base, "alice", ALICE_PW);
+    // An untrusted CA is the directory being unreachable (Login::Outage, a retryable 503), not the
+    // user's password being wrong (401) and not a broken boot (500).
+    let status = refused.status().as_u16();
     assert!(
-        !refused.status().is_success(),
-        "no ca_cert_pem: the private CA is untrusted and no key is minted: {}",
-        refused.status()
+        matches!(status, 502..=504),
+        "no ca_cert_pem: the private CA is untrusted, an outage-class answer (not 401, not 500): got {status}"
+    );
+    assert_ne!(
+        status, 401,
+        "an untrusted directory is not a bad credential"
+    );
+    let body = refused.text().unwrap_or_default();
+    assert!(
+        !body.contains("ldap:uid=alice"),
+        "no ca_cert_pem: no key is minted: {body}"
     );
 }
