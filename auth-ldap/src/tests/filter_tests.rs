@@ -24,7 +24,7 @@ fn greater_or_equal_and_approx_encode_their_own_choice() {
 
 #[test]
 fn the_1_5_5_vectors_encode_byte_for_byte() {
-    let vectors: [(&str, &[u8]); 14] = [
+    let vectors: [(&str, &[u8]); 17] = [
         ("a=v", b"\xa3\x06\x04\x01a\x04\x01v"),
         ("(a=v)", b"\xa3\x06\x04\x01a\x04\x01v"),
         ("(a<=2)", b"\xa6\x06\x04\x01a\x04\x012"),
@@ -41,6 +41,12 @@ fn the_1_5_5_vectors_encode_byte_for_byte() {
         ),
         ("(ou:dn:=People)", b"\xa9\x0f\x82\x02ou\x83\x06People\x84\x01\xff"),
         ("(cn:2.5.13.5:=J D)", b"\xa9\x13\x81\x082.5.13.5\x82\x02cn\x83\x03J D"),
+        ("(:2.5.13.5:=x)", b"\xa9\x0d\x81\x082.5.13.5\x83\x01x"),
+        ("(:dn:2.5.13.5:=x)", b"\xa9\x10\x81\x082.5.13.5\x83\x01x\x84\x01\xff"),
+        (
+            "(cn:dn:2.5.13.5:=x)",
+            b"\xa9\x14\x81\x082.5.13.5\x82\x02cn\x83\x01x\x84\x01\xff",
+        ),
         ("(a=\u{107})", b"\xa3\x07\x04\x01a\x04\x02\xc4\x87"),
     ];
     for (filter, bytes) in vectors {
