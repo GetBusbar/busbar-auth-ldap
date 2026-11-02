@@ -400,10 +400,12 @@ impl HostWire<'_> {
         let Some(c) = self.conn.as_mut() else {
             return Poll::Ready(Err("the instance was handed no host tables".to_string()));
         };
-        let before = c.issued();
         match f(c, self.stream.unwrap_or(0)) {
             Poll::Pending => {
-                self.at = before;
+                // A sealed BIND may complete FACTS and several partial WRITEs before
+                // its last service pends. Its parked writer keeps that progress, so
+                // resume the outstanding service, never the first completed one.
+                self.at = c.issued().saturating_sub(1);
                 Poll::Pending
             }
             Poll::Ready(r) => {
