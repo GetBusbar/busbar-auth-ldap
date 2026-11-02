@@ -33,6 +33,11 @@ fn integers_take_their_minimal_twos_complement() {
         (-128, vec![0x80]),
         (-129, vec![0xff, 0x7f]),
         (i64::from(i32::MAX), vec![0x7f, 0xff, 0xff, 0xff]),
+        (
+            i64::MAX,
+            vec![0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        ),
+        (i64::MIN, vec![0x80, 0, 0, 0, 0, 0, 0, 0]),
     ] {
         assert_eq!(int_content(v), bytes, "{v}");
         assert_eq!(int_value(&bytes), Ok(v), "{v}");
