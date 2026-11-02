@@ -430,3 +430,50 @@ fn a_results_far_end_text_is_escaped_and_capped() {
         "LDAP operation result: rc=32 (noSuchObject), dn: \"dc=x\", text: \"no such entry\""
     );
 }
+
+/// A SearchResultEntry that repeats an attribute description keeps the values of BOTH
+/// PartialAttributes (a later one must not overwrite the earlier one's roles).
+#[test]
+fn a_repeated_attribute_description_keeps_every_value() {
+    fn attr(name: &[u8], vals: &[&[u8]]) -> Vec<u8> {
+        let vals: Vec<u8> = vals.iter().flat_map(|v| tlv(0x04, v)).collect();
+        tlv(0x30, &[tlv(0x04, name), tlv(0x31, &vals)].concat())
+    }
+    let attrs = [
+        attr(b"memberOf", &[b"cn=admins,dc=x"]),
+        attr(b"memberOf", &[b"cn=users,dc=x"]),
+    ]
+    .concat();
+    let m = msg(
+        2,
+        &tlv(
+            0x64,
+            &[tlv(0x04, b"uid=alice,dc=x"), tlv(0x30, &attrs)].concat(),
+        ),
+    );
+    let Ok(Message {
+        reply: Reply::Entry(e),
+        ..
+    }) = decode(&m)
+    else {
+        panic!("an entry");
+    };
+    assert_eq!(
+        e.attrs["memberOf"],
+        vec!["cn=admins,dc=x".to_string(), "cn=users,dc=x".to_string()]
+    );
+}
+
+/// Values past the per-attribute cap are counted and the loss is logged once per attribute, with
+/// the real number skipped.
+#[test]
+fn values_past_the_cap_are_counted_and_warned() {
+    let n = crate::MAX_GROUP_VALUES + 100;
+    let m = big_entry(2, n, b"x");
+    let cap = busbar_test_kit::warn_capture::WarnCapture::default();
+    let got = tracing::subscriber::with_default(cap.clone(), || decode(&m));
+    assert!(got.is_ok());
+    assert!(cap.contains("over-cap"), "{:?}", cap.messages());
+    assert!(cap.contains("attribute=memberOf"), "{:?}", cap.messages());
+    assert!(cap.contains("skipped=99"), "{:?}", cap.messages());
+}

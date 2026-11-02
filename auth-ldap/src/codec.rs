@@ -269,7 +269,7 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
     charge(budget, dn.len())?;
     let dn = text(dn, "an entry DN that is not UTF-8")?;
     let (mut list, _) = ber::expect(rest, ber::SEQUENCE, "an entry without its attributes")?;
-    let mut attrs = HashMap::new();
+    let mut attrs: HashMap<String, Vec<String>> = HashMap::new();
     while !list.is_empty() {
         let (Tlv { tag, content }, next) = ber::read(list)?;
         list = next;
@@ -283,6 +283,7 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
         let (mut vals, _) = ber::expect(rest, ber::SET, "an attribute without its values")?;
         let mut values = Vec::new();
         let mut dropped = 0_usize;
+        let mut skipped = 0_usize;
         while !vals.is_empty() {
             let (v, next) = ber::read(vals)?;
             vals = next;
@@ -294,9 +295,9 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
                     charge(budget, s.len())?;
                     values.push(s.to_owned());
                 }
-                // Past the cap a value is only counted: the module sees `MAX_VALUES_KEPT` and
-                // logs the truncation.
-                Ok(_) => {}
+                // Past the cap a value is only counted (warned once per attribute below); the
+                // module still sees `MAX_VALUES_KEPT` and applies its own cap.
+                Ok(_) => skipped += 1,
                 Err(_) => dropped += 1,
             }
         }
@@ -312,7 +313,18 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
                            "ldap attribute values that are not UTF-8 were dropped"
                        );
         }
-        attrs.insert(name, values);
+        if skipped > 0 {
+            tracing::warn!(
+                module = "ldap",
+                reason = "over-cap",
+                attribute = %name,
+                kept = values.len(),
+                skipped,
+                "ldap attribute values past the per-attribute cap were skipped"
+            );
+        }
+        // A description the entry repeats adds to the earlier values, never replaces them.
+        attrs.entry(name).or_default().extend(values);
     }
     Ok(Entry { dn, attrs })
 }
