@@ -146,3 +146,10 @@ fn the_inbound_cap_is_sixteen_mib_from_the_header() {
         .to_string()
         .contains("16 MiB inbound cap"));
 }
+
+/// The over-budget text names the budget it is derived from.
+#[test]
+fn the_over_budget_text_states_the_decode_budget() {
+    let want = format!("{} MiB", crate::codec::DECODE_BUDGET / (1024 * 1024));
+    assert!(BerError::OverBudget.to_string().contains(&want));
+}
