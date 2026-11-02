@@ -2,20 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Plugin-SIDE live end-to-end for the AD/LDAP login plugin — the mirror of `auth-oidc-plugin`'s
-//! `tests/e2e.rs`, testing THIS plugin's OWN token-exchange direction (the GET credential-FORM flow:
-//! chooser → form → POST creds → the plugin BINDs over the host connector's stream → key).
-//!
-//! LDAP is a `Credential` method: there is no held-token/redirect path, so the faithful test is a REAL
-//! busbar boot driving the real form POST, with the plugin binding against a READY-MADE OpenLDAP
-//! container (never a hand-rolled directory), provided by CI as a service container and addressed via
-//! `BUSBAR_TEST_LDAP_URL` (mirrors the store plugins' `BUSBAR_TEST_POSTGRES_URL`). The container
-//! auto-creates the base suffix + admin from its own env; this test seeds the test user/group over
-//! LDAP itself (`ldap3`, a dev-only client; the plugin speaks its own sans-IO codec) — the CI-service equivalent of feeding
-//! busbar/scripts/fixtures/auth-ldap/seed.ldif, kept in-test so the plugin's CI is self-contained.
-//!
-//! GATING: `BUSBAR_TEST_LDAP_URL` unset ⇒ SKIP loudly (local, no docker) — never a silent pass.
-//! Under CI (`CI` set) the plugin-ci `service: openldap` arm sets it and the tests RUN; an unset URL
-//! under CI FAILS, so a broken service arm cannot turn the only real-directory gate vacuous.
 
 use busbar_auth_ldap::Login;
 use std::io::Write as _;
@@ -34,7 +20,7 @@ fn ldap_url() -> Option<String> {
 }
 
 /// The live directory's URL, or `None` to skip (loudly) outside CI. Under CI an unset URL panics,
-/// like [`plugin_path`]'s unbuilt-cdylib guard: the service arm is supposed to provide it.
+
 fn live_ldap_url() -> Option<String> {
     let url = ldap_url();
     if url.is_none() {
@@ -53,9 +39,7 @@ fn live_ldap_url() -> Option<String> {
 }
 
 /// The busbar checkout the live e2e builds the REAL `busbar` and `busbar-plugin-pack` binaries from:
-/// `BUSBAR_CHECKOUT`, a checkout of GetBusbar/busbar at `.busbar-ref` field 1 (this repo's CI `e2e` job
-/// checks it out and sets the variable). This repo builds against busbar by git rev, not a sibling
-/// path, so the binaries' source is named explicitly. Unset ⇒ the live leg cannot run, and says so.
+
 fn busbar_root() -> std::path::PathBuf {
     let dir = std::env::var_os("BUSBAR_CHECKOUT").expect(
         "BUSBAR_CHECKOUT is unset: the live e2e builds the real busbar binaries from a checkout of \
@@ -68,9 +52,7 @@ fn busbar_root() -> std::path::PathBuf {
 
 fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
     let root = busbar_root();
-    // Two invocations: in busbar 1.6.0 `busbar-plugin-pack` is a feature-gated bin of the
-    // `busbar-plugin-loader` package (`--features pack`), not a package of its own, and building it
-    // separately keeps the `pack` feature out of the `busbar` build.
+
     for args in [
         &[
             "build",
@@ -96,9 +78,6 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
         let status = std::process::Command::new("cargo")
             .args(args)
             .current_dir(&root)
-            // The binaries are read back from `<sibling>/target/release` below, so the build must
-            // land there: an inherited CARGO_TARGET_DIR (set for the outer `cargo test`) would
-            // redirect it into the plugin's own target dir.
             .env_remove("CARGO_TARGET_DIR")
             .env("BUSBAR_RELEASE_PUBKEY", E2E_RELEASE_PUBKEY)
             .status()
@@ -115,12 +94,7 @@ fn build_real_binaries() -> (std::path::PathBuf, std::path::PathBuf) {
 }
 
 /// THE TEST-ONLY FIRST-PARTY KEYPAIR (ed25519, `busbar-plugin-pack keygen`), never the release key.
-/// busbar grants the `operator-infrastructure` egress class this module's `tcp` need declares to a
-/// FIRST-PARTY plugin only (`busbar_plugin_loader::sign::egress_grant`): the busbar built here
-/// embeds the public half (`BUSBAR_RELEASE_PUBKEY`, compile time, as busbar's signing gate builds
-/// it) and the tarball is signed with the private half, so the plugin under test is first-party.
-/// Fixed, so the cached busbar build is reused across runs (the same pair busbar-store-postgres's
-/// e2e uses).
+
 const E2E_RELEASE_PUBKEY: &str = "9209607c315f66473c8cca8bf9a7b8031115d01bb47341613cebf57f0e4f271c";
 const E2E_RELEASE_PRIVKEY: &str =
     "290f2453f236650ab21b85a95d49b9dab088518e829e4d524b01e441636ab327";
@@ -192,14 +166,10 @@ fn free_port() -> u16 {
 }
 
 /// Seed the test directory over LDAP (idempotent): ou=people, ou=groups, uid=alice (bindable
-/// userPassword + a `seeAlso` group-DN the plugin reads as membership), and cn=admins with alice as a
-/// member — the in-test equivalent of scripts/fixtures/auth-ldap/seed.ldif. Uses `seeAlso` (a
-/// standard DN-syntax attribute seeded directly on the user) so the group→role mapping is deterministic
-/// on any OpenLDAP WITHOUT the operational `memberOf` overlay; the plugin's `group_attr` points at it.
+
 fn seed_directory(url: &str) {
     use ldap3::{LdapConn, Scope, SearchEntry};
-    // The OpenLDAP service container takes a few seconds to create its base suffix; retry the admin
-    // bind until it is ready (or give up loudly after ~60s).
+
     let mut ldap = None;
     for _ in 0..60 {
         if let Ok(mut c) = LdapConn::new(url) {
@@ -215,7 +185,6 @@ fn seed_directory(url: &str) {
     let mut ldap =
         ldap.expect("OpenLDAP admin bind never succeeded (check LDAP_ADMIN_PASSWORD / base)");
 
-    // Confirm the container auto-created the base suffix from its env before we add children.
     ldap.search(BASE_DN, Scope::Base, "(objectClass=*)", vec!["dn"])
         .and_then(|r| r.success())
         .unwrap_or_else(|e| {
@@ -226,7 +195,7 @@ fn seed_directory(url: &str) {
         |ldap: &mut LdapConn, dn: &str, attrs: Vec<(&str, std::collections::HashSet<&str>)>| {
             match ldap.add(dn, attrs).and_then(|r| r.success()) {
                 Ok(_) => {}
-                // 68 = entryAlreadyExists — a rerun against a warm container is fine.
+
                 Err(ldap3::LdapError::LdapResult { result }) if result.rc == 68 => {}
                 Err(e) => panic!("seed add {dn} failed: {e}"),
             }
@@ -269,7 +238,6 @@ fn seed_directory(url: &str) {
         ],
     );
 
-    // Prove the seed landed the way the plugin will read it: alice carries seeAlso=cn=admins,...
     let (entries, _) = ldap
         .search(ALICE_DN, Scope::Base, "(objectClass=*)", vec!["seeAlso"])
         .and_then(|r| r.success())
@@ -285,7 +253,7 @@ fn seed_directory(url: &str) {
 }
 
 /// THE TEST'S OWN STREAM to the live directory: a plaintext TCP socket in this test only (the
-/// shipped plugin opens none; its stream is the host connector's). Every call answers at once.
+
 struct TestStream(Option<std::net::TcpStream>);
 
 impl busbar_auth_ldap::conversation::Wire for TestStream {
@@ -320,8 +288,7 @@ impl busbar_auth_ldap::conversation::Wire for TestStream {
 }
 
 /// Run one credential login on the library module directly (no busbar boot): the module's codec
-/// over the test's own stream, on a clock (a login with none refuses to run untimed; the stream
-/// never pends, so the deadline is never reached).
+
 fn live_login(settings: serde_json::Value, username: &str, password: &str) -> Login {
     let cfg: busbar_auth_ldap::LdapConfig =
         serde_json::from_value(settings).expect("live ldap settings parse");
@@ -343,9 +310,7 @@ fn live_login(settings: serde_json::Value, username: &str, password: &str) -> Lo
 }
 
 /// The module's codec against the live directory, in BOTH directory shapes: direct bind and
-/// search-then-bind (service bind, Subtree user lookup under base_dn, re-bind as the found DN). Each
-/// must Identify alice with the canonical principal id and exactly the role her `seeAlso` group maps
-/// to (`admins`), and must Reject a wrong password.
+
 #[test]
 fn ldap_module_binds_live_in_both_modes_and_maps_the_group() {
     let Some(url) = live_ldap_url() else {
@@ -453,7 +418,7 @@ fn wait_for_health(
 }
 
 /// A real busbar booted with the packed plugin as `identity-providers.ldap` over `url`, its settings
-/// carrying `extra` (whole YAML lines, indented as settings keys) after the test's own; healthy.
+
 struct Booted {
     child: Busbar,
     base: String,
@@ -487,9 +452,6 @@ fn boot(so_path: &std::path::Path, url: &str, extra: &str) -> Booted {
     std::fs::create_dir_all(&plugins_dir).unwrap();
     pack_ldap(
         &pack_bin,
-        // The version the plugin states in its Statement (the logic crate's, which this crate
-        // shares): busbar-plugin-pack refuses any other. A fresh deployment holds no high-water mark
-        // for the name, so no first-party floor applies.
         env!("CARGO_PKG_VERSION"),
         so_path,
         &plugins_dir.join("busbar-auth-ldap.tar.gz"),
@@ -567,8 +529,7 @@ fn boot(so_path: &std::path::Path, url: &str, extra: &str) -> Booted {
 }
 
 /// THE plugin-side proof: a REAL busbar boot drives the ldap credential-form flow; the plugin BINDs
-/// alice against OpenLDAP, reads her group DN (→ role `admins` → group eng-team), a key is minted, and
-/// it authenticates on the data plane. A WRONG password is REJECTED 401 — the real bind gates.
+
 #[test]
 fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
     let Some(url) = live_ldap_url() else {
@@ -586,7 +547,6 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
     let booted = boot(&so_path, &url, "");
     let base = booted.base.clone();
 
-    // begin: GET ?method=ldap → 200 credential form + cookie.
     let begin = client
         .get(format!("{base}/auth/token?method=ldap"))
         .send()
@@ -599,7 +559,6 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
     let cookie_value = login_cookie(&begin);
     let state = cookie_state(&cookie_value);
 
-    // POST creds (correct password) → the plugin binds + reads groups → key page.
     let ok_page = client
         .post(format!("{base}/auth/token"))
         .header(
@@ -623,10 +582,7 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
         page.contains("ldap:uid=alice"),
         "identity ldap:uid=alice must appear: {page}"
     );
-    // The key page names the per-user group only. It exists because role 'admins' bound to
-    // eng-team: with no bound role busbar answers 403 "No access yet" and the success check above
-    // fails. The role itself is asserted directly in
-    // `ldap_module_binds_live_in_both_modes_and_maps_the_group`.
+
     assert!(
         page.contains("user:ldap:uid=alice"),
         "group user:ldap:uid=alice must appear (role 'admins' must have bound)"
@@ -641,16 +597,13 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
         )
         .send()
         .expect("chat with the issued key");
-    // The key authenticated AND was routed: the only failure left is the dead mock upstream
-    // (127.0.0.1:9), a gateway answer. 401 (not authenticated), 403 (no usable scope), 404 (not
-    // routed) or 429 would each mean the issued key does not work.
+
     let status = chat.status().as_u16();
     assert!(
         matches!(status, 502..=504),
         "the self-scoped ldap key must authenticate and reach the (dead) upstream: got {status}"
     );
 
-    // WRONG password must be rejected 401 — proving the REAL bind gates. Fresh begin → fresh cookie.
     let begin2 = client
         .get(format!("{base}/auth/token?method=ldap"))
         .send()
@@ -677,7 +630,7 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
 }
 
 /// One credential-form login on a booted busbar: begin, then POST `username`/`password`; the
-/// response to the POST.
+
 fn form_login(
     client: &reqwest::blocking::Client,
     base: &str,
@@ -704,10 +657,7 @@ fn form_login(
 }
 
 /// CA-1 / SEC-LDAPCA, LIVE: a directory behind LDAPS whose certificate chains to a PRIVATE CA (the
-/// test kit's TLS front, its CA no public root store holds, in front of the OpenLDAP service). With
-/// `ca_cert_pem` naming that CA the real busbar's connector trusts it for this plugin's dials (the
-/// anchored need's `trust_from`), the bind runs over the verified LDAPS stream and the login mints
-/// a key; with no `ca_cert_pem` the same directory is untrusted, and no key is minted.
+
 #[test]
 fn ldaps_with_a_private_ca_verifies() {
     let Some(url) = live_ldap_url() else {

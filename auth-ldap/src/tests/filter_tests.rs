@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The filter encoder against 1.5.5's: every vector here is ldap3 0.11's own filter test, byte for
-//! byte, plus the filters this module sends (the group read, an escaped search-then-bind username,
-//! an AD in-chain rule).
 
 use super::{encode, PARSE_ERROR};
 use crate::groups::escape_filter;
@@ -13,8 +11,7 @@ fn ber(filter: &str) -> Vec<u8> {
 }
 
 /// T6: the other two ordering/approximate choices, `>=` (greaterOrEqual, 0xa5) and `~=`
-/// (approxMatch, 0xa8), beside 1.5.5's `<=` vector: an operator's `user_search_filter` may use
-/// either.
+
 #[test]
 fn greater_or_equal_and_approx_encode_their_own_choice() {
     assert_eq!(ber("(a>=2)"), b"\xa5\x06\x04\x01a\x04\x012");
@@ -51,7 +48,6 @@ fn the_1_5_5_vectors_encode_byte_for_byte() {
 #[test]
 fn the_filters_1_5_5_refused_are_refused() {
     for filter in [
-        // RFC 4515 §3: an AND or OR holds one or more filters (1.5.5's ldap3 sent these empty).
         "(&)",
         "(|)",
         "(&(|))",
@@ -79,7 +75,7 @@ fn the_filters_this_module_sends_encode() {
         ber("(objectClass=*)"),
         [&b"\x87\x0b"[..], &b"objectClass"[..]].concat()
     );
-    // An extensible match with only a rule (AD's in-chain membership).
+
     let mut rule = Vec::new();
     crate::ber::tlv(&mut rule, 0x81, b"1.2.840.113556.1.4.1941");
     crate::ber::tlv(&mut rule, 0x82, b"memberOf");
@@ -88,13 +84,12 @@ fn the_filters_this_module_sends_encode() {
         ber("(memberOf:1.2.840.113556.1.4.1941:=cn=g,dc=x)"),
         crate::ber::element(0xa9, &rule)
     );
-    // An attribute option.
+
     assert_eq!(ber("(cn;lang-en=x)")[..4], [0xa3, 0x0f, 0x04, 0x0a]);
 }
 
 /// The search-then-bind username as applied: `escape_filter` neutralises every metacharacter, and
-/// the encoded filter carries the hostile bytes back as plain value bytes (an equality, never a
-/// substrings or a second filter).
+
 #[test]
 fn an_escaped_username_is_one_equality_value() {
     let hostile = "a*)(uid=*))(|(uid=*\\\0";
@@ -107,8 +102,7 @@ fn an_escaped_username_is_one_equality_value() {
 }
 
 /// M3: the parser's recursion is bounded: a filter nested deeper than 32 levels is refused (it
-/// would otherwise recurse once per level and, at tens of thousands, overflow the stack: an abort,
-/// not a panic), and 32 levels still parse.
+
 #[test]
 fn nesting_deeper_than_32_levels_is_refused() {
     let nested = |levels: usize| {

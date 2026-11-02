@@ -2,14 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The search filter: an RFC 4515 string filter to its RFC 4511 BER `Filter`, as a pure function.
-//! The grammar is ldap3's `filter::parse`, alternative for alternative:
-//!
-//! * a filter is `(` and, or, not or an item `)`, or a bare item;
-//! * an item is equality / presence / substrings (`attr=...`), `>=` `<=` `~=`, or an extensible
-//!   match (`attr[:dn][:rule]:=v` or `[:dn]:rule:=v`);
-//! * an attribute is a numeric OID (no superfluous leading zeroes) or a name starting with a
-//!   letter, then `;option`s; a value takes `\XX` escapes and never a raw NUL, `(`, `)` or `*`
-//!   (outside a substrings pattern).
 
 use crate::ber;
 
@@ -40,14 +32,11 @@ const MRA_DN_ATTRIBUTES: u8 = 0x84;
 pub const PARSE_ERROR: &str = "filter parse error";
 
 /// The deepest a filter may nest (`(a=b)` is one level, `(!(a=b))` two): the parser recurses once
-/// per level, so an unbounded depth could overflow the stack (an abort, not a panic). No real
-/// search filter comes near it.
+
 pub const MAX_DEPTH: usize = 32;
 
 /// `filter` as BER, or [`PARSE_ERROR`].
-///
-/// # Errors
-/// The filter does not parse.
+
 pub fn encode(filter: &str) -> Result<Vec<u8>, &'static str> {
     match filtexpr(filter.as_bytes()) {
         Some((ber, [])) => Ok(ber),
@@ -80,8 +69,7 @@ fn filtercomp(i: &[u8], depth: usize) -> Parsed<'_> {
 }
 
 /// An AND or OR of ONE OR MORE filters (RFC 4515 §3, `filterlist = 1*filter`): the empty `(&)` and
-/// `(|)` (RFC 4526's absolute true and false) are refused, never sent as a filter that matches
-/// everything or nothing.
+
 fn and_or(i: &[u8], op: u8, tag: u8, depth: usize) -> Parsed<'_> {
     let mut i = i.strip_prefix(&[op])?;
     let mut content = Vec::new();
@@ -136,7 +124,7 @@ fn eq(i: &[u8]) -> Parsed<'_> {
         mid_final.push(part);
         i = rest;
     }
-    // Only the last part after a `*` may be empty (`a=v*`); `a=v**x` is refused.
+
     let n = mid_final.len();
     if mid_final
         .iter()

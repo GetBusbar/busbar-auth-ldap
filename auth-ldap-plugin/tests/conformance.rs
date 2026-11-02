@@ -2,29 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! **ONE LDAP DOOR, BOTH WAYS IN** — the LDAP module's linked + dropped-in conformance on the auth
-//! kind's door (THE DESIGN §11), run against the busbar rev this repo pins (`.busbar-ref`).
-//!
-//! THE PUBLISHED SUITE (busbar-plugin-loader's `conformance` feature, at the pin): the linked door
-//! and the built cdylib, each through the one loader, driven by the auth kind's script over the
-//! inputs `conformance.json` names: the tail states the login family alone (`CAP_LOGIN`: LDAP
-//! judges no bearer credential, so `verify` is an undeclared op that must answer REFUSED), the
-//! credential login (`begin_login`'s form; `complete_login` SUBMITTED on a ticket, the suite's
-//! user's credential an identity, a wrong password refused), exact crossing counts, the two folds equal,
-//! its RED arms.
-//!
-//! THE HOST (ARCHITECT Q-P4-9): the module's one `tcp` need is served by busbar's own connector,
-//! composed as the root composes it (`conformance_host`, rendered by the fleet template), and the
-//! module asks for STARTTLS (`start_tls`): it sends the StartTLS extended request in the clear, the
-//! suite's TLS front answers it ([`start_tls`]) and handshakes with a certificate that chains to the
-//! suite's test CA, the anchors only the HOST's TLS is handed (`tls:`); the module then asks the
-//! connector to secure the stream (`upgrade_secure`), and the front carries the secured connection
-//! to the live directory (plugin-ci's `openldap` service, `BUSBAR_TEST_LDAP_URL`). So every login
-//! proves the module's connection is secured by the host, verified against the anchors.
-//!
-//! THE RED ARMS of this repo's own, same file: the Statement declares its one need and secret
-//! reference and never blocks; a directory that takes the connection and never answers is an
-//! outage at the login's deadline; and THE BAN ([`net_ban`]): the shipped closure holds no socket
-//! crate and no TLS stack.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -66,7 +43,7 @@ busbar_test_kit::conformance_suite! {
 }
 
 /// The live directory's address (`BUSBAR_TEST_LDAP_URL`'s authority; the service container's
-/// default when unset).
+
 fn upstream() -> &'static str {
     static AT: OnceLock<String> = OnceLock::new();
     AT.get_or_init(|| {
@@ -117,8 +94,7 @@ fn first(content: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 /// LDAP's cleartext negotiation: the client's StartTLS extended request (an `LDAPMessage` whose
-/// protocol op is `[APPLICATION 23]` naming [`START_TLS_OID`]) answered with a successful
-/// `[APPLICATION 24]` extended response on the same message id; anything else is not a TLS client.
+
 fn start_tls(tcp: &mut TcpStream) -> bool {
     let Some((0x30, message)) = element(tcp) else {
         return false;
@@ -132,7 +108,7 @@ fn start_tls(tcp: &mut TcpStream) -> bool {
     if !op.windows(START_TLS_OID.len()).any(|w| w == START_TLS_OID) {
         return false;
     }
-    // ExtendedResponse: resultCode success, matchedDN "", diagnosticMessage "", responseName.
+
     let mut response = vec![0x0a, 0x01, 0x00, 0x04, 0x00, 0x04, 0x00, 0x8a];
     response.push(START_TLS_OID.len() as u8);
     response.extend_from_slice(START_TLS_OID);
@@ -154,15 +130,11 @@ const USER_DN: &str = "cn=conformance,dc=example,dc=org";
 const USER_PW: &str = "conformance-password";
 
 /// How long the suite waits for a named live directory to take its administrator's bind. A service
-/// container's port answers before its slapd serves (the runner's port proxy accepts at once), and
-/// the image bootstraps its suffix before the first bind succeeds.
+
 const DIRECTORY_WAIT: Duration = Duration::from_secs(180);
 
 /// The live directory at `at`, bound as its administrator, retried until `until`.
-///
-/// # Errors
-///
-/// The last refusal, naming `at`, once `until` has passed with no bind taken.
+
 fn admin_bound(at: &str, until: Instant) -> Result<ldap3::LdapConn, String> {
     let settings = ldap3::LdapConnSettings::new().set_conn_timeout(Duration::from_secs(5));
     loop {
@@ -187,13 +159,7 @@ fn admin_bound(at: &str, until: Instant) -> Result<ldap3::LdapConn, String> {
 }
 
 /// The suite's user in the live directory, added once over plaintext LDAP on loopback by the
-/// administrator (`ldap3`, a dev-only client; the module speaks its own codec): the container makes
-/// its base suffix and its root DN, but no entry the module could read groups off. With
-/// `BUSBAR_TEST_LDAP_URL` set the directory must take the administrator's bind within
-/// [`DIRECTORY_WAIT`], or the suite stops here naming it (never a login that reads an outage); the
-/// wait is made once, and every later test that asks is refused at once with the same words. With
-/// no directory named (a macOS runner) it is one try and nothing is added; the live arms, skipped
-/// there, would read an outage.
+
 fn seed_user() {
     static SEEDED: OnceLock<Result<(), String>> = OnceLock::new();
     let seeded = SEEDED.get_or_init(|| {
@@ -218,7 +184,6 @@ fn seed_user() {
             ("userPassword", [USER_PW].into()),
         ];
         let added = match ldap.add(USER_DN, attrs).and_then(|r| r.success()) {
-            // 68 = entryAlreadyExists: a rerun against a warm directory.
             Ok(_) => Ok(()),
             Err(ldap3::LdapError::LdapResult { result }) if result.rc == 68 => Ok(()),
             Err(e) => Err(format!("the suite's user {USER_DN} cannot be added: {e}")),
@@ -232,7 +197,7 @@ fn seed_user() {
 }
 
 /// The host the suite binds the module over, with the TLS front its settings name already
-/// listening and the suite's user in the directory behind it.
+
 fn host(
     wake: busbar_contract::conn::ConnWake,
     anchors: Option<&str>,
@@ -243,9 +208,7 @@ fn host(
 }
 
 /// RED: the Statement declares the module's TWO needs (each an outbound `tcp` stream of the
-/// operator-infrastructure egress class, its target named per login: the public one on the
-/// connector's own trust, the anchored one on `settings.ca_cert_pem`) and its ONE secret reference, and states no call that blocks; the dropped-in library
-/// states the same Statement.
+
 #[test]
 fn red_the_statement_declares_a_public_and_an_anchored_stream_and_never_blocks() {
     let stated = LinkedRow::of_macro(MACRO_DOOR)
@@ -274,7 +237,7 @@ fn red_the_statement_declares_a_public_and_an_anchored_stream_and_never_blocks()
 }
 
 /// A loopback listener that takes every connection and never answers (the connections are held
-/// open); its address.
+
 fn silent_directory() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a local listener");
     let at = listener.local_addr().expect("its address").to_string();
@@ -288,9 +251,7 @@ fn silent_directory() -> String {
 }
 
 /// RED: a directory whose port takes the connection and drops it (a service container's port proxy
-/// with no slapd behind it yet, or none at all) takes no administrator's bind: the seed waits it out
-/// to the deadline, then names the directory, instead of leaving the suite's login to read an
-/// outage.
+
 #[test]
 fn red_a_directory_port_with_no_directory_behind_it_is_named_at_the_deadline() {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a local listener");
@@ -318,8 +279,7 @@ fn red_a_directory_port_with_no_directory_behind_it_is_named_at_the_deadline() {
 }
 
 /// THE MEMORY ONE `complete_login` LENDS THE PLUGIN: the submitted form fields and the host's
-/// identity buffer, lent whole to the op (THE DESIGN §2) so its pointers stay valid however the
-/// call ends.
+
 struct LoginLend {
     _fields: [Vec<u8>; 2],
     named: Vec<NamedValue>,
@@ -335,8 +295,7 @@ unsafe impl Send for LoginLend {}
 unsafe impl Sync for LoginLend {}
 
 /// One credential login SUBMITTED on a ticket (as the host submits it) and awaited: the answer and
-/// the verdict it names. Everything the frame names is in a [`LoginLend`] the op owns (the suite's
-/// lending submit, `conformance::on_ticket_frame`).
+
 fn login(
     p: &busbar_plugin_loader::dispatch::Plugin<Auth>,
     d: &Dispatcher,
@@ -394,8 +353,7 @@ fn login(
 }
 
 /// Host services offering the clock alone (the dispatcher's own timebase), refusing the rest (busbar's
-/// shared test double answers every other service unserved): the login arms its deadline off the
-/// host's clock, as the kernel serves it.
+
 struct ClockOnly;
 
 impl busbar_test_kit::services_double::ServicesDouble for ClockOnly {
@@ -408,8 +366,7 @@ impl busbar_test_kit::services_double::ServicesDouble for ClockOnly {
 }
 
 /// RED: a directory that takes the connection and never answers (and so never wakes the ticket) is
-/// an OUTAGE once the login's `timeout_secs` pass — the op's own deadline resumes it; nothing blocks
-/// and nothing waits forever. Through the host's connector, both legs.
+
 #[test]
 fn red_a_directory_that_never_answers_is_an_outage_at_the_deadline() {
     let at = silent_directory();

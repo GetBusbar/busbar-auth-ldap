@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The LDAP codec: requests byte for byte as 1.5.5's client wrote them (hand-assembled here, not
-//! through the encoder under test), replies decoded, and every malformed reply an error — never a
-//! panic (OWNER-SIGNED difference 1).
 
 use std::collections::HashMap;
 
@@ -46,7 +44,7 @@ fn unbind_and_start_tls_are_their_textbook_bytes() {
 }
 
 /// The group read exactly as 1.5.5 sent it: base scope, never deref, no limits, types and values,
-/// `(objectClass=*)`, the one attribute.
+
 #[test]
 fn the_group_read_is_1_5_5s_search() {
     let op = [
@@ -109,7 +107,7 @@ fn a_bind_response_decodes() {
             })
         })
     );
-    // Response controls after the op are not read.
+
     let with_controls = msg(
         1,
         &[
@@ -124,8 +122,7 @@ fn a_bind_response_decodes() {
 }
 
 /// M5: a value that is not UTF-8 is dropped ALONE: the attribute keeps its text values (a group
-/// list with one binary value is not lost whole), and the drop is logged at warn once per attribute,
-/// naming it and how many values went.
+
 #[test]
 fn a_search_entry_keeps_its_text_values_and_warns_of_the_rest() {
     fn attr(name: &[u8], vals: &[&[u8]]) -> Vec<u8> {
@@ -210,7 +207,7 @@ fn an_extended_response_decodes_with_its_name() {
             Some("1.3.6.1.4.1.1466.20037".into())
         ))
     );
-    // A notice of disconnection: id 0, its own name.
+
     let notice = msg(
         0,
         &tlv(
@@ -231,13 +228,9 @@ fn an_extended_response_decodes_with_its_name() {
 #[test]
 fn a_malformed_reply_is_an_error_never_a_panic() {
     for bad in [
-        // Not a SEQUENCE.
         tlv(0x04, b"x"),
-        // No message id.
         tlv(0x30, &tlv(0x61, &result(0, b"", b""))),
-        // An op with no result code.
         msg(1, &tlv(0x61, &tlv(0x04, b""))),
-        // A negative result code.
         msg(
             1,
             &tlv(
@@ -245,14 +238,11 @@ fn a_malformed_reply_is_an_error_never_a_panic() {
                 &[tlv(0x0a, &[0xff]), tlv(0x04, b""), tlv(0x04, b"")].concat(),
             ),
         ),
-        // An entry DN that is not UTF-8.
         msg(
             2,
             &tlv(0x64, &[tlv(0x04, b"\xff"), tlv(0x30, &[])].concat()),
         ),
-        // An entry without its attribute list.
         msg(2, &tlv(0x64, &tlv(0x04, b"dn"))),
-        // A value that is not an OCTET STRING.
         msg(
             2,
             &tlv(
@@ -270,13 +260,11 @@ fn a_malformed_reply_is_an_error_never_a_panic() {
                 .concat(),
             ),
         ),
-        // Trailing bytes after the message.
         [msg(1, &tlv(0x61, &result(0, b"", b""))), vec![0x00]].concat(),
     ] {
         assert!(decode(&bad).is_err(), "{bad:02x?}");
     }
-    // Every truncation and every one-byte corruption of a real entry decodes or fails, never
-    // panics.
+
     let m = msg(
         2,
         &tlv(
@@ -313,7 +301,6 @@ fn a_malformed_reply_is_an_error_never_a_panic() {
 /// SIGNED DIFFERENCE 2: an overrunning nested length inside a whole message fails at once.
 #[test]
 fn an_overrunning_nested_length_fails_fast() {
-    // The entry's attribute list claims 0x7f bytes inside a message that holds far fewer.
     let inner = [tlv(0x04, b"dn"), vec![0x30, 0x7f, 0x30, 0x00]].concat();
     let m = msg(2, &tlv(0x64, &inner));
     assert_eq!(
@@ -333,7 +320,7 @@ fn a_reply_past_the_cap_is_refused_from_its_header() {
 }
 
 /// The chip's BIND message (`Cred::ldap_simple_bind`), as the wire carries it: the bytes above are
-/// 1.5.5's, so the chip's BIND is held to them.
+
 fn bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
     let mut w = busbar_contract::abi::sdk::cred::SealedWrite::message(
         crate::tests::cred(password).ldap_simple_bind(id, dn),
@@ -367,8 +354,7 @@ fn big_entry(id: i32, n: usize, value: &[u8]) -> Vec<u8> {
 }
 
 /// M6: a hostile entry is bounded WHILE it decodes, not after: one attribute keeps at most one
-/// value past the group cap (so the cap's truncation is still seen), and the rest are never
-/// turned into strings.
+
 #[test]
 fn an_attributes_values_are_capped_while_decoding() {
     let m = big_entry(2, 100_000, b"x");
@@ -383,7 +369,7 @@ fn an_attributes_values_are_capped_while_decoding() {
 }
 
 /// M6: what one operation decodes into memory is budgeted (4 MiB): an entry whose values pass it is
-/// an error, not a 16 MiB message amplified into strings.
+
 #[test]
 fn decoded_values_past_the_budget_are_an_error() {
     let m = big_entry(2, 5, &vec![b'a'; 1024 * 1024]);
@@ -397,8 +383,7 @@ fn decoded_values_past_the_budget_are_an_error() {
 }
 
 /// L1: the directory's matched DN and diagnostic are far-end text: each is shown escaped (no raw
-/// newline or control character can forge a log line) and capped at 128 characters, so a hostile
-/// directory cannot flood the log through a failed search's text.
+
 #[test]
 fn a_results_far_end_text_is_escaped_and_capped() {
     let r = LdapResult {
@@ -419,7 +404,7 @@ fn a_results_far_end_text_is_escaped_and_capped() {
         shown.len()
     );
     assert!(!shown.contains(&"m".repeat(129)), "the DN is capped");
-    // Short text reads as before.
+
     let short = LdapResult {
         rc: 32,
         matched: "dc=x".into(),
@@ -452,7 +437,7 @@ fn directory_result_strings_and_response_names_share_the_decode_budget() {
         super::decode_within(&extended, &mut short),
         Err(BerError::OverBudget)
     );
-    // Lossy UTF-8 expands each invalid byte into a three-byte replacement character.
+
     let lossy = msg(1, &tlv(0x61, &result(0, b"\xff", b"")));
     let mut budget = 2 * super::PER_STRING + 3;
     assert!(super::decode_within(&lossy, &mut budget).is_ok());

@@ -2,10 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! ONE LOGIN'S CONVERSATION over a scripted stream that plays the directory: every stream service
-//! may pend first, and the login resumes from the same [`Conversation`] until it answers. The
-//! bytes that reach the stream are the codec's, each request exactly once (nothing is sent twice
-//! across a replay); `ldaps://` secures before the first byte, StartTLS after its extended
-//! response; and the signed differences fail closed as an outage.
 
 use std::collections::VecDeque;
 use std::task::Poll;
@@ -46,7 +42,7 @@ impl Directory {
     }
 
     /// Once the replies run out the stream stays open and a read pends (no EOF), so only a
-    /// fail-closed path can answer.
+
     fn held(mut self) -> Self {
         self.hold = true;
         self
@@ -126,8 +122,6 @@ impl Wire for Directory {
     }
 }
 
-// ── replies, built with the BER writer ───────────────────────────────────────────────────────────
-
 fn message(id: i64, op: Vec<u8>) -> Vec<u8> {
     let mut content = Vec::new();
     ber::int(&mut content, ber::INTEGER, id);
@@ -169,8 +163,6 @@ fn entry(id: i64, dn: &str, attr: &str, values: &[&str]) -> Vec<u8> {
     message(id, ber::element(0x64, &op))
 }
 
-// ── the module ───────────────────────────────────────────────────────────────────────────────────
-
 const ALICE: &str = "uid=alice,ou=people,dc=corp,dc=example";
 
 fn module(url: &str, extra: serde_json::Value) -> LdapModule {
@@ -187,7 +179,7 @@ fn module(url: &str, extra: serde_json::Value) -> LdapModule {
 }
 
 /// Drive one login to its answer, re-entering on every PENDING with the same conversation: the
-/// answer and how many entries it took.
+
 fn login(m: &LdapModule, dir: &mut Directory, password: &str) -> (Login, u32) {
     let mut conv = Conversation::new();
     for entries in 1..=200 {
@@ -237,7 +229,7 @@ fn a_direct_bind_identifies_with_its_groups_over_a_pending_stream() {
     assert_eq!(p.roles, vec!["Engineers".to_string(), "SRE".to_string()]);
     assert!(dir.pended >= 6, "every service pended once: {}", dir.pended);
     assert_eq!(entries, dir.pended + 1);
-    // Each request reached the stream exactly once, across every replay.
+
     assert_eq!(dir.written, direct_bytes("memberOf"));
     assert_eq!(dir.seen, vec![Seen::Establish("127.0.0.1:3389".into())]);
 }
@@ -272,10 +264,7 @@ fn rc_49_is_a_bad_credential_and_another_code_an_outage() {
 }
 
 /// M4: the GROUP READ of a user the directory already bound answers 32 noSuchObject or 50
-/// insufficientAccessRights when an ACL hides the user's own entry from them: the same as a read
-/// that returns no entry, the login stands with no roles and a warn naming the code (never the
-/// DN). Every other non-zero code on the group read stays an outage, and so does any non-zero
-/// code on the search-then-bind USER search.
+
 #[test]
 fn a_group_read_refused_for_access_is_a_login_with_no_roles() {
     use busbar_test_kit::warn_capture::WarnCapture;
@@ -291,7 +280,7 @@ fn a_group_read_refused_for_access_is_a_login_with_no_roles() {
         assert_eq!(p.id, format!("ldap:{ALICE}"));
         assert!(cap.contains(&format!("rc={rc}")), "{:?}", cap.messages());
         assert!(!cap.contains(ALICE), "the DN leaked: {:?}", cap.messages());
-        // Replayed across every PENDING, the group read went out once and the unbind followed.
+
         assert_eq!(dir.written, direct_bytes("memberOf"), "rc {rc}");
     }
     for rc in [1_i64, 52, 53, 80] {
@@ -358,8 +347,7 @@ fn start_tls_sends_the_extended_request_then_secures() {
 }
 
 /// A MITM appends forged bind replies to the plaintext StartTLS success: whatever arrived before
-/// the upgrade is never honoured after it (CVE-2011-0411's class), so the login is an outage and
-/// no bind is ever sent.
+
 #[test]
 fn data_sent_with_the_start_tls_response_is_never_honoured() {
     let m = module(
@@ -444,7 +432,7 @@ fn search_then_bind_speaks_in_1_5_5s_order() {
 }
 
 /// A search keeps at most two entries (the module needs only whether a second exists); the rest
-/// are read and dropped, and a user search matching several is still ambiguous: a bad credential.
+
 #[test]
 fn a_search_keeps_at_most_two_entries() {
     use crate::{LdapBackend, SearchScope};
@@ -480,11 +468,7 @@ fn a_search_keeps_at_most_two_entries() {
 }
 
 /// A SearchResultReference (RFC 4511 §4.5.3) is a referral the module does not chase, and a client
-/// that does not chase referrals may ignore them: it is skipped, never read as an entry, and the
-/// search is decided on its entries and its SearchResultDone. Active Directory answers every
-/// domain-root subtree search with ForestDnsZones/DomainDnsZones/Configuration references, so a
-/// reference that failed the search failed every search-then-bind login against AD (1.5.5
-/// panicked reading one as an entry). The group read skips them the same way.
+
 #[test]
 fn a_search_reference_is_skipped() {
     let m = module(
@@ -518,7 +502,6 @@ fn a_search_reference_is_skipped() {
     assert_eq!(p.id, format!("ldap:{ALICE}"));
     assert_eq!(p.roles, vec!["admins".to_string()]);
 
-    // A search answered by references alone matched no entry: no search match, a bad credential.
     let mut dir = Directory::new(vec![
         bind_response(1, 0),
         reference(2, b"ldap://elsewhere/"),
@@ -528,7 +511,7 @@ fn a_search_reference_is_skipped() {
 }
 
 /// SIGNED DIFFERENCES 1–3, through the conversation: a malformed reply, an overrunning nested
-/// length and a reply past the cap are each an outage, never a panic or a wait.
+
 #[test]
 fn the_signed_differences_fail_closed_as_an_outage() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
@@ -539,17 +522,16 @@ fn the_signed_differences_fail_closed_as_an_outage() {
         let mut dir = Directory::new(vec![reply.clone()]).held();
         assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage, "{reply:02x?}");
     }
-    // A directory that closes the stream before answering is an outage too.
+
     let mut dir = Directory::new(Vec::new());
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
-    // So is a notice of disconnection (message id 0).
+
     let mut dir = Directory::new(vec![extended(0, 52)]).held();
     assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage);
 }
 
 /// SIGNED DIFFERENCE 1, the URL half: a hostless URL never dials (1.5.5 panicked). It is refused
-/// at boot, `validate` included, as a `settings.url` line (it was an outage on every login); an
-/// unknown scheme is refused without echoing the configured value.
+
 #[test]
 fn a_hostless_url_is_refused_before_any_dial() {
     for url in [
@@ -620,7 +602,6 @@ fn an_endpoint_reads_its_target_and_security() {
             Security::Plain,
         ),
         ("ldap://[::1]", false, "[::1]:389", "::1", Security::Plain),
-        // Userinfo is not the host: the dial lands where the plaintext guard looked.
         (
             "ldap://127.0.0.1:389@evil.example",
             false,
@@ -641,7 +622,7 @@ fn an_endpoint_reads_its_target_and_security() {
 }
 
 /// An operation gives up `timeout_secs` after it begins: a directory that never answers is an
-/// outage once the clock passes the deadline, and the conversation states that deadline.
+
 #[test]
 fn a_directory_that_never_answers_is_an_outage_after_the_timeout() {
     let m = module("ldap://127.0.0.1", serde_json::json!({"timeout_secs": 2}));
@@ -676,7 +657,7 @@ fn a_directory_that_never_answers_is_an_outage_after_the_timeout() {
 }
 
 /// A directory on a clock: the first service of each directory operation (the dial, then each
-/// reply) pends, and the caller's clock moves `step_ns` on that wake.
+
 struct Slow {
     dir: Directory,
     owed: bool,
@@ -710,7 +691,7 @@ impl Wire for Slow {
 }
 
 /// `timeout_secs` bounds each directory operation, as 1.5.5 did (the connect, and each bind and
-/// search): a login whose operations each take 0.6 of it completes, though together they take more.
+
 #[test]
 fn the_timeout_bounds_each_operation_not_the_whole_login() {
     let m = module("ldap://127.0.0.1", serde_json::json!({"timeout_secs": 10}));
@@ -748,7 +729,7 @@ fn the_timeout_bounds_each_operation_not_the_whole_login() {
 }
 
 /// The order 1.5.5 had (seam 6): the connection is opened before the DN template refuses a
-/// username, so a refused username is still a bad credential, after the dial.
+
 #[test]
 fn a_username_the_dn_template_refuses_is_refused_after_the_dial() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
@@ -759,7 +740,7 @@ fn a_username_the_dn_template_refuses_is_refused_after_the_dial() {
     assert_eq!(dir.seen, vec![Seen::Establish("127.0.0.1:389".into())]);
     assert!(dir.written.is_empty(), "no bind is sent for it");
     assert!(conv.opened(), "the caller closes what was opened");
-    // A dial the stream refuses is an outage.
+
     let mut dir = Directory::new(Vec::new());
     dir.refuse_establish = Some("the connection was refused".into());
     let mut conv = Conversation::new();
@@ -791,7 +772,7 @@ impl Wire for Mute {
 }
 
 /// The timeout answers as 1.5.5 answered an ldap3 operation timeout: an outage (1.5.5's Reject),
-/// its text the operation's prefix then `timeout: deadline has elapsed` (`LdapError::Timeout`).
+
 #[test]
 fn a_timeout_reads_in_1_5_5s_words() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
@@ -822,7 +803,7 @@ fn a_timeout_reads_in_1_5_5s_words() {
         Err(crate::BindError::Directory(e)) => assert_eq!(e, "bind: timeout: deadline has elapsed"),
         other => panic!("{other:?}"),
     }
-    // A connect that pends past its deadline: the connect's prefix, as 1.5.5's connect timeout.
+
     struct Dialing;
     impl Wire for Dialing {
         fn establish(&mut self, _: &str) -> Poll<Result<(), String>> {
@@ -873,8 +854,7 @@ fn a_timeout_reads_in_1_5_5s_words() {
 }
 
 /// The resolved service password (the kernel's secret, over the settings literal) is what the
-/// service bind sends, and it appears in no error text the login logs and not in the module's
-/// `Debug`: a failed service bind, a malformed reply and a closed stream are each checked.
+
 #[test]
 fn the_resolved_service_secret_reaches_only_the_bind() {
     const SECRET: &str = "s3cr3t-resolved";
@@ -907,7 +887,7 @@ fn the_resolved_service_secret_reaches_only_the_bind() {
 }
 
 /// The BIND request in flight holds the cleartext password: a `Debug` of the conversation (it is
-/// `pub`) must never print it.
+
 #[test]
 fn a_conversation_in_flight_never_debug_prints_the_password() {
     const PW: &str = "hunter2-s3cret";
@@ -920,7 +900,7 @@ fn a_conversation_in_flight_never_debug_prints_the_password() {
         held |= conv.doing.as_ref().is_some_and(|d| d.sealed.is_some());
         let shown = format!("{conv:?}");
         assert!(!shown.contains(PW), "the password is in: {shown}");
-        // `Debug` of a byte slice prints its bytes as decimals: the password's, too, is a leak.
+
         let digits = format!("{:?}", PW.as_bytes());
         let digits = digits.trim_matches(['[', ']']);
         assert!(
@@ -935,8 +915,7 @@ fn a_conversation_in_flight_never_debug_prints_the_password() {
 }
 
 /// A SearchResultEntry and its SearchResultDone arrive in ONE read (the normal wire shape): the
-/// second message must survive the first's decode, and the stream holds open after it so a lost
-/// message pends instead of reading as EOF.
+
 #[test]
 fn two_messages_in_one_read_are_both_read() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
@@ -953,7 +932,7 @@ fn two_messages_in_one_read_are_both_read() {
 }
 
 /// A TLS handshake the connector fails (`ldaps://`, or StartTLS after the directory agreed) is an
-/// outage that never puts the BIND on the wire.
+
 #[test]
 fn a_failed_secure_is_an_outage_and_never_binds() {
     let m = module("ldaps://ad.corp.example", serde_json::json!({}));
@@ -977,10 +956,7 @@ fn a_failed_secure_is_an_outage_and_never_binds() {
 }
 
 /// OWNER RULING (non-49 user bind), through `login_over` so the verdict is the one the door
-/// answers: a code naming a server/session condition is an outage; every other non-zero code is
-/// the same bad credential as a wrong password, logged ONCE at info (a refusal, auth standard S5;
-/// nothing at warn) with the directory's real result (its code and RFC 4511 name), never the
-/// password and never the DN. An outage code is logged at warn.
+
 #[test]
 fn a_non_49_user_bind_is_a_bad_credential_unless_the_server_is_failing() {
     use busbar_test_kit::warn_capture::WarnCapture;
@@ -1074,9 +1050,7 @@ fn chip_bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
 }
 
 /// LDO D4b: one entry of the op never runs unbounded. A directory that streams Ready messages for
-/// one operation without end (entries, or messages for another id) would hold the call past every
-/// deadline, which is only checked between entries: past a cap of messages for one operation, the
-/// operation fails (an outage), whatever the clock says.
+
 #[test]
 fn an_operation_that_never_ends_its_messages_is_cut_off() {
     use crate::{Io, LdapBackend, SearchScope};
@@ -1108,8 +1082,7 @@ fn an_operation_that_never_ends_its_messages_is_cut_off() {
 }
 
 /// M6: one operation reads at most 16 MiB from the directory in all, however it is split into
-/// messages: a directory that streams large messages for another id (each under the per-message
-/// cap, fewer than the message cap) is cut off.
+
 #[test]
 fn an_operation_reads_at_most_16_mib_in_all() {
     use crate::{Io, LdapBackend, SearchScope};
@@ -1167,7 +1140,7 @@ impl Wire for Ticking {
 }
 
 /// M6: the deadline is checked on every message of one entry of the op, on the stream owner's
-/// clock: a directory that answers Ready without end meets its timeout, not only the message cap.
+
 #[test]
 fn the_deadline_is_checked_between_messages() {
     use crate::{Io, LdapBackend, SearchScope};
@@ -1213,7 +1186,7 @@ fn an_incomplete_reply_is_charged_as_its_bytes_arrive() {
     let mut conv = Conversation::new();
     let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, Some(0), 10);
     over.request(|_| Ok(Vec::new())).unwrap();
-    // A prefix of this same operation has already consumed almost all its allowance.
+
     over.conv.doing.as_mut().unwrap().read_bytes = super::OP_BYTES_CAP - bytes.len() + 1;
     let result = over.receive();
     assert!(

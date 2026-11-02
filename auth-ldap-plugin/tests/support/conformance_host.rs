@@ -6,9 +6,5 @@
 // (`needs`: `tcp`); a hand edit is overwritten by the next sync.
 
 //! THE SUITE'S HOST, IN THIS PLUGIN'S OWN TEST: busbar's test kit's stream form
-//! (`busbar_test_kit::conformance_host!`): the test kit's stream table, upgraded with the
-//! connector's own client TLS. No transport plugin is linked. It gives `FAR_END`, `host` (the
-//! suite's `host:`), `anchors` (its `tls:`), `far_end`, `tls_front`, and the host's own proof as
-//! this file's tests.
 
 busbar_test_kit::conformance_host! { far_end: "localhost:41859" }

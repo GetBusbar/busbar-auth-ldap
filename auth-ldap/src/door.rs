@@ -2,29 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE DOOR: the LDAP module on the auth kind's table (`busbar_contract::abi::auth`, v3). LDAP is a
-//! login method, so this is its own `plugin_door!` over `abi::auth::Ops` (the SDK's
-//! `auth_verify_door!` refuses the login ops):
-//!
-//! * the lifecycle is the SDK's (`lifecycle: life(Ldap)`): `validate`/`open` parse the settings
-//!   blob with [`LdapModule::from_settings_with`] (its refusal texts), `refresh` swaps the module whole
-//!   (a refusal keeps the running one);
-//! * `verify` is not served: LDAP judges no bearer credential on the data plane, so the tail
-//!   states the login family alone (`CAP_LOGIN`, as busbar-auth-github's) and `verify` answers
-//!   REFUSED, never called;
-//! * `begin_login` answers the credential form (`username` text, `password` password), `'static`;
-//! * `complete_login` BINDs the submitted credential over the host connector's stream on the selected
-//!   declared need ([`NEEDS`]) and writes the principal into the host's identity buffer:
-//!   `LOGIN_IDENTITY`, `LOGIN_BAD_CREDENTIAL`, or `LOGIN_OUTAGE` when the directory could not
-//!   answer. While a stream service pends it answers PENDING, its [`Conversation`] parked on the
-//!   ticket, and resumes on the wake (THE REPLAY RULE, `abi::sdk::conn`): the connector is made
-//!   from the handle of the service that pended, so no completed service runs twice. A short
-//!   buffer keeps the reached identity for the ticket's one re-call, so the retry never binds again;
-//! * the outbound ops are not served (the tail states no `CAP_OUTBOUND`) and answer REFUSED;
-//! * a login with no host clock answers `LOGIN_OUTAGE` ([`LdapModule::login_over`]): every
-//!   directory operation is bounded on that clock, and none runs untimed.
-//!
-//! No call blocks: the Statement states no `MARK_BLOCKS` (no plugin opens a socket, dials, binds or does
-//! TLS; the plugin ABI: Ready or Pending(wake)).
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -69,7 +46,7 @@ const MAX_INFLIGHT: u32 = 64;
 const REWRITES: &[Rewrite] = &[alias(ALIAS)];
 
 /// The auth tail: the credential login alone. LDAP judges no bearer credential on the data plane,
-/// so it states no inbound family (`verify` is never called) and no fact about verify answers.
+
 const TAIL: AuthTail = {
     let mut t = AuthTail::EMPTY;
     t.caps = CAP_LOGIN;
@@ -83,10 +60,7 @@ pub const NEED: u32 = 0;
 pub const NEED_ANCHORED: u32 = 1;
 
 /// One need: outbound, a raw byte stream over the host's `tcp` carrier (the plugin frames LDAP
-/// itself), under the `operator-infrastructure` egress class (directories: private, loopback and
-/// plaintext allowed; pinned; cloud metadata hosts refused), trusting `trust_from`. The plugin
-/// names the target per login (`host:port`, read off the `url` setting), so no `target_from`. The
-/// timeout is the module's own, per operation (`timeout_secs`).
+
 const fn stream(trust_from: AbiStr) -> Need {
     let mut n = Need::EMPTY;
     n.direction = DIRECTION_OUTBOUND;
@@ -94,20 +68,17 @@ const fn stream(trust_from: AbiStr) -> Need {
     n.transport = abi_str("tcp");
     n.trust_from = trust_from;
     n.timeout_ms = 0;
-    // A raw stream has no response head: the named (empty) list.
+
     n.keep_mode = KEEP_NAMED;
     n
 }
 
 /// The two needs, one dialled per instance ([`LdapModule::need`]): [`NEED`] on the connector's own
-/// trust (the public roots), and [`NEED_ANCHORED`], whose connections the connector secures with
-/// the operator's private CA (`ca_cert_pem`) on top of the public roots, for `ldaps://` and
-/// STARTTLS alike. A need whose `trust_from` resolves to nothing is refused at its declaration, so
-/// one need cannot serve both: an instance with no `ca_cert_pem` dials the public need.
+
 pub const NEEDS: &[Need] = &NEED_TABLE;
 
 /// [`NEEDS`], each placed AT its index ([`NEED`], [`NEED_ANCHORED`]), so reordering or adding a need
-/// cannot swap which logins dial the public need and which the private CA.
+
 const NEED_TABLE: [Need; 2] = {
     let mut table = [stream(AbiStr::ABSENT), stream(AbiStr::ABSENT)];
     table[NEED as usize] = stream(AbiStr::ABSENT);
@@ -117,7 +88,7 @@ const NEED_TABLE: [Need; 2] = {
 const _: () = assert!(NEED != NEED_ANCHORED, "the two needs are two indices");
 
 /// The settings keys whose values are secret references, resolved in this order into
-/// `OpenIn.secrets` (a literal value refuses boot).
+
 pub const SECRET_REFS: &[AbiStr] = &[abi_str("bind_service_password")];
 
 /// This plugin's Statement.
@@ -146,7 +117,7 @@ const FORM: &[LoginField] = &[
 ];
 
 /// The most short answers kept for their re-call at once: one per login the instance holds in
-/// flight (an answer is kept only for its own ticket's one re-call).
+
 const REACHED_MAX: usize = MAX_INFLIGHT as usize;
 
 /// How long a short answer's identity is kept for its re-call: 10 minutes on the host's clock.
@@ -161,14 +132,14 @@ struct Reached {
 }
 
 /// One instance: the module (swapped whole on `refresh`), and the identity a short answer reached,
-/// by ticket, for its one re-call.
+
 pub struct Ldap {
     module: RwLock<Arc<LdapModule>>,
     reached: Mutex<Reached>,
 }
 
 /// Drop every kept identity older than [`REACHED_TTL_NS`] at `now_ns` (none without a clock, or for
-/// an entry kept without one: the count bound still holds them).
+
 fn sweep_reached(reached: &mut Reached, now_ns: Option<u64>) {
     if let Some(now) = now_ns {
         reached
@@ -178,8 +149,7 @@ fn sweep_reached(reached: &mut Reached, now_ns: Option<u64>) {
 }
 
 /// Keep `p` for `key`'s re-call, at most `max` at once and for at most [`REACHED_TTL_NS`]: expired
-/// entries are swept first, then at the cap the OLDEST entry goes, never the rest (an in-flight
-/// short answer awaiting its re-call must survive).
+
 fn keep_reached(
     reached: &mut Reached,
     max: usize,
@@ -203,8 +173,7 @@ fn keep_reached(
 }
 
 /// The identity a short answer kept for `key`'s re-call, taken, unless it expired. Nothing else is
-/// left behind for that ticket SLOT: an op on the slot under another generation proves the earlier
-/// op is over. A call on no ticket (generation `0`, never minted) proves nothing and drops nothing.
+
 fn take_reached(reached: &mut Reached, key: (u32, u32), now_ns: Option<u64>) -> Option<Principal> {
     sweep_reached(reached, now_ns);
     if key.1 != 0 {
@@ -228,7 +197,7 @@ impl Life for Ldap {
     const CANCEL: u32 = CANCEL_ABANDONED;
 
     /// The settings-only checks: `validate` is handed no secrets, so a secret-referenced service
-    /// password's presence is `open`'s to check ([`LdapModule::validate_settings`]).
+
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
         LdapModule::validate_settings(settings).map_err(Refusal::failed)
     }
@@ -284,7 +253,7 @@ fn field<'a>(fields: &[(&[u8], &'a [u8])], name: &str) -> Option<&'a str> {
 }
 
 /// A login's run as `drive` begins it from the submitted `fields`: the module it began with, the
-/// username, and the password captured by the chip ([`Cred`], wiped on drop).
+
 fn begin(module: Arc<LdapModule>, fields: &[(&[u8], &[u8])], release: Option<Release>) -> Run {
     Run {
         module,
@@ -299,7 +268,7 @@ fn begin(module: Arc<LdapModule>, fields: &[(&[u8], &[u8])], release: Option<Rel
 }
 
 /// Why a submission the form's fields cannot be read from is refused, when a field was submitted
-/// but is not text.
+
 fn unreadable(fields: &[(&[u8], &[u8])]) -> Option<&'static str> {
     let not_text = |name: &str| {
         fields
@@ -325,9 +294,7 @@ fn clock_ns(answer: Answer<ClockReading>) -> Result<u64, String> {
 }
 
 /// One login in flight, parked on its ticket across its PENDING answers: the module it began with
-/// (a `refresh` meanwhile does not change it), the submitted credential (the password held by the
-/// chip, `Cred`), the conversation, the stream once established, and the handle of the first
-/// connector service not yet completed.
+
 struct Run {
     module: Arc<LdapModule>,
     username: Option<String>,
@@ -340,7 +307,7 @@ struct Run {
 }
 
 /// WHAT CLOSES A LOGIN'S STREAM WITH NO ENTRY OF ITS OP RUNNING: the host reclaims a connection
-/// only on its CLOSE.
+
 pub(crate) struct Release(Box<dyn Fn(u64) + Send + Sync>);
 
 impl Release {
@@ -350,7 +317,7 @@ impl Release {
     }
 
     /// The release through `host`'s connector on no ticket, as the SDK closes a parked exchange
-    /// it gives up (a close never pends); a host refusal is logged.
+
     fn through(host: Host) -> Self {
         Self::new(
             move |stream| match host.connector(Ticket::NONE).close(stream) {
@@ -370,7 +337,7 @@ impl Release {
 }
 
 /// Release the stream on completion or cancellation before any conversation buffers are dropped.
-/// No-ticket CLOSE cannot collide with a service still pending on the login ticket.
+
 impl Drop for Run {
     fn drop(&mut self) {
         if let (Some(stream), Some(release)) = (self.stream.take(), self.release.as_ref()) {
@@ -380,8 +347,7 @@ impl Drop for Run {
 }
 
 /// The host connector's stream as the conversation's [`Wire`], for one entry of the op: its
-/// services count from the handle of the one that pended last (`Host::connector_from`), so the
-/// replay re-issues exactly that one and the host answers its result.
+
 struct HostWire<'h> {
     conn: Option<Connector<'h>>,
     /// The host and the op's ticket, for the clock read between messages ([`Wire::now_ns`]).
@@ -402,9 +368,6 @@ impl HostWire<'_> {
         };
         match f(c, self.stream.unwrap_or(0)) {
             Poll::Pending => {
-                // A sealed BIND may complete FACTS and several partial WRITEs before
-                // its last service pends. Its parked writer keeps that progress, so
-                // resume the outstanding service, never the first completed one.
                 self.at = c.issued().saturating_sub(1);
                 Poll::Pending
             }
@@ -445,13 +408,13 @@ impl Wire for HostWire<'_> {
 
     fn now_ns(&mut self) -> Option<u64> {
         let (host, ticket) = self.clock?;
-        // Read quietly: a failing clock was said once, at the entry's start ([`now`]).
+
         clock_ns(host.connector(ticket).clock_now()).ok()
     }
 }
 
 /// The host's monotonic clock, when it offers one; a clock that fails says why, at warn (the
-/// login then refuses to run untimed: [`LdapModule::login_over`]).
+
 fn now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
     match clock_ns(host?.connector(ticket).clock_now()) {
         Ok(ns) => Some(ns),
@@ -463,8 +426,7 @@ fn now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
 }
 
 /// Run (or resume) the login on this call's ticket: PENDING while a stream service pends (the
-/// run parked, the op's timer set to the operation's deadline), else what it came to, the stream
-/// closed.
+
 fn drive(
     h: &Held<Ldap>,
     instance: &Instance<'_, Held<Ldap>>,
@@ -476,8 +438,7 @@ fn drive(
         Some(run) => *run,
         None => {
             let fields = submitted(input);
-            // A field submitted but not text is refused in its own words (the same verdict as a
-            // field not submitted), before the wire.
+
             if let Some(reason) = unreadable(&fields) {
                 tracing::info!(module = "ldap", reason = "not-text", refusal = %reason, "ldap login refused: a submitted field is not UTF-8");
                 return Poll::Ready(Login::BadCredential);
@@ -517,15 +478,14 @@ fn drive(
         }
         Poll::Ready(login) => {
             run.stream = wire.stream;
-            // The final service may still be pending at run.at. CLOSE must never replay that
-            // handle. Drop runs the host's no-ticket release before Conversation's buffers drop.
+
             Poll::Ready(login)
         }
     }
 }
 
 /// `complete_login`: BIND the submitted credential over the host's stream (see
-/// [`LdapModule::login_over`]); PENDING while the stream pends.
+
 pub struct CompleteLogin;
 
 impl SafeSlot for CompleteLogin {
@@ -567,7 +527,7 @@ impl SafeSlot for CompleteLogin {
             }
             Login::Identity(p) => {
                 let answer = login_identity(&p, input.out_buf(), &mut out);
-                // `0` is never a minted generation: a ticket-less call gets no re-call.
+
                 if answer == Outcome::Failed && ticket.generation != 0 {
                     let now_ns = now(h.host(), ticket);
                     keep_reached(
@@ -585,7 +545,7 @@ impl SafeSlot for CompleteLogin {
 }
 
 /// An auth op this plugin does not serve (the tail states neither `CAP_INBOUND` nor
-/// `CAP_OUTBOUND`): REFUSED, never called.
+
 pub struct NotServed<I, O>(PhantomData<(I, O)>);
 
 impl<I: AbiIn, O: AbiOut> SafeSlot for NotServed<I, O> {

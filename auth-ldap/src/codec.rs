@@ -2,13 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The LDAP codec (RFC 4511), sans-IO: the requests the module sends as bytes, and the replies it
-//! reads back from bytes, as pure functions. What crosses the host's stream is exactly these
-//! bytes; nothing here opens a socket or does TLS.
-//!
-//! Requests carry the encoding ldap3 writes: a SEARCH (never dereferencing aliases, no size or time
-//! limit, types and values), an UNBIND, and the StartTLS extended request. The simple BIND, which
-//! carries a password, is the chip's sealed message (`Cred::ldap_simple_bind`), never built here. Replies decode fail-closed ([`crate::ber`]): a malformed message,
-//! an overrunning nested length or a message past the 16 MiB cap is an error, never a panic.
 
 use std::collections::HashMap;
 
@@ -32,11 +25,11 @@ const REQUEST_NAME: u8 = 0x80;
 const RESPONSE_NAME: u8 = 0x8a;
 
 /// The most values one attribute keeps: one past the group cap, so the module still sees (and
-/// logs) a truncation; the rest are skipped, never turned into strings.
+
 pub const MAX_VALUES_KEPT: usize = crate::MAX_GROUP_VALUES + 1;
 
 /// What one operation's replies may decode into memory (DNs, attribute names, values): 4 MiB. A
-/// 16 MiB message of tiny values would otherwise become millions of strings.
+
 pub const DECODE_BUDGET: usize = 4 * 1024 * 1024;
 
 /// What each decoded string is charged on top of its bytes: its allocation's bookkeeping.
@@ -64,9 +57,7 @@ fn message(id: i32, op: &[u8]) -> Vec<u8> {
 }
 
 /// A SEARCH under `base` at `scope` (`SCOPE_*`) for `filter`, asking for `attrs`.
-///
-/// # Errors
-/// The filter does not parse: [`filter::PARSE_ERROR`].
+
 pub fn search(
     id: i32,
     base: &str,
@@ -78,7 +69,7 @@ pub fn search(
     let mut op = Vec::new();
     ber::tlv(&mut op, ber::OCTET_STRING, base.as_bytes());
     ber::int(&mut op, ber::ENUMERATED, scope);
-    // derefAliases neverDerefAliases, sizeLimit 0, timeLimit 0, typesOnly FALSE.
+
     ber::int(&mut op, ber::ENUMERATED, 0);
     ber::int(&mut op, ber::INTEGER, 0);
     ber::int(&mut op, ber::INTEGER, 0);
@@ -174,7 +165,7 @@ pub const fn rc_name(rc: u32) -> &'static str {
 const SHOWN_TEXT: usize = 128;
 
 /// The directory's text `t` as a result shows it: its first [`SHOWN_TEXT`] characters (then `...`),
-/// escaped (`\n`, `\u{1b}`, ...) so no newline or control character reaches a log line raw.
+
 pub(crate) fn shown(t: &str) -> String {
     let mut out: String = t
         .chars()
@@ -189,7 +180,7 @@ pub(crate) fn shown(t: &str) -> String {
 
 impl std::fmt::Display for LdapResult {
     /// The words for an operation that did not succeed (as `LdapError::LdapResult` words it), the
-    /// directory's matched DN and diagnostic escaped and capped ([`shown`]): they are far-end text.
+
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -279,8 +270,7 @@ fn ldap_result<'a>(
     Ok((
         LdapResult {
             rc,
-            // Diagnostic and matched DN are LDAPStrings; a server that breaks UTF-8 in them still
-            // answered its code, so they read lossily.
+
             matched,
             text: diag,
         },
@@ -289,8 +279,7 @@ fn ldap_result<'a>(
 }
 
 /// An entry, decoded within `budget` ([`DECODE_BUDGET`]): every string it keeps is charged as it
-/// is made, and an attribute keeps at most [`MAX_VALUES_KEPT`] values, so what a hostile reply
-/// costs is bounded WHILE it decodes.
+
 fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
     let (dn, rest) = ber::expect(content, ber::OCTET_STRING, "an entry without its DN")?;
     charge(budget, dn.len())?;
@@ -321,15 +310,12 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
                     charge(budget, s.len())?;
                     values.push(s.to_owned());
                 }
-                // Past the cap a value is skipped: the module sees `MAX_VALUES_KEPT` and
-                // logs the truncation.
+
                 Ok(_) => {}
                 Err(_) => dropped += 1,
             }
         }
         if dropped > 0 {
-            // Only text is read: a value that is not UTF-8 is dropped ALONE (the attribute keeps
-            // its text values), once per attribute, never silently.
             tracing::warn!(
                            module = "ldap",
             reason = "not-utf8-values",
@@ -345,21 +331,14 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
 
 #[cfg(test)]
 /// Decode one whole message (exactly the bytes [`ber::frame`] measured), within a fresh
-/// [`DECODE_BUDGET`].
-///
-/// # Errors
-/// Anything that is not an LDAPMessage, an overrunning nested length, a budget passed:
-/// [`BerError`].
+
 pub fn decode(bytes: &[u8]) -> Result<Message, BerError> {
     let mut budget = DECODE_BUDGET;
     decode_within(bytes, &mut budget)
 }
 
 /// [`decode`], charging what it decodes to `budget`: what remains of one operation's
-/// [`DECODE_BUDGET`].
-///
-/// # Errors
-/// As [`decode`]; [`BerError::OverBudget`] once the budget is spent.
+
 pub fn decode_within(bytes: &[u8], budget: &mut usize) -> Result<Message, BerError> {
     let (content, rest) = ber::expect(bytes, ber::SEQUENCE, "a message that is not a SEQUENCE")?;
     if !rest.is_empty() {
@@ -371,7 +350,7 @@ pub fn decode_within(bytes: &[u8], budget: &mut usize) -> Result<Message, BerErr
     if id < 0 {
         return Err(BerError::Malformed("a negative message id"));
     }
-    // What follows the op (response controls) is not read.
+
     let (op, _) = ber::read(rest)?;
     let reply = match op.tag {
         BIND_RESPONSE => Reply::Bind(ldap_result(op.content, budget)?.0),

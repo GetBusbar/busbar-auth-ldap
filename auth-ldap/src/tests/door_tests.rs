@@ -2,8 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The door's own pieces: the settings blob `validate`/`open`/`refresh` parse, the submitted-field
-//! lookup, and the Statement's facts. The table itself is driven through the real loader in the
-//! plugin crate's `tests/conformance.rs` (linked and dropped in).
 
 use super::{
     clock_ns, field, keep_reached, take_reached, unreadable, Ldap, Reached, Release, Run, ALIAS,
@@ -65,7 +63,7 @@ fn settings_accept_a_minimal_config() {
 }
 
 /// A direct-bind UPN template (`{username}@corp.example`) is not a DN, so the group read off the
-/// bound entry could never succeed; `validate` refuses it.
+
 #[test]
 fn settings_refuse_a_direct_bind_upn_template() {
     let blob = br#"{
@@ -100,7 +98,7 @@ fn a_field_is_found_by_its_declared_name_and_must_be_text() {
 }
 
 /// L5: a field submitted but not UTF-8 is refused in its own words, not as "not submitted" (the
-/// verdict is the same bad credential); a field absent, or text, is not this refusal.
+
 #[test]
 fn a_field_that_is_not_text_is_refused_in_its_own_words() {
     let bad_password: [(&[u8], &[u8]); 2] = [(b"username", b"alice"), (b"password", b"\xff")];
@@ -142,8 +140,7 @@ fn a_failing_host_clock_says_why() {
 }
 
 /// The Statement states a credential login that never blocks (no `MARK_BLOCKS`: every call is
-/// Ready or Pending), its ONE need (outbound, a raw `tcp` stream, operator-infrastructure, the
-/// target named per login), and the service password as its one secret reference.
+
 #[test]
 fn the_statement_states_a_non_blocking_credential_login_over_one_need() {
     assert_eq!(TAIL.caps, CAP_LOGIN);
@@ -167,8 +164,7 @@ fn the_statement_states_a_non_blocking_credential_login_over_one_need() {
             "the target is named per login"
         );
     }
-    // The strings themselves (`tcp`, `settings.ca_cert_pem`, the secret reference) are read off
-    // the rendered Statement in the plugin crate's conformance test, without `unsafe`.
+
     assert!(
         NEEDS[NEED as usize].trust_from.is_absent(),
         "the public need: the connector's own trust"
@@ -183,10 +179,7 @@ fn the_statement_states_a_non_blocking_credential_login_over_one_need() {
 }
 
 /// L6 (S1): the service password is a secret REFERENCE, never a literal. busbar resolves the
-/// reference and lifts the key out of the settings into `OpenIn.secrets`, so a
-/// `bind_service_password` the plugin finds IN its settings is a literal that bypassed that: it
-/// refuses `validate` and boot, naming the key and never the value. The resolved secret is the
-/// password.
+
 #[test]
 fn a_literal_service_password_refuses_boot() {
     let literal = br#"{
@@ -238,7 +231,7 @@ fn who(id: &str) -> busbar_contract::auth::Principal {
 }
 
 /// An abandoned ticket's kept identity goes with the next op on its slot; other slots stay, and the
-/// call's own key answers its identity.
+
 #[test]
 fn a_later_generation_on_the_slot_drops_the_abandoned_identity() {
     let mut reached = Reached::default();
@@ -263,7 +256,7 @@ fn a_later_generation_on_the_slot_drops_the_abandoned_identity() {
 }
 
 /// A call on no ticket (generation 0, never minted) proves nothing about slot 0: a kept identity on
-/// that slot stays for its own re-call.
+
 #[test]
 fn a_ticketless_call_leaves_slot_zeros_kept_identity() {
     let mut reached = Reached::default();
@@ -276,8 +269,7 @@ fn a_ticketless_call_leaves_slot_zeros_kept_identity() {
 }
 
 /// THE REACHED MAP IS BOUNDED (auth standard S3): at the cap the OLDEST kept identity goes, never
-/// the rest and never all of them, so an in-flight short answer awaiting its re-call survives a
-/// flood of abandoned ones.
+
 #[test]
 fn the_reached_map_is_bounded_and_evicts_the_oldest() {
     let mut reached = Reached::default();
@@ -297,15 +289,14 @@ fn the_reached_map_is_bounded_and_evicts_the_oldest() {
             "slot {slot}: the newest stay"
         );
     }
-    // Re-keeping a key already held evicts nothing.
+
     keep_reached(&mut reached, 16, (19, 1), who("again"), None);
     assert_eq!(reached.map.len(), 16);
     assert!(reached.map.contains_key(&(4, 1)));
 }
 
 /// KIND-REVIEW D6: the reached map is bounded AND time-expired: an identity kept for a re-call that
-/// never comes (its slot never reused) goes after `REACHED_TTL_NS` (10 minutes) on the host's clock,
-/// swept on the next keep or take; within it, it answers its re-call.
+
 #[test]
 fn a_kept_identity_expires_after_the_ttl() {
     let ttl = super::REACHED_TTL_NS;
@@ -332,8 +323,7 @@ fn a_kept_identity_expires_after_the_ttl() {
 }
 
 /// LDAP is a login method and judges no bearer credential on the data plane: its tail states the
-/// login family alone (no `CAP_INBOUND`, so `verify` is never called and answers REFUSED), and no
-/// `FACT_CACHEABLE` (a fact about verify answers it does not give), as busbar-auth-github's.
+
 #[test]
 fn the_tail_states_the_login_family_alone() {
     assert_eq!(TAIL.caps, CAP_LOGIN);
@@ -343,9 +333,7 @@ fn the_tail_states_the_login_family_alone() {
 }
 
 /// Search-then-bind settings whose service password is a secret reference (no literal in the
-/// settings) validate: `validate` is handed no secrets, so the password-presence rule is `open`'s,
-/// where the resolved secret is known. `open` with no secret still refuses; an explicit empty
-/// literal is refused by both.
+
 #[test]
 fn validate_accepts_search_then_bind_whose_password_is_a_secret() {
     let blob = br#"{
@@ -376,7 +364,7 @@ fn validate_accepts_search_then_bind_whose_password_is_a_secret() {
         "bind_service_password": ""
     }"#;
     assert!(Ldap::validate(empty).is_err(), "an explicit empty literal");
-    // The other settings-only rules still hold at validate.
+
     let no_dn = br#"{
         "url": "ldaps://ad.corp.example:636",
         "bind_dn_template": "uid={username},dc=corp,dc=example",
@@ -387,7 +375,7 @@ fn validate_accepts_search_then_bind_whose_password_is_a_secret() {
 }
 
 /// A settings value of the wrong type is refused WITHOUT quoting it (it may be a secret pasted
-/// into the wrong key); a missing or unknown key is still named.
+
 #[test]
 fn a_mistyped_setting_is_refused_without_echoing_its_value() {
     for blob in [
@@ -417,8 +405,7 @@ fn a_mistyped_setting_is_refused_without_echoing_its_value() {
 }
 
 /// T8: the run `drive` begins from the submitted fields ([`super::begin`], what `drive` calls)
-/// holds the username as text and the password as the chip's credential, captured from the
-/// submitted bytes; a field not submitted is none, and the run holds no stream yet.
+
 #[test]
 fn a_begun_logins_password_is_the_chips_from_the_submitted_field() {
     let module = std::sync::Arc::new(LdapModule::from_settings(MINIMAL.as_bytes()).unwrap());
@@ -475,8 +462,7 @@ fn a_given_up_login_releases_its_stream() {
 }
 
 /// THE REFUSAL LINES (auth standard S2): every settings refusal is one or more lines in the
-/// contract's instance-relative form (`settings[.<key>]: <reason>`, joined by `\n`, holding
-/// `check_validate_refusal`), the same at `validate` and `open`, and never a value.
+
 mod refusal_lines {
     use super::*;
     use busbar_contract::abi::mechanism::lifecycle::check_validate_refusal;
@@ -621,10 +607,7 @@ mod refusal_lines {
 }
 
 /// CA-1 / SEC-LDAPCA: a private directory CA (`ca_cert_pem`) is SUPPORTED. A blob that holds a
-/// certificate validates, and the module dials on the ANCHORED need (whose `trust_from` hands the
-/// connector that CA, on top of the public roots, for both `ldaps://` and STARTTLS); without it,
-/// the public need. A `ca_cert_pem` that holds no certificate is refused by name, never accepted
-/// and ignored.
+
 mod private_ca {
     use super::*;
     use busbar_contract::abi::sdk::life::Life;
@@ -769,8 +752,6 @@ mod reached_clock_callbacks {
                 let (ask, requests) = mpsc::channel::<Sender<bool>>();
                 scope.spawn(move || {
                     while let Ok(reply) = requests.recv() {
-                        // This never waits on the plugin's lock, even on the buggy path. The clock
-                        // callback receives a false observation and the real call can finish.
                         let unlocked = held.life().reached.try_lock().is_ok();
                         let _ = reply.send(unlocked);
                     }
@@ -931,8 +912,7 @@ mod timeout_stream_release {
                     .borrow_mut()
                     .push((call.input().stream, call.input().head.handle.ticket))
             });
-            // A ticketed CLOSE can collide with the outstanding READ. Model that refusal;
-            // the no-ticket release is the host contract's synchronous retirement route.
+
             if call.input().head.handle.ticket != Ticket::NONE {
                 Outcome::Failed
             } else {

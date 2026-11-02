@@ -2,7 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The real LDAP door and loader completion store over a scripted raw carrier. The
-//! carrier controls partial writes and wakes; it never implements service replay.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -45,7 +44,7 @@ impl Carrier {
             state: Mutex::new(State {
                 ticket: 0,
                 written: Vec::new(),
-                // BindResponse success, then SearchResultDone success (no groups).
+
                 replies: [
                     vec![0x30, 12, 2, 1, 1, 0x61, 7, 10, 1, 0, 4, 0, 4, 0],
                     vec![0x30, 12, 2, 1, 2, 0x65, 7, 10, 1, 0, 4, 0, 4, 0],
@@ -86,8 +85,7 @@ impl Conns for Carrier {
             let ticket = state.ticket;
             assert_ne!(ticket, 0, "the real ESTABLISH registered the ticket");
             drop(state);
-            // Wake during the crossing too: the real dispatcher preserves that wake
-            // when the door subsequently parks its conversation and answers PENDING.
+
             (self.wake)(caller, ticket);
             return Err(ConnError::Pending);
         }

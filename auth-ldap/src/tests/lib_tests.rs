@@ -2,9 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! Unit tests for the PURE surface of the LDAP module: config parsing, bind-DN templating +
-//! injection defense, LDAP filter escaping, the group-DN → role normalization, and the bind logic
-//! over a fake directory. The codec and the conversation over a stream have their own files
-//! (`tests/codec_tests.rs`, `tests/conversation_tests.rs`); the live BIND is the plugin's e2e.
 
 use crate::groups::{escape_filter, first_cn, roles_from_group_dns, validate_username};
 use crate::{
@@ -59,7 +56,7 @@ pub(crate) fn cred_text(c: &Cred) -> String {
             std::task::Poll::Ready(Ok(b.len()))
         });
     assert!(sent.is_ready(), "the BIND is written whole");
-    // `... 04 00 80 <len> <password>`: the empty DN, then the simple credential, last.
+
     let at = bytes
         .windows(3)
         .position(|w| w == [0x04, 0x00, 0x80])
@@ -96,7 +93,6 @@ fn config_defaults_apply() {
 
 #[test]
 fn config_rejects_unknown_field() {
-    // deny_unknown_fields: a typo'd knob fails config parse, not silently ignored.
     let r: Result<LdapConfig, _> = serde_json::from_value(serde_json::json!({
         "url": "ldaps://x", "bind_dn_template": "uid={username},dc=x", "base_dn": "dc=x",
         "grp_attr": "memberOf"
@@ -112,8 +108,7 @@ fn new_requires_username_placeholder() {
 }
 
 /// Direct bind: the expanded template is the Base DN of the group read, so a template that can
-/// never expand to a DN (an AD UPN, no `=`) would bind every user and then fail every group read.
-/// `new()` refuses it at boot; search-then-bind (where the DN comes from the search) still accepts it.
+
 #[test]
 fn new_refuses_a_direct_bind_template_that_is_not_a_dn() {
     let mut cfg = base_cfg();
@@ -140,8 +135,7 @@ fn new_refuses_a_zero_timeout() {
 }
 
 /// A blank `group_attr` reads back no groups, so every login would bind no roles; refused at boot.
-/// L7: `timeout_secs` bounds each directory operation, and a login runs several; an unbounded one
-/// lets a hung directory pin every in-flight slot. It is capped at 120 seconds, by name.
+
 #[test]
 fn new_refuses_a_timeout_past_120_seconds() {
     let mut cfg = base_cfg();
@@ -163,8 +157,7 @@ fn new_refuses_an_empty_group_attr() {
 }
 
 /// An empty `base_dn` is a working search base on some directories (the AD Global Catalog on
-/// 3268/3269 and OpenLDAP with `olcDefaultSearchBase` serve a subtree search from base ""), so
-/// `new()` accepts it in both modes, as 1.5.5 did.
+
 #[test]
 fn new_accepts_an_empty_base_dn() {
     let mut cfg = search_cfg();
@@ -179,12 +172,12 @@ fn new_accepts_an_empty_base_dn() {
 fn search_then_bind_requires_service_dn() {
     let mut cfg = base_cfg();
     cfg.user_search_filter = Some("(sAMAccountName={username})".to_string());
-    // bind_service_dn missing → error
+
     assert!(LdapModule::new(cfg).is_err());
 }
 
 /// A `user_search_filter` without the `{username}` placeholder would look up the same entry for
-/// every login; `new()` refuses it.
+
 #[test]
 fn new_requires_search_filter_placeholder() {
     let mut cfg = search_cfg();
@@ -193,8 +186,7 @@ fn new_requires_search_filter_placeholder() {
 }
 
 /// M3: a `user_search_filter` that does not parse would fail every login as an outage; it is
-/// refused at `validate` and `open`, by name (never quoting the template), and so is one nested
-/// past the parser's depth bound.
+
 #[test]
 fn an_unparseable_search_filter_is_refused_by_name() {
     for bad in [
@@ -224,13 +216,13 @@ fn an_unparseable_search_filter_is_refused_by_name() {
 }
 
 /// With a search filter set, a service DN but NO password would make `simple_bind(dn,
-/// "")` an UNAUTHENTICATED bind. `new()` must require the password too.
+
 #[test]
 fn search_then_bind_requires_service_password() {
     let mut cfg = base_cfg();
     cfg.user_search_filter = Some("(sAMAccountName={username})".to_string());
     cfg.bind_service_dn = Some("cn=svc,dc=corp,dc=example".to_string());
-    // bind_service_password absent → unauthenticated-bind guard fires
+
     assert!(
         LdapModule::new(cfg).is_err(),
         "search-then-bind without a service password must be rejected"
@@ -238,8 +230,7 @@ fn search_then_bind_requires_service_password() {
 }
 
 /// A service DN with an EMPTY-STRING password still yields `simple_bind(dn, "")`, which is an
-/// unauthenticated bind. Checking `is_none()` alone is not enough: `new()` must also reject a
-/// present-but-empty service password.
+
 #[test]
 fn search_then_bind_rejects_empty_service_password() {
     let mut cfg = base_cfg();
@@ -253,7 +244,7 @@ fn search_then_bind_rejects_empty_service_password() {
 }
 
 /// A plaintext `ldap://` URL to a NON-loopback host with no STARTTLS sends the
-/// service and end-user credentials in cleartext. `new()` must reject it by default...
+
 #[test]
 fn insecure_ldap_nonloopback_rejected() {
     let mut cfg = base_cfg();
@@ -307,8 +298,7 @@ fn loopback_ldap_allowed() {
 }
 
 /// A userinfo component must not let a loopback-looking prefix bypass the plaintext guard.
-/// `ldap://127.0.0.1:389@evil.com` dials `evil.com` in cleartext (the userinfo is `127.0.0.1:389`),
-/// so the host is `evil.com` and the config must be REJECTED — not read as loopback.
+
 #[test]
 fn userinfo_loopback_prefix_is_treated_as_remote() {
     let mut cfg = base_cfg();
@@ -320,7 +310,7 @@ fn userinfo_loopback_prefix_is_treated_as_remote() {
 }
 
 /// The guard must end the authority where the dialer does ('/', '?' or '#'): otherwise
-/// `ldap://evil.example?x@127.0.0.1` reads as loopback while the dial lands on `evil.example`.
+
 #[test]
 fn query_or_fragment_cannot_hide_a_remote_host_behind_a_loopback_userinfo() {
     for url in [
@@ -367,12 +357,12 @@ fn the_guards_host_is_the_dialers_host() {
 }
 
 /// The `ldaps://` scheme check must not panic on a URL whose multi-byte UTF-8 char straddles
-/// byte index 8 (a byte-boundary slice would panic; a plugin must never crash the host on any config).
+
 #[test]
 fn insecure_transport_check_does_not_panic_on_multibyte_url() {
     let mut cfg = base_cfg();
-    cfg.url = "ldap://é.example:389".to_string(); // 'é' (2 bytes) straddles index 7-8
-                                                  // Must return a Result (reject as insecure), never panic.
+    cfg.url = "ldap://é.example:389".to_string();
+
     assert!(
         LdapModule::new(cfg).is_err(),
         "a plaintext ldap:// to a non-loopback multibyte host must reject without panicking"
@@ -391,7 +381,7 @@ fn new_rejects_a_ca_cert_pem_with_no_certificate() {
 }
 
 /// The service-account password must never appear in a `Debug` dump of the config: `LdapConfig`
-/// derives `Debug`, so the field has to carry its own redaction.
+
 #[test]
 fn service_password_redacted_in_debug() {
     let cfg: LdapConfig = serde_json::from_value(serde_json::json!({
@@ -423,7 +413,7 @@ fn bind_dn_templating_substitutes_username() {
 #[test]
 fn bind_dn_rejects_injection_username() {
     let m = LdapModule::new(base_cfg()).unwrap();
-    // A username trying to break out of its RDN must be rejected, not templated in.
+
     for bad in [
         "alice,dc=corp,dc=example",
         "a=b",
@@ -443,8 +433,7 @@ fn bind_dn_rejects_injection_username() {
 }
 
 /// RFC 4514 §2.4 must-escape positions: a leading or trailing space and a leading '#'. A lenient
-/// directory binds `alice` for `alice `, so accepting them would mint a second principal id for
-/// one directory entry.
+
 #[test]
 fn bind_dn_rejects_rfc4514_must_escape_positions() {
     let m = LdapModule::new(base_cfg()).unwrap();
@@ -454,7 +443,7 @@ fn bind_dn_rejects_rfc4514_must_escape_positions() {
             "username {bad:?} should be rejected"
         );
     }
-    // Inside the value these are ordinary characters.
+
     for ok in ["alice smith", "a#b"] {
         assert!(
             m.bind_dn_for(ok).is_ok(),
@@ -464,7 +453,7 @@ fn bind_dn_rejects_rfc4514_must_escape_positions() {
 }
 
 /// T2: a LONE backslash (trailing, or the whole username) is refused too: templated into a DN it
-/// would escape the template's next character (`uid=a\,ou=...` reads as one RDN value).
+
 #[test]
 fn a_lone_backslash_username_is_refused() {
     for bad in ["\\", "alice\\", "\\alice", "a\\b"] {
@@ -475,10 +464,7 @@ fn a_lone_backslash_username_is_refused() {
 }
 
 /// T1: a BIND password goes out only where it is safe. For an `ldaps://` URL or `start_tls` it is
-/// SECURE-REQUIRED (the chip refuses to write it on a stream the host connector does not report
-/// secured), the service password and the user's alike; a plain `ldap://` URL to a non-loopback
-/// host with no STARTTLS never reaches a bind at all (refused at `validate` and boot) unless the
-/// operator opts out, and only then does the password go out unsecured.
+
 #[test]
 fn bind_passwords_are_secure_required_and_plaintext_never_binds() {
     let pw = cred("pw");
@@ -522,7 +508,7 @@ fn username_validation_allows_normal_names() {
     for ok in ["alice", "alice.smith", "a_b-c", "user@corp.example"] {
         assert!(validate_username(ok).is_ok(), "{ok} should be allowed");
     }
-    // '@' allowed (AD UPN), but DN specials are not.
+
     assert!(validate_username("bad,name").is_err());
 }
 
@@ -541,9 +527,9 @@ fn first_cn_extracts_leading_cn() {
         first_cn("CN=engineers,OU=Groups,DC=corp,DC=example").as_deref(),
         Some("engineers")
     );
-    // case-insensitive attribute name
+
     assert_eq!(first_cn("cn=sre,dc=x").as_deref(), Some("sre"));
-    // escaped comma inside the CN value is preserved as a literal comma
+
     assert_eq!(
         first_cn("CN=Smith\\, Alice,OU=People,DC=x").as_deref(),
         Some("Smith, Alice")
@@ -552,10 +538,7 @@ fn first_cn_extracts_leading_cn() {
 }
 
 /// `\XX` hex-pair DN escapes (RFC 4514) must be resolved, not left literal. Consecutive
-/// hex bytes decode together as UTF-8.
-/// L3: an RDN with no `=` (malformed, or a lenient directory's) is skipped, not the end of the
-/// search, and a multi-valued RDN (`CN=a+UID=b`) is split at its unescaped `+`: the CN is its own
-/// AVA's value, in either position; an escaped `\+` stays in the value.
+
 #[test]
 fn first_cn_skips_a_bad_rdn_and_splits_a_multi_valued_one() {
     assert_eq!(first_cn("garbage,CN=eng,DC=x"), Some("eng".to_string()));
@@ -567,11 +550,10 @@ fn first_cn_skips_a_bad_rdn_and_splits_a_multi_valued_one() {
 
 #[test]
 fn first_cn_unescapes_hex_pairs() {
-    // `\41` → 'A'
     assert_eq!(first_cn("CN=\\41,DC=x").as_deref(), Some("A"));
-    // a multi-byte char encoded as two hex escapes: `\C3\A9` → 'é'
+
     assert_eq!(first_cn("CN=caf\\C3\\A9,DC=x").as_deref(), Some("café"));
-    // single-char escapes still work alongside hex ones
+
     assert_eq!(
         first_cn("CN=A\\,\\42,DC=x").as_deref(),
         Some("A,B") // `\,` → ',', `\42` → 'B'
@@ -591,8 +573,7 @@ fn roles_cn_mode_maps_and_dedups() {
 }
 
 /// The default `cn` mode keeps the directory's case, exactly as v1.0.3 (busbar 1.5.5) did. A 1.5.5
-/// config keys `role_bindings` by that spelling (`Engineers:` for `CN=Engineers`); folding the case
-/// would make every such key miss after an upgrade, and the user would silently hold no role.
+
 #[test]
 fn roles_cn_mode_keeps_the_directorys_case() {
     let dns = vec![
@@ -627,8 +608,6 @@ fn roles_empty_when_no_groups() {
     assert!(roles_from_group_dns(&[], RoleFrom::Cn).is_empty());
 }
 
-// ── The credential flow ─────────────────────────────────────────────────────────────────────────
-
 /// A wire the test never expects to be touched.
 struct Untouched;
 
@@ -651,7 +630,7 @@ impl crate::conversation::Wire for Untouched {
 }
 
 /// `login_over` refuses absent credentials and an empty (anonymous-bind) password without ever
-/// reaching the wire. The happy path (real bind -> Identity) is the conversation's tests and e2e.
+
 #[test]
 fn login_refuses_missing_or_empty_credentials() {
     let m = LdapModule::new(base_cfg()).unwrap();
@@ -666,8 +645,7 @@ fn login_refuses_missing_or_empty_credentials() {
 }
 
 /// LDAP is a `Credential` method: it has no confidential-client `client_secret`. The config type has
-/// no such field, and `deny_unknown_fields` rejects one if an operator configures it — the
-/// structural "client_secret must be absent" guarantee for a Credential method.
+
 #[test]
 fn config_rejects_client_secret() {
     let r: Result<LdapConfig, _> = serde_json::from_value(serde_json::json!({
@@ -681,8 +659,6 @@ fn config_rejects_client_secret() {
         "a Credential method must have no client_secret slot"
     );
 }
-
-// ── Fake-backend coverage of the bind path ───────────────────────────────────────────────────────
 
 /// A scriptable in-memory [`LdapBackend`] standing in for a live directory, so the post-connect bind
 /// logic — result-code handling, ambiguity, group cap, roles, principal id — is unit-testable.
@@ -769,7 +745,6 @@ impl LdapBackend for FakeLdap {
             attrs.iter().map(|a| a.to_string()).collect(),
         ));
         match scope {
-            // search-then-bind user lookup
             SearchScope::Subtree => {
                 self.filters.push(filter.to_string());
                 if self.subtree_err {
@@ -777,7 +752,7 @@ impl LdapBackend for FakeLdap {
                 }
                 Ok(self.search_entries.clone())
             }
-            // group read off the bound user entry
+
             SearchScope::Base => {
                 if self.base_err {
                     return Err("transport failure on group read".to_string().into());
@@ -813,7 +788,7 @@ impl LdapBackend for FakeLdap {
 }
 
 /// T3: the UNBIND is best effort: a directory that drops the connection after the group read (the
-/// unbind's write fails) does not turn a fully verified login into an outage.
+
 #[test]
 fn a_failed_unbind_is_ignored() {
     let m = LdapModule::new(base_cfg()).unwrap();
@@ -831,8 +806,7 @@ fn a_failed_unbind_is_ignored() {
 }
 
 /// T5: `ca_cert_pem` holds a certificate only when EVERY `CERTIFICATE` block is base64 of a DER
-/// SEQUENCE: well-formed base64 that is not one (`AAAA`), or a bundle whose second block is bad,
-/// is refused, as the connector would refuse it at the need's declaration.
+
 #[test]
 fn a_ca_bundle_with_a_non_der_block_holds_no_certificate() {
     let good = busbar_test_kit::conformance_host::anchors();
@@ -876,11 +850,7 @@ fn bind_wrong_password_is_invalid_credentials() {
 }
 
 /// OWNER RULING (non-49 user bind): a user-bind result code is an OUTAGE only when it names a
-/// server or session condition that fails for every user (51 busy, 52 unavailable, ...: the logged
-/// `Directory` arm, carrying no credential). Every other non-zero code (48, 53, 32, ... and a code
-/// RFC 4511 does not name) is a refusal of THIS bind: `Rejected` with its code, which `login_over`
-/// answers as a bad credential. This test asserted the old ruling (every non-49 code a `Directory`
-/// failure); 51 and 52 still assert the outage.
+
 #[test]
 fn a_non_49_user_bind_rc_is_an_outage_only_for_a_server_condition() {
     let m = LdapModule::new(base_cfg()).unwrap();
@@ -941,12 +911,12 @@ fn the_outage_codes_are_the_server_conditions() {
 }
 
 /// A search that matches nothing → `InvalidCredentials`, without ever
-/// attempting the user bind.
+
 #[test]
 fn search_no_match_is_invalid_credentials() {
     let m = LdapModule::new(search_cfg()).unwrap();
     let mut fake = FakeLdap {
-        search_entries: vec![], // no user found
+        search_entries: vec![],
         group_attr: "memberOf".to_string(),
         ..Default::default()
     };
@@ -955,7 +925,7 @@ fn search_no_match_is_invalid_credentials() {
 }
 
 /// A successful search-then-bind returns `Identify`
-/// with the CN-mapped roles and a principal id keyed on the resolved DN, lowercased.
+
 #[test]
 fn successful_bind_identifies_with_roles_and_normalized_id() {
     let m = LdapModule::new(search_cfg()).unwrap();
@@ -977,8 +947,7 @@ fn successful_bind_identifies_with_roles_and_normalized_id() {
     assert_eq!(p.id, "ldap:cn=alice,ou=people,dc=corp,dc=example");
     assert_eq!(p.roles, vec!["engineers".to_string(), "sre".to_string()]);
     assert!(fake.unbound, "connection should be unbound on success");
-    // The user lookup runs under base_dn; the group read is a Base read of the resolved user DN
-    // (not base_dn), asking for exactly the configured group attribute.
+
     assert_eq!(
         fake.searches,
         vec![
@@ -997,7 +966,7 @@ fn successful_bind_identifies_with_roles_and_normalized_id() {
 }
 
 /// The group attribute is the CONFIGURED one, both in the request and when reading the entry back:
-/// with `group_attr: seeAlso` the values the directory returns under `seeAlso` become the roles.
+
 #[test]
 fn a_configured_group_attr_is_requested_and_read() {
     let mut cfg = base_cfg();
@@ -1021,7 +990,7 @@ fn a_configured_group_attr_is_requested_and_read() {
 }
 
 /// The group attribute is matched case-insensitively (RFC 4512 §2.5): `group_attr: memberof` reads the
-/// values a server returns under `memberOf`, instead of silently yielding no roles.
+
 #[test]
 fn the_group_attr_is_matched_case_insensitively() {
     let mut cfg = base_cfg();
@@ -1037,9 +1006,7 @@ fn the_group_attr_is_matched_case_insensitively() {
 }
 
 /// M2: Active Directory answers a multi-valued attribute past its MaxValRange (1500) as a RANGED
-/// description, `memberOf;range=0-1499`. The group attribute is matched ignoring options, so the
-/// values returned are read (fail-safe: fewer roles than the user holds), and the truncation is
-/// logged at warn; a final range (`;range=0-*`) is the whole attribute and is read silently.
+
 #[test]
 fn a_ranged_group_attribute_is_read_and_its_truncation_warned() {
     use busbar_test_kit::warn_capture::WarnCapture;
@@ -1067,7 +1034,7 @@ fn a_ranged_group_attribute_is_read_and_its_truncation_warned() {
 }
 
 /// M5: a user entry that carries no group attribute at all logs in with no roles, and says so at
-/// warn (a misnamed `group_attr` is otherwise a silent no-roles login for everyone).
+
 #[test]
 fn an_absent_group_attribute_is_warned() {
     use busbar_test_kit::warn_capture::WarnCapture;
@@ -1093,7 +1060,7 @@ fn an_absent_group_attribute_is_warned() {
 }
 
 /// A search matching >1 entry is AMBIGUOUS and must be rejected, not silently bound to
-/// the first match.
+
 #[test]
 fn ambiguous_search_is_rejected() {
     let m = LdapModule::new(search_cfg()).unwrap();
@@ -1134,7 +1101,7 @@ fn username_casing_yields_same_principal_id() {
         id_for("alice"),
         "ldap:uid=alice,ou=people,dc=corp,dc=example"
     );
-    // and the pure helper is stable under casing directly
+
     assert_eq!(
         principal_id("uid=Alice,DC=X"),
         principal_id("uid=alice,dc=x")
@@ -1142,8 +1109,7 @@ fn username_casing_yields_same_principal_id() {
 }
 
 /// M1: a direct-bind principal is the bound entry's DN AS THE DIRECTORY RETURNS IT (the group
-/// read's objectName), not the typed spelling: `John  Smith` (two spaces) and `John Smith` bind the
-/// same entry on a directory that matches insignificant spaces away, so they are one principal.
+
 #[test]
 fn the_principal_is_the_dn_the_directory_returns() {
     let m = LdapModule::new(base_cfg()).unwrap();
@@ -1162,8 +1128,7 @@ fn the_principal_is_the_dn_the_directory_returns() {
 }
 
 /// M1: when the group read answers no entry (an ACL hides it), the principal falls back to the
-/// bound DN normalised for case-ignore matching (RFC 4518: case folded, insignificant spaces
-/// collapsed), so the typed spacing still mints one principal.
+
 #[test]
 fn with_no_entry_the_principal_is_the_bound_dn_normalised() {
     let m = LdapModule::new(base_cfg()).unwrap();
@@ -1179,7 +1144,7 @@ fn with_no_entry_the_principal_is_the_bound_dn_normalised() {
         id_for("John   Smith"),
         "ldap:uid=john smith,ou=people,dc=corp,dc=example"
     );
-    // Search-then-bind normalises the found DN the same way.
+
     let m = LdapModule::new(search_cfg()).unwrap();
     let mut fake = FakeLdap {
         search_entries: vec![DirEntry {
@@ -1197,7 +1162,7 @@ fn with_no_entry_the_principal_is_the_bound_dn_normalised() {
 #[test]
 fn group_values_are_capped() {
     let m = LdapModule::new(base_cfg()).unwrap();
-    // 5000 DISTINCT group CNs — more than the 4096 cap.
+
     let vals: Vec<String> = (0..5000)
         .map(|i| format!("CN=g{i},DC=corp,DC=example"))
         .collect();
@@ -1215,10 +1180,6 @@ fn group_values_are_capped() {
     assert!(cap.contains("reason=groups-capped"), "{:?}", cap.messages());
     assert!(cap.contains("cap=4096"), "{:?}", cap.messages());
 }
-
-// ── every Directory→Reject branch actually rejects ───────────────────────────────────────────────
-// The fake injects transport errors, so each operational-failure branch yields `Directory` (which
-// `login` answers as `Outage`), never `Identify`.
 
 /// A transport failure on the SERVICE bind is Directory→Reject.
 #[test]
@@ -1238,7 +1199,6 @@ fn service_bind_error_rejects() {
 fn service_bind_nonzero_rc_rejects() {
     let m = LdapModule::new(search_cfg()).unwrap();
     let mut fake = FakeLdap {
-        // the service password is "svc-secret"; make that bind return rc 49
         reject_password: Some("svc-secret".to_string()),
         group_attr: "memberOf".to_string(),
         ..Default::default()
@@ -1294,10 +1254,8 @@ fn group_read_error_rejects() {
     assert!(matches!(r, Err(BindError::Directory(_))), "got {r:?}");
 }
 
-// ── the search-then-bind path validates username / resolved DN ───────────────────────────────────
-
 /// An EMPTY username in the search path must be rejected — even when an entry would otherwise match
-/// — instead of proceeding to a bind. (Without the guard the matching entry below yields `Identify`.)
+
 #[test]
 fn search_path_rejects_empty_username() {
     let m = LdapModule::new(search_cfg()).unwrap();
@@ -1317,7 +1275,7 @@ fn search_path_rejects_empty_username() {
 }
 
 /// A search that resolves to an EMPTY DN must not be bound (an empty DN + password is an anonymous
-/// bind on many directories). (Without the guard this binds `("", "pw")` and yields `Identify`.)
+
 #[test]
 fn search_path_rejects_empty_resolved_dn() {
     let m = LdapModule::new(search_cfg()).unwrap();
@@ -1337,13 +1295,11 @@ fn search_path_rejects_empty_resolved_dn() {
 }
 
 /// `principal_id` must be Unicode-aware. `to_ascii_lowercase` leaves non-ASCII
-/// letters untouched, so two Unicode casings of the same name mint two distinct `ldap:` principals.
-/// A Unicode-aware `to_lowercase` collapses them to one canonical id.
+
 #[test]
 fn unicode_username_casing_yields_same_principal_id() {
-    // 'Ä' vs 'ä': identical under to_lowercase, but to_ascii_lowercase leaves 'Ä' unchanged.
     assert_eq!(principal_id("uid=Ä,dc=x"), principal_id("uid=ä,dc=x"));
-    // 'İ'/'i' style non-ASCII casing likewise collapses.
+
     assert_eq!(
         principal_id("cn=ÉLODIE,dc=x"),
         principal_id("cn=élodie,dc=x")
@@ -1351,13 +1307,7 @@ fn unicode_username_casing_yields_same_principal_id() {
 }
 
 /// On the search-then-bind path, the USER bind must present the SUBMITTED password.
-///
-/// The service account binds first, to find the user's entry; if the second bind reused the
-/// SERVICE password instead of the end user's, every bind would succeed for anyone who merely exists
-/// in the directory: a full authentication bypass with a normal-looking principal.
-///
-/// Asserts the ORDER and the CREDENTIALS of both binds, so neither "the service bind was skipped"
-/// nor "the user bind used the wrong secret" can slip through.
+
 #[test]
 fn search_then_bind_authenticates_with_the_submitted_password() {
     let m = LdapModule::new(search_cfg()).unwrap();
@@ -1400,15 +1350,7 @@ fn search_then_bind_authenticates_with_the_submitted_password() {
 }
 
 /// The RFC 4515 escaping must hold AS APPLIED, not merely as a pure function.
-///
-/// `escape_filter` had its own unit test, but the fake backend discarded the filter argument, so
-/// deleting the `escape_filter` call at the call site left every test in this file green. That is
-/// LDAP filter injection: a username like `*)(uid=*` would close the intended filter and open a
-/// wildcard, turning "find this one user" into "match everything" — and on a directory where the
-/// search then returns a single entry, into binding as somebody else entirely.
-///
-/// The module's own ambiguity guard limits the damage (more than one match is rejected), which is
-/// exactly why this needs its own test: the guard would mask the injection rather than reveal it.
+
 #[test]
 fn the_user_search_filter_is_escaped_as_applied_not_just_in_isolation() {
     let m = LdapModule::new(search_cfg()).unwrap();
@@ -1420,7 +1362,7 @@ fn the_user_search_filter_is_escaped_as_applied_not_just_in_isolation() {
         group_attr: "memberOf".to_string(),
         ..Default::default()
     };
-    // Every metacharacter RFC 4515 requires escaping, in one username.
+
     let hostile = r"*)(uid=*))(|(x=\ ";
     let _ = m.bind_and_identify_on(&mut fake, hostile, "pw");
 
@@ -1440,8 +1382,6 @@ fn the_user_search_filter_is_escaped_as_applied_not_just_in_isolation() {
         );
     }
 }
-
-// ── Credential-echo canaries ────────────────────────────────────────────
 
 const CANARY: &str = "CANARYa6d215";
 
@@ -1574,8 +1514,6 @@ fn debug_of_the_config_never_prints_the_url_password() {
     }
 }
 
-// ── every refusal is explained; nothing is silent ───────────────────────────────────────────────
-
 mod logging {
     use super::*;
     use busbar_test_kit::warn_capture::WarnCapture;
@@ -1595,8 +1533,7 @@ mod logging {
     }
 
     /// L4: an empty `base_dn` stays accepted for search-then-bind (the AD Global Catalog serves a
-    /// search from the root DSE), but never silently: `open` logs at info that the user search runs
-    /// from the root DSE. A set base, or direct bind (which searches no base), logs nothing of it.
+
     #[test]
     fn an_empty_search_base_is_logged_at_open() {
         let mut cfg = search_cfg();
@@ -1627,7 +1564,7 @@ mod logging {
     }
 
     /// LDO D10: the bound user's own entry read back as NO entry (an ACL hides it) is not silent:
-    /// the login still answers the identity with no roles, and warns that the groups were unread.
+
     #[test]
     fn a_group_read_with_no_entry_is_logged_at_warn() {
         let m = LdapModule::new(base_cfg()).unwrap();
@@ -1689,7 +1626,7 @@ mod logging {
     }
 
     /// An empty username on the search path, and a username the DN template refuses, are each
-    /// explained (and the username itself is not logged).
+
     #[test]
     fn a_refused_username_is_logged() {
         let m = LdapModule::new(search_cfg()).unwrap();
@@ -1740,7 +1677,7 @@ mod logging {
     }
 
     /// No host clock: the login refuses an untimed directory call (an outage, explained at warn)
-    /// rather than bind with no deadline; nothing reaches the wire.
+
     #[test]
     fn no_host_clock_is_an_outage() {
         let m = LdapModule::new(base_cfg()).unwrap();
