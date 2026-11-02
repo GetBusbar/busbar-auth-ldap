@@ -34,10 +34,10 @@ pub fn roles_from_group_dns(group_dns: &[String], mode: RoleFrom) -> Vec<String>
             // exact spelling (`Engineers:` for `CN=Engineers`), so folding the case here would
             // silently unbind every such role.
             RoleFrom::Cn => match first_cn(dn) {
-                Some(cn) => cn,
-                // A memberOf value with no CN RDN (unusual) falls back to the whole trimmed value so
-                // membership is never silently dropped.
-                None => dn.trim().to_string(),
+                Some(cn) if !cn.is_empty() => cn,
+                // A memberOf value with no usable CN (no CN RDN, or an empty one) falls back to
+                // the whole trimmed value so membership is never silently dropped.
+                _ => dn.trim().to_string(),
             },
             RoleFrom::Dn => dn.trim().to_lowercase(),
         };

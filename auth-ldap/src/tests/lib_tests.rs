@@ -596,6 +596,13 @@ fn first_cn_keeps_an_escaped_trailing_space() {
     assert_eq!(first_cn("CN=  eng  ,DC=x").as_deref(), Some("eng"));
 }
 
+/// A group DN whose CN is empty falls back to the whole trimmed DN, never silently dropped.
+#[test]
+fn an_empty_cn_falls_back_to_the_whole_dn() {
+    let roles = roles_from_group_dns(&["CN=,OU=Ops,DC=corp".to_string()], RoleFrom::Cn);
+    assert_eq!(roles, vec!["CN=,OU=Ops,DC=corp".to_string()]);
+}
+
 #[test]
 fn roles_cn_mode_maps_and_dedups() {
     let dns = vec![
