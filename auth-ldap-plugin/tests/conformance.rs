@@ -719,6 +719,17 @@ fn validate(p: &Plugin<Auth>, settings: &[u8]) -> Called {
     p.call(life::VALIDATE, &mut f)
 }
 
+// Retain the complete call result in both the linked/dropped comparison and privacy scan.
+fn called_text(c: &Called) -> String {
+    format!(
+        "{:?} lease={} recall={} {}",
+        c.outcome,
+        c.lease,
+        c.recall.is_some(),
+        String::from_utf8_lossy(c.error.as_deref().unwrap_or_default())
+    )
+}
+
 fn direct_script(leg: Leg) -> (Vec<String>, Vec<String>) {
     use busbar_contract::abi::auth::{
         self, BeginLoginIn, BeginLoginOut, FieldsIn, FieldsOut, OpenOutboundIn, OpenOutboundOut,
@@ -746,7 +757,16 @@ fn direct_script(leg: Leg) -> (Vec<String>, Vec<String>) {
     assert_eq!(tail.login_kind, auth::LOGIN_KIND_CREDENTIAL);
     assert_eq!(p.name(), "busbar-auth-ldap");
     assert_eq!(p.max_inflight(), 64);
-    let mut lines = Vec::new();
+    let mut lines = vec![format!(
+        "facts {:?} {} max_inflight={} caps={} facts={} login_kind={} carriers={:?}",
+        p.kind(),
+        p.name(),
+        p.max_inflight(),
+        tail.caps,
+        tail.facts,
+        tail.login_kind,
+        tail.carriers
+    )];
     let inputs: serde_json::Value = serde_json::from_str(include_str!("conformance.json")).unwrap();
     let settings = settings();
     for bad in inputs["auth"]["bad_settings"].as_array().unwrap() {
@@ -761,36 +781,31 @@ fn direct_script(leg: Leg) -> (Vec<String>, Vec<String>) {
         ] {
             assert_eq!(c.outcome, Outcome::Failed);
             assert!(!c.error.as_deref().unwrap_or_default().is_empty());
-            lines.push(format!(
-                "bad {:?} {}",
-                c.outcome,
-                String::from_utf8_lossy(c.error.as_deref().unwrap_or_default())
-            ));
+            assert_eq!(c.lease, 0);
+            lines.push(format!("bad {}", called_text(&c)));
         }
     }
-    assert_eq!(
-        counted(&p, 1, || validate(&p, &settings)).outcome,
-        Outcome::Ready
-    );
-    assert_eq!(
-        counted(&p, 1, || open(&p, &settings)).outcome,
-        Outcome::Ready
-    );
+    let validated = counted(&p, 1, || validate(&p, &settings));
+    assert_eq!(validated.outcome, Outcome::Ready);
+    lines.push(format!("validate {}", called_text(&validated)));
+    let opened = counted(&p, 1, || open(&p, &settings));
+    assert_eq!(opened.outcome, Outcome::Ready);
+    lines.push(format!("open {}", called_text(&opened)));
     let ready_count = u64::from(p.has_ready());
-    counted(&p, ready_count, || {
-        p.ready(&d, Duration::from_secs(10)).expect("LDAP ready")
-    });
+    let ready = counted(&p, ready_count, || p.ready(&d, Duration::from_secs(10)));
+    lines.push(format!("ready has_ready={} {ready:?}", p.has_ready()));
+    ready.expect("LDAP ready");
     let mut verify: Frame<VerifyIn, IdentifyOut> = Frame::new(input(), output());
-    assert_eq!(
-        counted(&p, 1, || p.call(slot::VERIFY, &mut verify)).outcome,
-        Outcome::Refused
-    );
+    let verified = counted(&p, 1, || p.call(slot::VERIFY, &mut verify));
+    assert_eq!(verified.outcome, Outcome::Refused);
+    lines.push(format!("verify undeclared {}", called_text(&verified)));
     let mut begin: Frame<BeginLoginIn, BeginLoginOut> = Frame::new(input(), output());
     begin.input.redirect_uri = AbiStr::of_bytes(b"https://node.example/auth/login");
     begin.input.state = AbiStr::of_bytes(b"conformance-state");
     let begun = counted(&p, 1, || p.call(slot::BEGIN_LOGIN, &mut begin));
     assert_eq!(begun.outcome, Outcome::Ready);
     assert_eq!(begun.lease, 0);
+    lines.push(format!("begin_login {}", called_text(&begun)));
     assert_eq!(begin.out.shape, auth::BEGIN_FORM);
     assert_eq!(begin.out.form_len, 2);
     // SAFETY: READY holds the actual plugin's form for the answer's lifetime; it
@@ -832,28 +847,30 @@ fn direct_script(leg: Leg) -> (Vec<String>, Vec<String>) {
     );
     lines.push(rejected);
     let mut outbound: Frame<OpenOutboundIn, OpenOutboundOut> = Frame::new(input(), output());
-    assert_eq!(
-        counted(&p, 1, || p.call(slot::OPEN_OUTBOUND, &mut outbound)).outcome,
-        Outcome::Refused
-    );
+    let answer = counted(&p, 1, || p.call(slot::OPEN_OUTBOUND, &mut outbound));
+    assert_eq!(answer.outcome, Outcome::Refused);
+    lines.push(format!("open_outbound undeclared {}", called_text(&answer)));
     let mut outbound_ready: Frame<OutboundReadyIn, OutboundReadyOut> =
         Frame::new(input(), output());
-    assert_eq!(
-        counted(&p, 1, || p.call(slot::OUTBOUND_READY, &mut outbound_ready)).outcome,
-        Outcome::Refused
-    );
+    let answer = counted(&p, 1, || p.call(slot::OUTBOUND_READY, &mut outbound_ready));
+    assert_eq!(answer.outcome, Outcome::Refused);
+    lines.push(format!(
+        "outbound_ready undeclared {}",
+        called_text(&answer)
+    ));
     let mut fields: Frame<FieldsIn, FieldsOut> = Frame::new(input(), output());
-    assert_eq!(
-        counted(&p, 1, || p.call(slot::FIELDS, &mut fields)).outcome,
-        Outcome::Refused
-    );
+    let answer = counted(&p, 1, || p.call(slot::FIELDS, &mut fields));
+    assert_eq!(answer.outcome, Outcome::Refused);
+    lines.push(format!("fields undeclared {}", called_text(&answer)));
     let mut tick: Frame<TickIn, TickOut> = Frame::new(input(), output());
     tick.input.now_ns = 1;
-    assert_eq!(
-        counted(&p, 1, || p.call(life::TICK, &mut tick)).outcome,
-        Outcome::Ready
-    );
-    lines.push(format!("tick next={}", tick.out.next_tick_ns));
+    let ticked = counted(&p, 1, || p.call(life::TICK, &mut tick));
+    assert_eq!(ticked.outcome, Outcome::Ready);
+    lines.push(format!(
+        "tick {} next={}",
+        called_text(&ticked),
+        tick.out.next_tick_ns
+    ));
     let mut refresh: Frame<RefreshIn, OutHead> = Frame::new(input(), output());
     refresh.input.settings = Blob {
         ptr: settings.as_ptr(),
@@ -862,11 +879,12 @@ fn direct_script(leg: Leg) -> (Vec<String>, Vec<String>) {
         flags: 0,
     };
     refresh.input.generation = 2;
-    assert_eq!(
-        counted(&p, 1, || p.call(life::REFRESH, &mut refresh)).outcome,
-        Outcome::Ready
-    );
-    assert_eq!(counted(&p, 1, || close(&p)).outcome, Outcome::Ready);
+    let refreshed = counted(&p, 1, || p.call(life::REFRESH, &mut refresh));
+    assert_eq!(refreshed.outcome, Outcome::Ready);
+    lines.push(format!("refresh {}", called_text(&refreshed)));
+    let closed = counted(&p, 1, || close(&p));
+    assert_eq!(closed.outcome, Outcome::Ready);
+    lines.push(format!("close {}", called_text(&closed)));
     assert_eq!(
         d.stats().deadline_without_wake,
         0,
@@ -887,6 +905,20 @@ fn direct_script(leg: Leg) -> (Vec<String>, Vec<String>) {
 
 #[test]
 fn the_linked_and_the_dropped_in_door_are_one_plugin() {
+    let actual =
+        busbar_plugin_loader::dispatch::load::door_addresses_of_library(&artifact::plugin_path())
+            .expect("the actual LDAP cdylib loads")
+            .expect("the actual LDAP cdylib exports its door");
+    let linked = busbar_auth_ldap::door::door();
+    assert_ne!(
+        actual.0, linked as *const Door as usize,
+        "dropped and linked door addresses differ"
+    );
+    assert_ne!(
+        actual.1,
+        linked.parts().ops as usize,
+        "dropped and linked operation tables differ"
+    );
     assert_eq!(direct_script(Leg::Linked), direct_script(Leg::Dropped));
 }
 
@@ -1157,19 +1189,19 @@ fn red_a_networked_door_with_no_connection_table_is_refused() {
         plugin: "busbar-auth-ldap".into(),
         needs: 2,
     };
-    assert_eq!(
+    for refused in [
         load_linked::<Auth>(&row, bind(&d, "ldap-no-table")).err(),
-        Some(wanted.clone())
-    );
-    assert_eq!(
         load_dropped::<Auth>(
             &artifact::plugin_path(),
             &row.statement,
-            bind(&d, "ldap-no-table")
+            bind(&d, "ldap-no-table"),
         )
         .err(),
-        Some(wanted)
-    );
+    ] {
+        let refused = refused.expect("serving LDAP without a connection table refuses");
+        assert_eq!(refused, wanted);
+        assert!(refused.to_string().contains("busbar-auth-ldap"));
+    }
     load_linked::<Auth>(
         &row,
         Bind {
