@@ -54,6 +54,9 @@ mod conformance_host;
 #[path = "support/net_ban.rs"]
 mod net_ban;
 
+#[path = "support/sealed_replay.rs"]
+mod sealed_replay;
+
 busbar_test_kit::conformance_suite! {
     door: busbar_auth_ldap::door::MACRO_DOOR,
     cdylib: "busbar_auth_ldap_plugin",
