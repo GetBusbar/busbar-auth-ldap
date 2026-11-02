@@ -15,9 +15,10 @@ pub fn roles_from_group_dns(group_dns: &[String], mode: RoleFrom) -> Vec<String>
     for dn in group_dns {
         let role = match mode {
             RoleFrom::Cn => match first_cn(dn) {
-                Some(cn) => cn,
-
-                None => dn.trim().to_string(),
+                Some(cn) if !cn.is_empty() => cn,
+                // A memberOf value with no usable CN (no CN RDN, or an empty one) falls back to
+                // the whole trimmed value so membership is never silently dropped.
+                _ => dn.trim().to_string(),
             },
             RoleFrom::Dn => dn.trim().to_lowercase(),
         };
@@ -42,11 +43,25 @@ pub(crate) fn first_cn(dn: &str) -> Option<String> {
                 continue;
             };
             if attr.trim().eq_ignore_ascii_case("cn") {
-                return unescape_rdn_value(trim_rdn_value(val));
+                return unescape_rdn_value(trim_unescaped(val));
             }
         }
     }
     None
+}
+
+/// Trim `v` of leading whitespace and of trailing whitespace that is not escaped (RFC 4514: a
+/// space after an odd run of backslashes is `\ `, part of the value).
+fn trim_unescaped(v: &str) -> &str {
+    let mut v = v.trim_start();
+    while let Some(head) = v.strip_suffix(char::is_whitespace) {
+        let backslashes = head.bytes().rev().take_while(|&b| b == b'\\').count();
+        if backslashes % 2 == 1 {
+            break;
+        }
+        v = head;
+    }
+    v
 }
 
 /// Split a DN at every unescaped `sep` (`,` between RDNs, `+` between the attribute-value
@@ -72,19 +87,6 @@ fn split_unescaped(dn: &str, sep: char) -> Vec<String> {
         parts.push(cur);
     }
     parts
-}
-
-fn trim_rdn_value(value: &str) -> &str {
-    let mut value = value.trim_start();
-    while value.ends_with(' ') {
-        let before = &value[..value.len() - 1];
-        let slashes = before.bytes().rev().take_while(|&b| b == b'\\').count();
-        if slashes % 2 == 1 {
-            break;
-        }
-        value = before;
-    }
-    value
 }
 
 /// Unescape the DN-value escapes that survive [`split_unescaped`], per RFC 4514:

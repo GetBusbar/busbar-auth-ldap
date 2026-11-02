@@ -47,9 +47,11 @@ impl fmt::Display for BerError {
                 "the directory's message of {n} bytes passes the {} MiB inbound cap",
                 INBOUND_CAP / (1024 * 1024)
             ),
-            Self::OverBudget => {
-                f.write_str("the directory's decoded values pass the 4 MiB per-operation budget")
-            }
+            Self::OverBudget => write!(
+                f,
+                "the directory's decoded values pass the {} MiB per-operation budget",
+                crate::codec::DECODE_BUDGET / (1024 * 1024)
+            ),
         }
     }
 }

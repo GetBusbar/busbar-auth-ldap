@@ -20,6 +20,7 @@ use std::ffi::c_void;
 use std::mem::size_of;
 
 thread_local! {
+    static CLOSE_FAILS: Cell<bool> = const { Cell::new(false) };
     static NOW: Cell<u64> = const { Cell::new(0) };
     static CLOSES: RefCell<Vec<(u64, Ticket)>> = const { RefCell::new(Vec::new()) };
     static READS: Cell<u32> = const { Cell::new(0) };
@@ -75,7 +76,7 @@ unsafe extern "C" fn close(_: HostCtx, input: *const c_void, out: *mut ServiceOu
             .borrow_mut()
             .push((input.stream, input.head.handle.ticket))
     });
-    let outcome = if input.head.handle.ticket == Ticket::NONE {
+    let outcome = if input.head.handle.ticket == Ticket::NONE && !CLOSE_FAILS.with(Cell::get) {
         Outcome::Ready
     } else {
         Outcome::Failed
@@ -83,12 +84,15 @@ unsafe extern "C" fn close(_: HostCtx, input: *const c_void, out: *mut ServiceOu
     // SAFETY: the SDK lends the output throughout this callback.
     unsafe {
         (*out).outcome = RawOutcome::of(outcome);
+        if CLOSE_FAILS.with(Cell::get) {
+            (*out).error = AbiStr::of("close refused");
+        }
     }
     RawOutcome::of(outcome)
 }
 
-#[test]
-fn a_timed_out_pending_read_releases_the_stream_without_replaying_its_handle() {
+fn timed_out_pending_read_release(close_fails: bool) {
+    CLOSE_FAILS.with(|fails| fails.set(close_fails));
     NOW.with(|now| now.set(0));
     READS.with(|reads| reads.set(0));
     CLOSES.with(|closes| closes.borrow_mut().clear());
@@ -241,4 +245,36 @@ fn a_timed_out_pending_read_releases_the_stream_without_replaying_its_handle() {
         [(71, Ticket::NONE)],
         "one synchronous stream release, independent of the pending service handle"
     );
+}
+
+#[test]
+fn a_timed_out_pending_read_releases_the_stream_without_replaying_its_handle() {
+    timed_out_pending_read_release(false);
+}
+
+#[test]
+fn a_failed_close_is_logged_not_swallowed() {
+    #[derive(Clone, Default)]
+    struct Log(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for Log {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let log = Log::default();
+    let writer = log.clone();
+    let capture = tracing_subscriber::fmt()
+        .without_time()
+        .with_ansi(false)
+        .with_max_level(tracing::Level::WARN)
+        .with_writer(move || writer.clone())
+        .finish();
+    tracing::subscriber::with_default(capture, || timed_out_pending_read_release(true));
+    let text = String::from_utf8(log.0.lock().unwrap().clone()).unwrap();
+    assert!(text.contains("close-failed"), "{text}");
+    assert!(text.contains("close refused"), "{text}");
 }

@@ -32,6 +32,11 @@ fn integers_take_their_minimal_twos_complement() {
         (-128, vec![0x80]),
         (-129, vec![0xff, 0x7f]),
         (i64::from(i32::MAX), vec![0x7f, 0xff, 0xff, 0xff]),
+        (
+            i64::MAX,
+            vec![0x7f, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        ),
+        (i64::MIN, vec![0x80, 0, 0, 0, 0, 0, 0, 0]),
     ] {
         assert_eq!(int_content(v), bytes, "{v}");
         assert_eq!(int_value(&bytes), Ok(v), "{v}");
@@ -138,4 +143,11 @@ fn the_inbound_cap_is_sixteen_mib_from_the_header() {
     assert!(BerError::TooLarge(u64::from(cap) + 1)
         .to_string()
         .contains("16 MiB inbound cap"));
+}
+
+/// The over-budget text names the budget it is derived from.
+#[test]
+fn the_over_budget_text_states_the_decode_budget() {
+    let want = format!("{} MiB", crate::codec::DECODE_BUDGET / (1024 * 1024));
+    assert!(BerError::OverBudget.to_string().contains(&want));
 }

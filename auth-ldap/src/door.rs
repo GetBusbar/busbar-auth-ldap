@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! THE DOOR: the LDAP module on the auth kind's table (`busbar_contract::abi::auth`, v3). LDAP is a
+//! THE DOOR: the LDAP module on the auth kind's table (`busbar_contract::abi::auth`, v3).
+//! Login uses the module's need ([`LdapModule::need`]): [`NEED`] or [`NEED_ANCHORED`] when
+//! `ca_cert_pem` is set; [`NEEDS`] declares both.
 
 use std::collections::HashMap;
 use std::marker::PhantomData;

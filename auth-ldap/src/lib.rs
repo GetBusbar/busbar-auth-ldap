@@ -9,7 +9,7 @@
 //!
 //! 1. A dev types username + password on the hosted login page.
 //! 2. The core calls the door's `complete_login` ([`door`]) with those credentials.
-//! 3. The module asks the host connector for a stream on its declared need, secured by the
+//! 3. The module asks the host connector for a stream on the module's need ([`LdapModule::need`]), secured by the
 //!    connector for `ldaps://` or after the StartTLS extended operation, and performs a **BIND**
 //!    with the user's DN + password over it ([`codec`], [`conversation`]).
 //! 4. On a successful bind it reads the user's group memberships (the `group_attr`
@@ -116,13 +116,12 @@ pub struct LdapConfig {
     /// template in direct-bind mode. Example: `uid={username},ou=people,dc=corp,dc=example`. An
     /// Active Directory UPN login (`{username}@corp.example`) goes through `user_search_filter`.
     ///
-    /// Mutually informative with `user_search_filter`: if a search filter is set, the module does
+    /// Mutually exclusive in effect with `user_search_filter`: if a search filter is set, the module does
     /// search-then-bind (bind as `bind_service_dn`, find the user, bind as the found DN) instead.
     pub bind_dn_template: String,
 
-    /// The search base for the search-then-bind user lookup. Groups are read on the user's DN.
-    /// For example,
-    /// `dc=corp,dc=example`.
+    /// The search base of the search-then-bind user lookup (used with `user_search_filter`; the
+    /// group read itself is a base-scope read of the user's own DN). e.g. `dc=corp,dc=example`.
     pub base_dn: String,
 
     /// The attribute on the user entry that lists group memberships. Default `memberOf` (AD and most
@@ -221,7 +220,8 @@ impl LdapModule {
         if cfg.user_search_filter.is_some() && cfg.bind_service_password.is_none() {
             return Err("secrets: `bind_service_password` is not set".to_string());
         }
-
+        // An empty search base is a valid one (the AD Global Catalog, OpenLDAP's
+        // `olcDefaultSearchBase` serve a search from the root DSE), so it is accepted, but said.
         if cfg.user_search_filter.is_some() && cfg.base_dn.trim().is_empty() {
             tracing::info!(
                 module = "ldap",
@@ -230,6 +230,13 @@ impl LdapModule {
                  (base \"\")"
             );
         }
+        // The opt-out is honoured, but never SILENTLY. An operator who copies a lab config into
+        // production otherwise sends every end-user password in cleartext for the life of the
+        // deployment with nothing anywhere saying so — the setting is a one-line boolean and the
+        // consequence is invisible.
+        //
+        // This is a `tracing` call; the SDK forwards this plugin's dispatcher into the host log
+        // sink, so it reaches the operator's logs.
         if is_insecure_transport(&cfg.url, cfg.start_tls) {
             tracing::warn!(
                            module = "ldap",
@@ -312,7 +319,12 @@ fn check_settings(cfg: &LdapConfig) -> Result<(), String> {
     if cfg.timeout_secs == 0 {
         refuse("timeout_secs", "must be at least 1");
     } else if cfg.timeout_secs > MAX_TIMEOUT_SECS {
-        refuse("timeout_secs", "must be at most 120");
+        // Each operation of a login waits up to this long, and a login runs several: unbounded,
+        // a hung directory pins every in-flight login slot for as long as it is set to.
+        refuse(
+            "timeout_secs",
+            &format!("must be at most {MAX_TIMEOUT_SECS}"),
+        );
     }
 
     if cfg.group_attr.trim().is_empty() {

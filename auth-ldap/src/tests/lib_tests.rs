@@ -133,7 +133,8 @@ fn new_refuses_a_zero_timeout() {
     assert!(LdapModule::new(cfg).is_err());
 }
 
-/// A blank `group_attr` reads back no groups, so every login would bind no roles; refused at boot.
+/// L7: `timeout_secs` bounds each directory operation, and a login runs several; an unbounded one
+/// lets a hung directory pin every in-flight slot. It is capped at 120 seconds, by name.
 #[test]
 fn new_refuses_a_timeout_past_120_seconds() {
     let mut cfg = base_cfg();
@@ -145,6 +146,7 @@ fn new_refuses_a_timeout_past_120_seconds() {
     assert!(e.starts_with("settings.timeout_secs: "), "{e}");
 }
 
+/// A blank `group_attr` reads back no groups, so every login would bind no roles; refused at boot.
 #[test]
 fn new_refuses_an_empty_group_attr() {
     for attr in ["", "  "] {
@@ -288,6 +290,32 @@ fn loopback_ldap_allowed() {
     }
 }
 
+/// Hosts that only LOOK like loopback are remote: the guard is an exact match, not a prefix match.
+/// Matching is case-insensitive, as documented.
+#[test]
+fn loopback_lookalike_hosts_are_treated_as_remote() {
+    for host in [
+        "localhost.evil.example",
+        "127.0.0.1.evil.example",
+        "127.0.0.2",
+        "0.0.0.0",
+        "localhost6",
+    ] {
+        let mut cfg = base_cfg();
+        cfg.url = format!("ldap://{host}:389");
+        assert!(
+            LdapModule::new(cfg).is_err(),
+            "plaintext ldap:// to {host} must be refused"
+        );
+    }
+    let mut cfg = base_cfg();
+    cfg.url = "ldap://LOCALHOST/".to_string();
+    assert!(
+        LdapModule::new(cfg).is_ok(),
+        "loopback matches case-insensitively"
+    );
+}
+
 /// A userinfo component must not let a loopback-looking prefix bypass the plaintext guard.
 #[test]
 fn userinfo_loopback_prefix_is_treated_as_remote() {
@@ -419,6 +447,17 @@ fn bind_dn_rejects_injection_username() {
     }
 }
 
+/// Control characters outside the explicit forbidden set (tab, BEL, DEL, C1) are still refused.
+#[test]
+fn bind_dn_rejects_other_control_characters() {
+    for bad in ["alice\tx", "al\u{7}ice", "alice\u{7f}", "a\u{85}b"] {
+        assert!(
+            validate_username(bad).is_err(),
+            "username {bad:?} should be rejected"
+        );
+    }
+}
+
 /// RFC 4514 §2.4 must-escape positions: a leading or trailing space and a leading '#'. A lenient
 #[test]
 fn bind_dn_rejects_rfc4514_must_escape_positions() {
@@ -541,6 +580,32 @@ fn first_cn_unescapes_hex_pairs() {
     );
 }
 
+/// RFC 4514: an escaped trailing space is part of the value; only unescaped whitespace is trimmed.
+#[test]
+fn first_cn_keeps_an_escaped_trailing_space() {
+    assert_eq!(
+        first_cn("CN=ops\\ ,OU=Groups,DC=corp").as_deref(),
+        Some("ops ")
+    );
+    assert_eq!(
+        roles_from_group_dns(
+            &["CN=Admins\\ ,OU=Groups,DC=corp".to_string()],
+            RoleFrom::Cn
+        ),
+        vec!["Admins ".to_string()]
+    );
+    // An escaped backslash then a real (unescaped) space: the space is trimmed.
+    assert_eq!(first_cn("CN=a\\\\ ,DC=x").as_deref(), Some("a\\"));
+    assert_eq!(first_cn("CN=  eng  ,DC=x").as_deref(), Some("eng"));
+}
+
+/// A group DN whose CN is empty falls back to the whole trimmed DN, never silently dropped.
+#[test]
+fn an_empty_cn_falls_back_to_the_whole_dn() {
+    let roles = roles_from_group_dns(&["CN=,OU=Ops,DC=corp".to_string()], RoleFrom::Cn);
+    assert_eq!(roles, vec!["CN=,OU=Ops,DC=corp".to_string()]);
+}
+
 #[test]
 fn roles_cn_mode_maps_and_dedups() {
     let dns = vec![
@@ -551,6 +616,26 @@ fn roles_cn_mode_maps_and_dedups() {
     ];
     let roles = roles_from_group_dns(&dns, RoleFrom::Cn);
     assert_eq!(roles, vec!["engineers".to_string(), "sre".to_string()]);
+}
+
+/// A blank or CN-less-empty memberOf value yields no role; Dn mode trims and de-duplicates.
+#[test]
+fn roles_drop_blank_values_and_dn_mode_trims_and_dedups() {
+    let blank = vec!["  ".to_string(), String::new()];
+    assert!(roles_from_group_dns(&blank, RoleFrom::Cn).is_empty());
+    assert!(roles_from_group_dns(&blank, RoleFrom::Dn).is_empty());
+    // An empty CN falls back to the whole trimmed value, never an empty role.
+    assert_eq!(
+        roles_from_group_dns(&["CN=,DC=x".to_string()], RoleFrom::Cn),
+        vec!["CN=,DC=x".to_string()]
+    );
+    assert_eq!(
+        roles_from_group_dns(
+            &[" CN=A,DC=x ".to_string(), "cn=a,dc=x".to_string()],
+            RoleFrom::Dn
+        ),
+        vec!["cn=a,dc=x".to_string()]
+    );
 }
 
 /// The default `cn` mode keeps the directory's case, exactly as v1.0.3 (busbar 1.5.5) did. A 1.5.5
@@ -653,6 +738,8 @@ struct FakeLdap {
     group_values: Vec<String>,
     /// The attribute name under which `group_values` are returned.
     group_attr: String,
+    /// Further attribute descriptions returned on the group read, beside `group_values`.
+    extra_attrs: Vec<(String, Vec<String>)>,
     /// Every bind DN attempted, in order.
     binds: Vec<String>,
     /// Every search filter the module actually sent, in order, so the RFC 4515 escaping is tested
@@ -741,6 +828,9 @@ impl LdapBackend for FakeLdap {
                 let mut attrs = HashMap::new();
                 if !self.group_values.is_empty() {
                     attrs.insert(self.group_attr.clone(), self.group_values.clone());
+                }
+                for (k, v) in &self.extra_attrs {
+                    attrs.insert(k.clone(), v.clone());
                 }
                 Ok(vec![DirEntry {
                     dn: self
@@ -999,6 +1089,68 @@ fn a_ranged_group_attribute_is_read_and_its_truncation_warned() {
     assert!(!cap.contains("truncated"), "{:?}", cap.messages());
 }
 
+/// An entry may carry several descriptions of the group attribute's type (`memberOf` and
+/// `memberOf;x-opt`, two spellings). Every one is read, in a fixed order, so the roles never vary
+/// from one login to the next, and each ranged description is warned.
+#[test]
+fn every_description_of_the_group_attribute_is_read_deterministically() {
+    use crate::diagnostics::Diagnostics;
+    let m = LdapModule::new(base_cfg()).unwrap();
+    for _ in 0..40 {
+        let mut fake = FakeLdap {
+            group_values: vec!["CN=a,DC=x".to_string()],
+            group_attr: "memberOf".to_string(),
+            extra_attrs: vec![
+                ("memberOf;x-opt".to_string(), vec!["CN=b,DC=x".to_string()]),
+                (
+                    "MEMBEROF;range=0-1499".to_string(),
+                    vec!["CN=c,DC=x".to_string()],
+                ),
+            ],
+            ..Default::default()
+        };
+        let cap = Diagnostics::default();
+        let p = tracing::subscriber::with_default(cap.subscriber(), || {
+            m.bind_and_identify_on(&mut fake, "alice", "pw")
+        })
+        .expect("binds");
+        assert_eq!(
+            p.roles,
+            vec!["c".to_string(), "a".to_string(), "b".to_string()],
+            "all matching descriptions are read, in description order"
+        );
+        assert!(cap.contains("truncated"), "{:?}", cap.messages());
+        assert!(
+            !cap.contains("group attribute is absent"),
+            "{:?}",
+            cap.messages()
+        );
+    }
+}
+
+/// The attribute description and range the directory supplies are far-end text: a hostile one
+/// (newline, ESC) never reaches the range-truncated warn raw.
+#[test]
+fn a_hostile_group_description_is_escaped_in_the_range_warning() {
+    let m = LdapModule::new(base_cfg()).unwrap();
+    let mut fake = FakeLdap {
+        group_values: vec!["CN=a,DC=x".to_string()],
+        group_attr: "memberOf;range=0-1\n<forged line>\u{1b}[2J".to_string(),
+        ..Default::default()
+    };
+    let text = logged_text(|| {
+        m.bind_and_identify_on(&mut fake, "alice", "pw")
+            .expect("binds");
+    });
+    assert!(text.contains("range-truncated"), "{text:?}");
+    assert!(
+        !text.contains('\u{1b}') && !text.contains("0-1\n"),
+        "the description reached the log raw: {text:?}"
+    );
+}
+
+/// M5: a user entry that carries no group attribute at all logs in with no roles, and says so at
+/// warn (a misnamed `group_attr` is otherwise a silent no-roles login for everyone).
 #[test]
 fn an_absent_group_attribute_is_warned() {
     use crate::diagnostics::Diagnostics;
@@ -1355,7 +1507,7 @@ fn userinfo_cfg(url: &str, allow_insecure: bool) -> LdapConfig {
 }
 
 /// Every message and field logged while `f` runs.
-fn logged_text(f: impl FnOnce()) -> String {
+pub(crate) fn logged_text(f: impl FnOnce()) -> String {
     use std::sync::{Arc, Mutex};
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Id, Record};
@@ -1692,7 +1844,7 @@ fn distinct_invalid_group_name_bytes_do_not_merge_into_one_role() {
 fn a_group_value_mapping_to_an_empty_role_is_named() {
     let cap = crate::diagnostics::Diagnostics::default();
     let roles = tracing::subscriber::with_default(cap.subscriber(), || {
-        crate::groups::roles_from_group_dns(&["CN=,OU=Groups".into()], RoleFrom::Cn)
+        crate::groups::roles_from_group_dns(&["   ".into()], RoleFrom::Cn)
     });
     assert!(roles.is_empty());
     assert_eq!(cap.count("empty-group-role"), 1, "{:?}", cap.messages());

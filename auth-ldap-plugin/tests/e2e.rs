@@ -670,4 +670,9 @@ fn ldaps_with_a_private_ca_verifies() {
         503,
         "no ca_cert_pem: TLS verification fails as an IdP outage"
     );
+    let body = refused.text().unwrap_or_default();
+    assert!(
+        !body.contains("ldap:uid=alice"),
+        "no ca_cert_pem: no key is minted: {body}"
+    );
 }

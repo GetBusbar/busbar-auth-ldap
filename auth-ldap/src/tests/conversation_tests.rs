@@ -510,7 +510,9 @@ fn the_signed_differences_fail_closed_as_an_outage() {
     let malformed = message(1, ber::element(0x61, &ber::element(0x04, b"")));
     let overrun = message(1, vec![0x61, 0x7f, 0x0a, 0x01, 0x00]);
     let past_cap = [&[0x30, 0x84][..], &(16_u32 * 1024 * 1024).to_be_bytes()[..]].concat();
-    for reply in [malformed, overrun, past_cap] {
+    // A well-formed reply of the wrong type to the BIND (message 1) is never a bind result, rc 0 or
+    // not: it must not authenticate.
+    for reply in [malformed, overrun, past_cap, done(1, 0), extended(1, 0)] {
         let mut dir = Directory::new(vec![reply.clone()]).held();
         assert_eq!(login(&m, &mut dir, "pw").0, Login::Outage, "{reply:02x?}");
     }
@@ -609,6 +611,17 @@ fn an_endpoint_reads_its_target_and_security() {
     }
     assert!(Endpoint::parse("ldap://h:99999", false).is_err());
     assert!(Endpoint::parse("h:389", false).is_err());
+}
+
+/// Bytes after a bracketed IPv6 host that are not `:port` are a malformed URL, not the default port.
+#[test]
+fn a_bracketed_ipv6_host_followed_by_junk_is_refused() {
+    assert_eq!(
+        Endpoint::parse("ldaps://[fd00::5]3269", false),
+        Err("url parse error: invalid port number".to_string())
+    );
+    assert!(Endpoint::parse("ldaps://[fd00::5]:3269", false).is_ok());
+    assert!(Endpoint::parse("ldaps://[fd00::5]", false).is_ok());
 }
 
 /// An operation gives up `timeout_secs` after it begins: a directory that never answers is an

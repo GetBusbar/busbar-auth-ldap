@@ -162,6 +162,7 @@ pub const fn rc_name(rc: u32) -> &'static str {
 const SHOWN_TEXT: usize = 128;
 
 /// The directory's text `t` as a result shows it: its first [`SHOWN_TEXT`] characters (then `...`),
+/// escaped (`\n`, `\u{1b}`, ...) so no newline or control character reaches a log line raw.
 pub(crate) fn shown(t: &str) -> String {
     let mut out: String = t
         .chars()
@@ -293,6 +294,7 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
         let (mut vals, _) = ber::expect(rest, ber::SET, "an attribute without its values")?;
         let values = attrs.entry(name.clone()).or_default();
         let mut dropped = 0_usize;
+        let mut skipped = 0_usize;
         while !vals.is_empty() {
             let (v, next) = ber::read(vals)?;
             vals = next;
@@ -304,8 +306,9 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
                     charge(budget, s.len())?;
                     values.push(s.to_owned());
                 }
-
-                Ok(_) => {}
+                // Past the cap a value is only counted (warned once per attribute below); the
+                // module still sees `MAX_VALUES_KEPT` and applies its own cap.
+                Ok(_) => skipped += 1,
                 Err(_) => dropped += 1,
             }
         }
@@ -318,6 +321,16 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
                            kept = values.len(),
                            "ldap attribute values that are not UTF-8 were dropped"
                        );
+        }
+        if skipped > 0 {
+            tracing::warn!(
+                module = "ldap",
+                reason = "over-cap",
+                attribute = %shown(&name),
+                kept = values.len(),
+                skipped,
+                "ldap attribute values past the per-attribute cap were skipped"
+            );
         }
     }
     Ok(Entry { dn, attrs })
