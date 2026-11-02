@@ -660,15 +660,21 @@ mod reached_clock_callbacks {
     use busbar_contract::abi::sdk::life::Held;
     use busbar_contract::abi::sdk::test_support::zeroed;
     use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
+    use busbar_contract::conn::{
+        ConnError, ConnId, ConnSlab, Conns, DeclaredConns, InstanceId, NeedId, OpenDesc, Piece,
+        PieceKind, Ticket as ConnTicket,
+    };
     use busbar_contract::services::{
         Caller, DiskDest, HookAsk, HostServices, Later, NestAsk, Ran, Reading, RecordsList,
         Snapshot, Stored, TrustKeyRef, UNSERVED,
     };
+    use busbar_contract::transport::ConnFacts;
     use busbar_plugin_loader::dispatch::kinds::auth::Auth;
     use busbar_plugin_loader::dispatch::{
         load_linked, Bind, ConnTable, DispatchConfig, Dispatcher, Frame, LinkedRow, NoSink,
     };
-    use std::sync::Arc;
+    use std::net::TcpStream;
+    use std::sync::{Arc, Mutex};
 
     thread_local! {
         static PROBE: RefCell<Option<Sender<Sender<bool>>>> = const { RefCell::new(None) };
@@ -676,7 +682,10 @@ mod reached_clock_callbacks {
         static RETAINED: Cell<bool> = const { Cell::new(false) };
     }
 
-    struct Clock;
+    #[derive(Default)]
+    struct Clock {
+        streams: ConnSlab<Mutex<TcpStream>>,
+    }
     impl HostServices for Clock {
         fn now(&self) -> Reading {
             let unlocked = PROBE.with(|probe| {
@@ -881,6 +890,169 @@ mod reached_clock_callbacks {
         }
     }
 
+    impl Conns for Clock {
+        fn open(
+            &self,
+            owner: InstanceId,
+            need: NeedId,
+            desc: &OpenDesc<'_>,
+        ) -> Result<ConnId, ConnError> {
+            use std::net::ToSocketAddrs;
+            self.streams.check_need(owner, need)?;
+            let host = desc
+                .target
+                .rsplit_once(':')
+                .map(|(host, _)| host)
+                .ok_or(ConnError::Refused)?;
+            if !host.eq_ignore_ascii_case("localhost")
+                && !host
+                    .trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+            {
+                return Err(ConnError::Refused);
+            }
+            let address = desc
+                .target
+                .to_socket_addrs()
+                .map_err(|_| ConnError::Refused)?
+                .find(|at| {
+                    at.ip().is_loopback()
+                        && (desc.within.is_empty() || desc.within.contains(&at.ip()))
+                })
+                .ok_or(ConnError::Refused)?;
+            let timeout = if desc.timeout_ms == 0 {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_millis(desc.timeout_ms)
+            };
+            let tcp = std::net::TcpStream::connect_timeout(&address, timeout)
+                .map_err(|_| ConnError::Closed)?;
+            tcp.set_read_timeout(Some(Duration::from_millis(5)))
+                .map_err(|_| ConnError::Closed)?;
+            tcp.set_write_timeout(Some(Duration::from_millis(5)))
+                .map_err(|_| ConnError::Closed)?;
+            self.streams.insert(owner, need, Mutex::new(tcp))
+        }
+        fn write(
+            &self,
+            owner: InstanceId,
+            conn: ConnId,
+            bytes: &[u8],
+            _: bool,
+            _: bool,
+        ) -> Result<usize, ConnError> {
+            use std::io::Write;
+            let (_, tcp) = self.streams.get(owner, conn)?;
+            let mut tcp = tcp.lock().unwrap();
+            tcp.write(bytes).map_err(|_| ConnError::Closed)
+        }
+        fn read(
+            &self,
+            owner: InstanceId,
+            conn: ConnId,
+            _: ConnTicket,
+            buf: &mut [u8],
+        ) -> Result<Piece, ConnError> {
+            use std::io::Read;
+            let (_, tcp) = self.streams.get(owner, conn)?;
+            let len = tcp
+                .lock()
+                .unwrap()
+                .read(buf)
+                .map_err(|_| ConnError::Closed)?;
+            Ok(Piece {
+                kind: if len == 0 {
+                    PieceKind::Completion
+                } else {
+                    PieceKind::Body
+                },
+                stream: busbar_contract::ids::StreamId(0),
+                len,
+                end: len == 0,
+                status: None,
+                status_code: None,
+                reason: None,
+                status_namespace: None,
+                declared_len: None,
+                fault: None,
+                retry_after_secs: None,
+            })
+        }
+        fn wait(
+            &self,
+            owner: InstanceId,
+            set: &[ConnId],
+            _: ConnTicket,
+        ) -> Result<usize, ConnError> {
+            for conn in set {
+                self.streams.get(owner, *conn)?;
+            }
+            Err(ConnError::Refused)
+        }
+        fn facts(&self, owner: InstanceId, conn: ConnId) -> Result<ConnFacts, ConnError> {
+            self.streams.get(owner, conn)?;
+            Ok(ConnFacts::default())
+        }
+        fn close(&self, owner: InstanceId, conn: ConnId) -> Result<(), ConnError> {
+            let tcp = self.streams.remove(owner, conn)?;
+            let tcp = tcp.lock().unwrap();
+            tcp.shutdown(std::net::Shutdown::Both)
+                .map_err(|_| ConnError::Closed)
+        }
+    }
+    impl DeclaredConns for Clock {
+        fn serves_scheme(&self, scheme: &str) -> bool {
+            scheme == "tcp"
+        }
+        fn declare(
+            &self,
+            owner: InstanceId,
+            need: NeedId,
+            spec: &busbar_contract::abi::mechanism::rendering::ReadNeed,
+            target: Option<&str>,
+            trust: Option<&str>,
+        ) -> Result<(), ConnError> {
+            if spec.direction != DIRECTION_OUTBOUND
+                || spec.transport != "tcp"
+                || !spec.auth.is_empty()
+                || !spec.target_from.is_empty()
+                || !spec.trust_from.is_empty()
+                || target.is_some()
+                || trust.is_some()
+            {
+                return Err(ConnError::Refused);
+            }
+            self.streams.declare(owner, need);
+            Ok(())
+        }
+        fn declared(&self, owner: InstanceId, need: NeedId) -> Option<Result<(), ConnError>> {
+            self.streams.check_need(owner, need).ok().map(|()| Ok(()))
+        }
+        fn open_request(
+            &self,
+            owner: InstanceId,
+            need: NeedId,
+            desc: &OpenDesc<'_>,
+            secure: bool,
+            dial_timeout_ms: u64,
+        ) -> Result<ConnId, ConnError> {
+            let mut dial = desc.clone();
+            if dial_timeout_ms != 0 {
+                dial.timeout_ms = if desc.timeout_ms == 0 {
+                    dial_timeout_ms
+                } else {
+                    dial_timeout_ms.min(desc.timeout_ms)
+                };
+            }
+            Conns::open_with_security(self, owner, need, &dial, secure)
+        }
+        fn forget(&self, owner: InstanceId) {
+            self.streams.forget(owner);
+        }
+    }
+
     struct Armed;
     impl Drop for Armed {
         fn drop(&mut self) {
@@ -960,8 +1132,8 @@ mod reached_clock_callbacks {
     fn both_reached_cache_clock_callbacks_run_without_the_reached_lock() {
         SAMPLES.with(|samples| samples.borrow_mut().clear());
         RETAINED.with(|retained| retained.set(false));
-        let host = Arc::new(Clock);
-        let d = Dispatcher::with_services(DispatchConfig::default(), host);
+        let host = Arc::new(Clock::default());
+        let d = Dispatcher::with_services(DispatchConfig::default(), host.clone());
         let p = load_linked::<Auth>(
             &LinkedRow::of_macro(fixture::MACRO_DOOR).unwrap(),
             Bind {
@@ -969,7 +1141,7 @@ mod reached_clock_callbacks {
                 max_inflight_cap: 8,
                 sink: Arc::new(NoSink),
                 dispatcher: d.adopter(),
-                conns: ConnTable::Probe,
+                conns: ConnTable::Host(host),
             },
         )
         .unwrap();
