@@ -976,8 +976,14 @@ fn network_bind(d: &Dispatcher) -> Bind {
 fn a_changed_statement_is_refused_linked_and_dropped() {
     use busbar_plugin_loader::dispatch::LoadError;
     let d = Dispatcher::new(DispatchConfig::default());
-    let mut statement = rendering_of(busbar_auth_ldap::door::door).unwrap();
-    *statement.last_mut().unwrap() ^= 1;
+    let honest = rendering_of(busbar_auth_ldap::door::door).unwrap();
+    let statement = rendering_of(another_version_door)
+        .expect("the actual LDAP door with another version renders");
+    rendering::read(&statement).expect("the mismatched Statement remains valid rendering");
+    assert_ne!(
+        statement, honest,
+        "only a different valid Statement is refused"
+    );
     let row = LinkedRow {
         statement: statement.clone(),
         door: busbar_plugin_loader::dispatch::load::raw(busbar_auth_ldap::door::door),
@@ -1449,7 +1455,7 @@ extern "C" fn another_version_door() -> &'static Door {
     let real = busbar_auth_ldap::door::door();
     // SAFETY: real's Statement points at immutable static product data; copy it and change only version.
     let mut statement = unsafe { *real.statement() };
-    statement.version = AbiStr::of_bytes(b"0.0.0-wrong-version");
+    statement.version = AbiStr::of_bytes(b"99.0.0");
     let statement = Box::leak(Box::new(statement));
     // SAFETY: the replacement Statement and all original door pointers remain static.
     Box::leak(Box::new(unsafe {
