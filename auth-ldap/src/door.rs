@@ -350,7 +350,9 @@ impl Release {
     /// it gives up (a close never pends); what it answers is not read.
     fn through(host: Host) -> Self {
         Self::new(move |stream| {
-            let _ = host.connector(Ticket::NONE).close(stream);
+            if let Poll::Ready(Err(e)) = host.connector(Ticket::NONE).close(stream) {
+                warn_close_failed(&e.to_string());
+            }
         })
     }
 }
@@ -370,9 +372,22 @@ impl Drop for Run {
 /// the stream is closed; PENDING, it stays for [`Release`] when the run drops (the op is over, so
 /// no wake will re-drive it).
 fn closed(run: &mut Run, answer: Poll<Result<(), String>>) {
+    if let Poll::Ready(Err(e)) = &answer {
+        warn_close_failed(e);
+    }
     if answer.is_ready() {
         run.stream = None;
     }
+}
+
+/// A stream close the host connector answered with an error: logged, not retried.
+fn warn_close_failed(error: &str) {
+    tracing::warn!(
+        module = "ldap",
+        reason = "close-failed",
+        error = %error,
+        "ldap stream close failed; the stream is not closed again"
+    );
 }
 
 /// The host connector's stream as the conversation's [`Wire`], for one entry of the op: its

@@ -1450,7 +1450,7 @@ fn userinfo_cfg(url: &str, allow_insecure: bool) -> LdapConfig {
 }
 
 /// Every message and field logged while `f` runs.
-fn logged_text(f: impl FnOnce()) -> String {
+pub(crate) fn logged_text(f: impl FnOnce()) -> String {
     use std::sync::{Arc, Mutex};
     use tracing::field::{Field, Visit};
     use tracing::span::{Attributes, Id, Record};

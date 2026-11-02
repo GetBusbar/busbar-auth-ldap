@@ -495,6 +495,31 @@ fn a_given_up_or_pending_close_releases_the_stream() {
     );
 }
 
+/// A finish-path close the host connector answered with an error is logged (the stream is still
+/// treated as closed, and not retried).
+#[test]
+fn a_failed_close_is_logged_not_swallowed() {
+    use std::task::Poll;
+    let module = std::sync::Arc::new(LdapModule::from_settings(MINIMAL.as_bytes()).unwrap());
+    let mut run = Run {
+        module,
+        username: None,
+        password: None,
+        conv: crate::conversation::Conversation::new(),
+        stream: Some(5),
+        at: 0,
+        release: None,
+    };
+    let text = crate::tests::logged_text(|| {
+        closed(&mut run, Poll::Ready(Err("close refused".to_string())));
+    });
+    assert!(run.stream.is_none(), "an answered close is not retried");
+    assert!(
+        text.contains("close-failed") && text.contains("close refused"),
+        "the close failure reaches the log: {text:?}"
+    );
+}
+
 /// THE REFUSAL LINES (auth standard S2): every settings refusal is one or more lines in the
 /// contract's instance-relative form (`settings[.<key>]: <reason>`, joined by `\n`, holding
 /// `check_validate_refusal`), the same at `validate` and `open`, and never a value.
