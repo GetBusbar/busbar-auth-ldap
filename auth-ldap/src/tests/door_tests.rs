@@ -1155,16 +1155,17 @@ mod reached_clock_callbacks {
         open.input.secrets_len = secret.len();
         open.input.generation = 1;
         assert_eq!(p.call(life_slot::OPEN, &mut open).outcome, Outcome::Ready);
-        let ticket = d.mint(0).expect("cache call ticket");
+        let ticket = d.driver(&p, 0).expect("registered cache driver ticket");
         let mut input: Frame<CompleteLoginIn, IdentifyOut> = Frame::new(zeroed(), zeroed());
         let answer = p.call_inline(ticket, false, auth_slot::COMPLETE_LOGIN, &mut input);
-        d.recycle(ticket);
         let mut close: Frame<InHead, OutHead> = Frame::new(zeroed(), zeroed());
         assert_eq!(p.call(life_slot::CLOSE, &mut close).outcome, Outcome::Ready);
         assert_eq!(
             answer.outcome,
             Outcome::Failed,
-            "the empty identity buffer requires a re-call"
+            "the empty identity buffer requires a re-call; crossings={} error={}",
+            p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst),
+            String::from_utf8_lossy(answer.error.as_deref().unwrap_or_default())
         );
         assert!(input.out.needed_bytes > 0, "the real identity writer ran");
         assert!(
@@ -1176,5 +1177,7 @@ mod reached_clock_callbacks {
             [true, true],
             "the take and keep clock callbacks both observed the reached map unlocked"
         );
+        drop(answer);
+        d.recycle(ticket);
     }
 }
