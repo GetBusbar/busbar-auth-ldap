@@ -34,7 +34,11 @@ pub fn start(
     let upstream = upstream.to_owned();
     std::thread::spawn(move || {
         for tcp in listener.incoming() {
-            let tcp = tcp.expect("accept the LDAP TLS connection");
+            // A client that resets before its accept (a timed-out dial) costs only its own
+            // connection: the relay is shared by every test in the binary, so it keeps serving.
+            let Ok(tcp) = tcp else {
+                continue;
+            };
             let tls = tls.clone();
             let upstream = upstream.clone();
             std::thread::spawn(move || relay(tcp, &tls, preamble, &upstream));

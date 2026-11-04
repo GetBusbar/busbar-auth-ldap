@@ -2,11 +2,23 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! BER, both ways: minimal lengths and integers as 1.5.5's encoder wrote them, and the reader's
+//! three fail-closed rules (a malformed element, an overrunning nested length, the 16 MiB cap).
 
 use super::{
-    element, expect, frame, int_content, int_value, items, read, BerError, INBOUND_CAP,
-    OCTET_STRING, SEQUENCE,
+    element, expect, frame, int_content, int_value, read, BerError, Tlv, INBOUND_CAP, OCTET_STRING,
+    SEQUENCE,
 };
+
+/// Every element of a constructed element's `content`, in order.
+fn items(mut content: &[u8]) -> Result<Vec<Tlv<'_>>, BerError> {
+    let mut out = Vec::new();
+    while !content.is_empty() {
+        let (t, rest) = read(content)?;
+        out.push(t);
+        content = rest;
+    }
+    Ok(out)
+}
 
 #[test]
 fn lengths_take_their_minimal_form() {

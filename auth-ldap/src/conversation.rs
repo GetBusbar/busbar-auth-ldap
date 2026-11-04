@@ -2,6 +2,19 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! One login's conversation with the directory, resumable: the codec's bytes ([`crate::codec`])
+//! over a byte stream someone else owns ([`Wire`]: in the plugin, the host connector's raw stream
+//! on the declared need; the plugin opens no socket, dials, binds or does TLS).
+//!
+//! A wire service may answer PENDING. The module's bind/search logic ([`crate::LdapModule`]) then
+//! stops, the op answers PENDING, and on the wake the logic runs again from the top. The
+//! [`Conversation`] makes that replay cheap and exact: every directory operation that completed
+//! answers its kept result without touching the wire, and the one in progress resumes where it
+//! stopped (the request half sent, the reply half read). Nothing is ever sent twice.
+//!
+//! The connection: `ldap://` is a plain stream; `ldaps://` asks the connector for connection
+//! security before the first byte; `ldap://` with `start_tls` sends the StartTLS extended request
+//! in the clear, reads its answer, then asks the connector to secure the stream
+//! (`upgrade_secure`, the connector's ONE generic mid-stream service).
 
 use std::fmt;
 use std::task::Poll;
@@ -13,6 +26,8 @@ use crate::codec::{self, Message, Reply};
 use crate::{DirEntry, Io, LdapBackend, SearchScope};
 
 /// THE BYTE STREAM a conversation runs over. Every call answers [`Poll::Pending`] when it cannot
+/// finish yet (the caller answers PENDING and is called again on its wake, making the same call
+/// with the same buffer), or its result; an error is the stream's own text.
 pub trait Wire {
     /// Open the stream to `target` (`host:port`).
     fn establish(&mut self, target: &str) -> Poll<Result<(), String>>;
@@ -23,8 +38,10 @@ pub trait Wire {
     /// Read into `buf`: how many bytes arrived; `0` = the far end closed.
     fn read(&mut self, buf: &mut [u8]) -> Poll<Result<usize, String>>;
     /// Write the chip's whole message `w` (a BIND, its password sealed): `Ready(Ok(()))` once all
+    /// of it is taken.
     fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>>;
     /// The stream owner's monotonic clock now, when it offers one: read between the messages of
+    /// one entry of the op, so a directory that answers Ready without end meets its deadline.
     fn now_ns(&mut self) -> Option<u64> {
         None
     }
@@ -54,6 +71,10 @@ pub struct Endpoint {
 
 impl Endpoint {
     /// Read an `ldap://` or `ldaps://` URL (the port defaults to 389 and 636; userinfo, a path
+    /// and a query are ignored). A URL that names no host is refused.
+    ///
+    /// # Errors
+    /// Another scheme, no host, or a bad port.
     pub fn parse(url: &str, start_tls: bool) -> Result<Self, String> {
         let url = url.trim();
         let (scheme, rest) = url
@@ -140,6 +161,8 @@ enum Stage {
 }
 
 /// The operation in progress: its stage, its request bytes and how many went, its message id,
+/// and the entries a search has read so far. A BIND's request is the chip's sealed message, which
+/// the plugin never reads; every other request's bytes are public.
 struct Doing {
     stage: Stage,
     out: Vec<u8>,
@@ -155,6 +178,28 @@ struct Doing {
     read_bytes: usize,
     /// What remains of this operation's decode budget ([`codec::DECODE_BUDGET`]).
     budget: usize,
+    /// How many value warn lines this operation's replies logged ([`codec::MAX_VALUE_WARNS`]).
+    warned: u32,
+}
+
+impl Doing {
+    /// An operation beginning at `stage` with message id `id`: nothing sent or read yet, its whole
+    /// decode budget left.
+    fn new(stage: Stage, id: i32) -> Self {
+        Self {
+            stage,
+            out: Vec::new(),
+            sealed: None,
+            sent: 0,
+            id,
+            entries: Vec::new(),
+            received: 0,
+            references: 0,
+            read_bytes: 0,
+            budget: codec::DECODE_BUDGET,
+            warned: 0,
+        }
+    }
 }
 
 impl fmt::Debug for Doing {
@@ -170,6 +215,7 @@ impl fmt::Debug for Doing {
             .field("references", &self.references)
             .field("read_bytes", &self.read_bytes)
             .field("budget", &self.budget)
+            .field("warned", &self.warned)
             .finish()
     }
 }
@@ -180,12 +226,16 @@ impl fmt::Debug for Doing {
 pub const TIMEOUT: &str = "timeout: deadline has elapsed";
 
 /// How many entries of one search are kept: the module reads the first entry and needs to know
+/// only whether a second exists. Later entries are read and dropped.
 const MAX_ENTRIES_KEPT: usize = 2;
 
 /// The most messages one operation reads. Its deadline is checked between entries of the op, so a
+/// directory that answers Ready forever (entries, or messages for another id) is cut off here. A
+/// group read answers one entry and a user search is refused past two; 1024 is far above any.
 const MAX_MESSAGES: u32 = 1024;
 
 /// The most bytes one operation reads from the directory in all, however many messages carry them:
+/// 16 MiB (one message alone may hold as much: [`ber::INBOUND_CAP`]).
 const OP_BYTES_CAP: usize = 16 * 1024 * 1024;
 
 /// How much one read asks for.
@@ -249,6 +299,7 @@ impl Conversation {
 }
 
 /// The module's [`LdapBackend`] over a [`Wire`], for one entry of the op: operations the
+/// conversation kept answer at once; the one in progress drives the wire.
 pub(crate) struct Over<'a, W: Wire> {
     conv: &'a mut Conversation,
     wire: &'a mut W,
@@ -260,6 +311,7 @@ pub(crate) struct Over<'a, W: Wire> {
 
 impl<'a, W: Wire> Over<'a, W> {
     /// The backend for one entry: `url`/`start_tls` name the directory; `now_ns` is the caller's
+    /// clock (`None` = none) and each operation may wait `timeout_secs` from its own start.
     pub(crate) fn new(
         conv: &'a mut Conversation,
         wire: &'a mut W,
@@ -298,7 +350,7 @@ impl<'a, W: Wire> Over<'a, W> {
 
     /// The operation in progress, begun as `start` when none is.
     fn doing(&mut self, start: impl FnOnce(&mut Conversation) -> Doing) -> Result<(), Io> {
-        let wait = self.timeout_secs.saturating_mul(1_000_000_000);
+        let wait = self.timeout_secs.saturating_mul(crate::NS_PER_SEC);
         if self.conv.doing.is_none() {
             let mut d = start(&mut *self.conv);
             d.read_bytes = self.conv.inbound.len();
@@ -358,6 +410,7 @@ impl<'a, W: Wire> Over<'a, W> {
     }
 
     /// Whether the operation in progress is past its deadline, on the stream owner's clock now
+    /// ([`Wire::now_ns`]) or, with none, the clock this entry began on.
     fn expired(&mut self) -> bool {
         let Some(deadline) = self.conv.deadline_ns else {
             return false;
@@ -369,6 +422,8 @@ impl<'a, W: Wire> Over<'a, W> {
     }
 
     /// The next whole message off the stream. The deadline is checked before every read and every
+    /// message, so a directory that answers Ready without end still meets it; one operation reads
+    /// at most [`OP_BYTES_CAP`] and decodes within its budget.
     fn receive(&mut self) -> Result<Message, Io> {
         loop {
             if self.expired() {
@@ -377,14 +432,16 @@ impl<'a, W: Wire> Over<'a, W> {
             match ber::frame(&self.conv.inbound) {
                 Err(e) => return self.fail(e.to_string()),
                 Ok(Some(n)) => {
-                    let mut budget = self
+                    let (mut budget, mut warned) = self
                         .conv
                         .doing
                         .as_ref()
-                        .map_or(codec::DECODE_BUDGET, |d| d.budget);
-                    let msg = codec::decode_within(&self.conv.inbound[..n], &mut budget);
+                        .map_or((codec::DECODE_BUDGET, 0), |d| (d.budget, d.warned));
+                    let msg =
+                        codec::decode_within(&self.conv.inbound[..n], &mut budget, &mut warned);
                     if let Some(d) = self.conv.doing.as_mut() {
                         d.budget = budget;
+                        d.warned = warned;
                     }
                     self.conv.inbound.drain(..n);
                     return match msg {
@@ -418,6 +475,7 @@ impl<'a, W: Wire> Over<'a, W> {
     }
 
     /// The next message for the operation in progress: an unsolicited notice (id 0) ends it, a
+    /// message for another id is skipped.
     fn reply(&mut self) -> Result<Reply, Io> {
         let want = self.conv.doing.as_ref().map_or(0, |d| d.id);
         loop {
@@ -444,7 +502,8 @@ impl<'a, W: Wire> Over<'a, W> {
         }
     }
 
-    /// Begin a request operation carrying `bytes` (built with its message id).
+    /// Begin a request operation whose bytes `build` makes from its message id; a refusal from
+    /// `build` (a filter that does not encode) fails the operation with its words.
     fn request(&mut self, build: impl FnOnce(i32) -> Result<Vec<u8>, String>) -> Result<(), Io> {
         let mut refused = None;
         self.doing(|c| {
@@ -454,16 +513,8 @@ impl<'a, W: Wire> Over<'a, W> {
                 Vec::new()
             });
             Doing {
-                stage: Stage::Send,
                 out,
-                sealed: None,
-                sent: 0,
-                id,
-                entries: Vec::new(),
-                received: 0,
-                references: 0,
-                read_bytes: 0,
-                budget: codec::DECODE_BUDGET,
+                ..Doing::new(Stage::Send, id)
             }
         })?;
         match refused {
@@ -490,18 +541,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
             Ok(e) => e.clone(),
             Err(e) => return Err(Io::Failed(e.clone())),
         };
-        self.doing(|_| Doing {
-            stage: Stage::Establish,
-            out: Vec::new(),
-            sealed: None,
-            sent: 0,
-            id: 0,
-            entries: Vec::new(),
-            received: 0,
-            references: 0,
-            read_bytes: 0,
-            budget: codec::DECODE_BUDGET,
-        })?;
+        self.doing(|_| Doing::new(Stage::Establish, 0))?;
         loop {
             match self.stage() {
                 Stage::Establish => match wired(self.wire.establish(&endpoint.target)) {
@@ -561,16 +601,8 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
         self.doing(|c| {
             let id = c.next_id();
             Doing {
-                stage: Stage::Send,
-                out: Vec::new(),
                 sealed: Some(SealedWrite::message(password.ldap_simple_bind(id, dn))),
-                sent: 0,
-                id,
-                entries: Vec::new(),
-                received: 0,
-                references: 0,
-                read_bytes: 0,
-                budget: codec::DECODE_BUDGET,
+                ..Doing::new(Stage::Send, id)
             }
         })?;
         if self.stage() == Stage::Send {

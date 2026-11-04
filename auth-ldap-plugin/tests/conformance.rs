@@ -2,6 +2,24 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! **ONE LDAP DOOR, BOTH WAYS IN** — the LDAP module's linked + dropped-in conformance on the auth
+//! kind's door, run against the busbar rev this repo pins (`.busbar-ref`): the linked door and the
+//! built cdylib, each through the one loader. The tail states the login family alone (`CAP_LOGIN`:
+//! LDAP judges no bearer credential, so `verify` is an undeclared op that must answer REFUSED), the
+//! credential login (`begin_login`'s form; `complete_login` SUBMITTED on a ticket, the user's
+//! credential an identity, a wrong password refused), exact crossing counts, and the two loads
+//! answer alike.
+//!
+//! THE HOST: the module's `tcp` need is served by busbar's own connector (`conformance_host`), and
+//! the module asks for STARTTLS (`start_tls`): it sends the StartTLS extended request in the clear,
+//! the test's TLS front answers it ([`start_tls`]) and handshakes with a certificate that chains to
+//! the test CA, the anchors only the HOST's TLS is handed; the module then asks the connector to
+//! secure the stream (`upgrade_secure`), and the front carries the secured connection to the live
+//! directory (`BUSBAR_TEST_LDAP_URL`). So every login proves the module's connection is secured by
+//! the host, verified against the anchors.
+//!
+//! THE RED ARMS: the Statement declares its needs and secret reference and never blocks; a
+//! directory that takes the connection and never answers is an outage at the login's deadline; and
+//! THE BAN ([`net_ban`]): the shipped closure holds no socket crate and no TLS stack.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
@@ -59,6 +77,11 @@ fn load(leg: Leg, binding: Bind) -> Plugin<Auth> {
 }
 
 fn open(p: &Plugin<Auth>, settings: &[u8]) -> Called {
+    open_with(p, settings, &[])
+}
+
+/// `open` handed `secrets` as the kernel resolves the Statement's `secret_refs`.
+fn open_with(p: &Plugin<Auth>, settings: &[u8], secrets: &[Blob]) -> Called {
     let mut f: Frame<OpenIn, OpenOut> = Frame::new(input(), output());
     f.input.settings = Blob {
         ptr: settings.as_ptr(),
@@ -66,6 +89,8 @@ fn open(p: &Plugin<Auth>, settings: &[u8]) -> Called {
         fmt: BLOB_JSON,
         flags: 0,
     };
+    f.input.secrets = secrets.as_ptr();
+    f.input.secrets_len = secrets.len();
     f.input.generation = 1;
     p.call(life::OPEN, &mut f)
 }
@@ -85,6 +110,7 @@ mod net_ban;
 mod sealed_replay;
 
 /// The live directory's address (`BUSBAR_TEST_LDAP_URL`'s authority; the service container's
+/// default when unset).
 fn upstream() -> &'static str {
     static AT: OnceLock<String> = OnceLock::new();
     AT.get_or_init(|| {
@@ -135,6 +161,8 @@ fn first(content: &[u8]) -> Option<(&[u8], &[u8])> {
 }
 
 /// LDAP's cleartext negotiation: the client's StartTLS extended request (an `LDAPMessage` whose
+/// protocol op is `[APPLICATION 23]` naming [`START_TLS_OID`]) answered with a successful
+/// `[APPLICATION 24]` extended response on the same message id; anything else is not a TLS client.
 fn start_tls(tcp: &mut TcpStream) -> bool {
     let Some((0x30, message)) = element(tcp) else {
         return false;
@@ -165,14 +193,20 @@ fn start_tls(tcp: &mut TcpStream) -> bool {
 const ADMIN_DN: &str = "cn=admin,dc=example,dc=org";
 const ADMIN_PW: &str = "adminpassword";
 
-/// The entry the suite logs in as, and its password (`conformance.json`'s login).
+/// The entry the suite logs in as, and its password.
 const USER_DN: &str = "cn=conformance,dc=example,dc=org";
 const USER_PW: &str = "conformance-password";
 
 /// How long the suite waits for a named live directory to take its administrator's bind. A service
+/// container's port answers before its slapd serves (the runner's port proxy accepts at once), and
+/// the image bootstraps its suffix before the first bind succeeds.
 const DIRECTORY_WAIT: Duration = Duration::from_secs(180);
 
 /// The live directory at `at`, bound as its administrator, retried until `until`.
+///
+/// # Errors
+///
+/// The last refusal, naming `at`, once `until` has passed with no bind taken.
 fn admin_bound(at: &str, until: Instant) -> Result<ldap3::LdapConn, String> {
     let settings = ldap3::LdapConnSettings::new().set_conn_timeout(Duration::from_secs(5));
     loop {
@@ -197,6 +231,13 @@ fn admin_bound(at: &str, until: Instant) -> Result<ldap3::LdapConn, String> {
 }
 
 /// The suite's user in the live directory, added once over plaintext LDAP on loopback by the
+/// administrator (`ldap3`, a dev-only client; the module speaks its own codec): the container makes
+/// its base suffix and its root DN, but no entry the module could read groups off. With
+/// `BUSBAR_TEST_LDAP_URL` set the directory must take the administrator's bind within
+/// [`DIRECTORY_WAIT`], or the suite stops here naming it (never a login that reads an outage); the
+/// wait is made once, and every later test that asks is refused at once with the same words. With
+/// no directory named (a macOS runner) it is one try and nothing is added; the live arms, skipped
+/// there, would read an outage.
 fn seed_user() {
     static SEEDED: OnceLock<Result<(), String>> = OnceLock::new();
     let seeded = SEEDED.get_or_init(|| {
@@ -234,6 +275,7 @@ fn seed_user() {
 }
 
 /// The host the suite binds the module over, with the TLS front its settings name already
+/// listening and the suite's user in the directory behind it.
 fn host(
     wake: busbar_contract::conn::ConnWake,
     anchors: Option<&str>,
@@ -269,6 +311,7 @@ fn red_the_statement_declares_a_public_and_an_anchored_stream_and_never_blocks()
 }
 
 /// A loopback listener that takes every connection and never answers (the connections are held
+/// open); its address.
 fn silent_directory() -> String {
     let listener = TcpListener::bind("127.0.0.1:0").expect("a local listener");
     let at = listener.local_addr().expect("its address").to_string();
@@ -308,6 +351,8 @@ fn red_a_directory_port_with_no_directory_behind_it_is_named_at_the_deadline() {
 }
 
 /// THE MEMORY ONE `complete_login` LENDS THE PLUGIN: the submitted form fields and the host's
+/// identity buffer, lent whole to the op (THE DESIGN §2) so its pointers stay valid however the
+/// call ends.
 struct LoginLend {
     _fields: [Vec<u8>; 2],
     named: Vec<NamedValue>,
@@ -323,6 +368,7 @@ unsafe impl Send for LoginLend {}
 unsafe impl Sync for LoginLend {}
 
 /// One credential login SUBMITTED on a ticket (as the host submits it) and awaited: the answer and
+/// the verdict it names. Everything the frame names is in a [`LoginLend`] the op owns.
 fn login_answer(
     p: &busbar_plugin_loader::dispatch::Plugin<Auth>,
     d: &Dispatcher,
@@ -421,6 +467,8 @@ fn login(p: &Plugin<Auth>, d: &Dispatcher, username: &str, password: &str) -> St
 }
 
 /// Host services offering the clock alone (the dispatcher's own timebase), refusing the rest (busbar's
+/// shared test double answers every other service unserved): the login arms its deadline off the
+/// host's clock, as the kernel serves it.
 struct ClockOnly;
 
 use busbar_contract::services::{
@@ -922,10 +970,58 @@ fn the_linked_and_the_dropped_in_door_are_one_plugin() {
     assert_eq!(direct_script(Leg::Linked), direct_script(Leg::Dropped));
 }
 
+/// The configured service secret, like the user's password, never crosses back: a search-then-bind
+/// instance handed the directory administrator's password as its `bind_service_password` secret
+/// logs a user in and refuses a wrong password, a wrong service secret answers an outage, and no
+/// answer, refusal, log line, metric or diagnostic carries either password.
 #[test]
 fn no_configured_credential_crosses_back() {
+    use busbar_contract::abi::auth::{LOGIN_BAD_CREDENTIAL, LOGIN_IDENTITY};
     for leg in [Leg::Linked, Leg::Dropped] {
-        direct_script(leg);
+        for (service_pw, user_pw, verdict) in [
+            (ADMIN_PW, USER_PW, LOGIN_IDENTITY),
+            (ADMIN_PW, "wrong-password", LOGIN_BAD_CREDENTIAL),
+            ("wrong-service-password", USER_PW, LOGIN_OUTAGE),
+        ] {
+            let d = Dispatcher::with_services(DispatchConfig::default(), Arc::new(ClockOnly));
+            let heard = Arc::new(Heard::default());
+            let p = load(
+                leg,
+                Bind {
+                    sink: heard.clone(),
+                    ..live_bind(&d, "ldap-service-secret")
+                },
+            );
+            let mut v: serde_json::Value = conformance_inputs();
+            v["settings"]["ca_cert_pem"] = conformance_host::anchors().into();
+            v["settings"]["user_search_filter"] = "(cn={username})".into();
+            v["settings"]["bind_service_dn"] = ADMIN_DN.into();
+            let settings = serde_json::to_vec(&v["settings"]).unwrap();
+            let secrets = [Blob::of(service_pw.as_bytes()).with_flags(BLOB_SECRET)];
+            let opened = open_with(&p, &settings, &secrets);
+            assert_eq!(opened.outcome, Outcome::Ready, "{}", called_text(&opened));
+            if p.has_ready() {
+                p.ready(&d, Duration::from_secs(10)).expect("LDAP ready");
+            }
+            let (answer, subject) = login_answer(&p, &d, "conformance", user_pw);
+            assert_eq!(
+                answer,
+                format!("Ready verdict={verdict}"),
+                "{leg:?} service={service_pw} user={user_pw}"
+            );
+            if verdict == LOGIN_IDENTITY {
+                assert_eq!(subject, "ldap:cn=conformance,dc=example,dc=org");
+            }
+            let closed = close(&p);
+            assert_eq!(closed.outcome, Outcome::Ready);
+            let lines = [called_text(&opened), answer, subject, called_text(&closed)];
+            let envelope = heard.0.lock().unwrap().clone();
+            for text in lines.iter().chain(envelope.iter()) {
+                for secret in [service_pw, user_pw] {
+                    assert!(!text.contains(secret), "a credential crossed back: {text}");
+                }
+            }
+        }
     }
 }
 
@@ -1444,11 +1540,13 @@ fn ldap_has_no_plane_transport_or_outbound_family() {
         assert_eq!(facts.caps, auth::CAP_LOGIN);
         assert_eq!(facts.login_kind, auth::LOGIN_KIND_CREDENTIAL);
         assert!(facts.styles.is_empty());
+        assert_eq!(facts.caps & auth::CAP_OUTBOUND, 0, "no outbound family");
+        assert_eq!(
+            facts.caps & auth::CAP_INBOUND,
+            0,
+            "no data-plane (inbound) family"
+        );
     }
-    let inputs: serde_json::Value = conformance_inputs();
-    assert!(inputs["auth"]["outbound"].is_null());
-    assert!(inputs["plane"].is_null());
-    assert!(inputs["transport"].is_null());
 }
 
 extern "C" fn another_version_door() -> &'static Door {

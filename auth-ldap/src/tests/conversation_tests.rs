@@ -2,6 +2,10 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! ONE LOGIN'S CONVERSATION over a scripted stream that plays the directory: every stream service
+//! may pend first, and the login resumes from the same [`Conversation`] until it answers. The
+//! bytes that reach the stream are the codec's, each request exactly once (nothing is sent twice
+//! across a replay); `ldaps://` secures before the first byte, StartTLS after its extended
+//! response; and the signed differences fail closed as an outage.
 
 use std::collections::VecDeque;
 use std::task::Poll;
@@ -42,6 +46,7 @@ impl Directory {
     }
 
     /// Once the replies run out the stream stays open and a read pends (no EOF), so only a
+    /// fail-closed path can answer.
     fn held(mut self) -> Self {
         self.hold = true;
         self
@@ -178,6 +183,7 @@ fn module(url: &str, extra: serde_json::Value) -> LdapModule {
 }
 
 /// Drive one login to its answer, re-entering on every PENDING with the same conversation: the
+/// answer and how many entries it took.
 fn login(m: &LdapModule, dir: &mut Directory, password: &str) -> (Login, u32) {
     let mut conv = Conversation::new();
     for entries in 1..=200 {
@@ -344,6 +350,8 @@ fn start_tls_sends_the_extended_request_then_secures() {
 }
 
 /// A MITM appends forged bind replies to the plaintext StartTLS success: whatever arrived before
+/// the upgrade is never honoured after it (CVE-2011-0411's class), so the login is an outage and
+/// no bind is ever sent.
 #[test]
 fn data_sent_with_the_start_tls_response_is_never_honoured() {
     let m = module(
@@ -428,6 +436,7 @@ fn search_then_bind_speaks_in_1_5_5s_order() {
 }
 
 /// A search keeps at most two entries (the module needs only whether a second exists); the rest
+/// are read and dropped, and a user search matching several is still ambiguous: a bad credential.
 #[test]
 fn a_search_keeps_at_most_two_entries() {
     use crate::{LdapBackend, SearchScope};
@@ -463,6 +472,11 @@ fn a_search_keeps_at_most_two_entries() {
 }
 
 /// A SearchResultReference (RFC 4511 §4.5.3) is a referral the module does not chase, and a client
+/// that does not chase referrals may ignore them: it is skipped, never read as an entry, and the
+/// search is decided on its entries and its SearchResultDone. Active Directory answers every
+/// domain-root subtree search with ForestDnsZones/DomainDnsZones/Configuration references, so a
+/// reference that failed the search failed every search-then-bind login against AD (1.5.5
+/// panicked reading one as an entry). The group read skips them the same way.
 #[test]
 fn a_search_reference_is_skipped() {
     let m = module(
@@ -625,6 +639,7 @@ fn a_bracketed_ipv6_host_followed_by_junk_is_refused() {
 }
 
 /// An operation gives up `timeout_secs` after it begins: a directory that never answers is an
+/// outage once the clock passes the deadline, and the conversation states that deadline.
 #[test]
 fn a_directory_that_never_answers_is_an_outage_after_the_timeout() {
     let m = module("ldap://127.0.0.1", serde_json::json!({"timeout_secs": 2}));
@@ -659,6 +674,7 @@ fn a_directory_that_never_answers_is_an_outage_after_the_timeout() {
 }
 
 /// A directory on a clock: the first service of each directory operation (the dial, then each
+/// reply) pends, and the caller's clock moves `step_ns` on that wake.
 struct Slow {
     dir: Directory,
     owed: bool,
@@ -692,6 +708,7 @@ impl Wire for Slow {
 }
 
 /// `timeout_secs` bounds each directory operation, as 1.5.5 did (the connect, and each bind and
+/// search): a login whose operations each take 0.6 of it completes, though together they take more.
 #[test]
 fn the_timeout_bounds_each_operation_not_the_whole_login() {
     let m = module("ldap://127.0.0.1", serde_json::json!({"timeout_secs": 10}));
@@ -729,6 +746,7 @@ fn the_timeout_bounds_each_operation_not_the_whole_login() {
 }
 
 /// The order 1.5.5 had (seam 6): the connection is opened before the DN template refuses a
+/// username, so a refused username is still a bad credential, after the dial.
 #[test]
 fn a_username_the_dn_template_refuses_is_refused_after_the_dial() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
@@ -771,6 +789,7 @@ impl Wire for Mute {
 }
 
 /// The timeout answers as 1.5.5 answered an ldap3 operation timeout: an outage (1.5.5's Reject),
+/// its text the operation's prefix then `timeout: deadline has elapsed` (`LdapError::Timeout`).
 #[test]
 fn a_timeout_reads_in_1_5_5s_words() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
@@ -852,6 +871,8 @@ fn a_timeout_reads_in_1_5_5s_words() {
 }
 
 /// The resolved service password (the kernel's secret, over the settings literal) is what the
+/// service bind sends, and it appears in no error text the login logs and not in the module's
+/// `Debug`: a failed service bind, a malformed reply and a closed stream are each checked.
 #[test]
 fn the_resolved_service_secret_reaches_only_the_bind() {
     const SECRET: &str = "s3cr3t-resolved";
@@ -884,6 +905,7 @@ fn the_resolved_service_secret_reaches_only_the_bind() {
 }
 
 /// The BIND request in flight holds the cleartext password: a `Debug` of the conversation (it is
+/// `pub`) must never print it.
 #[test]
 fn a_conversation_in_flight_never_debug_prints_the_password() {
     const PW: &str = "hunter2-s3cret";
@@ -911,6 +933,8 @@ fn a_conversation_in_flight_never_debug_prints_the_password() {
 }
 
 /// A SearchResultEntry and its SearchResultDone arrive in ONE read (the normal wire shape): the
+/// second message must survive the first's decode, and the stream holds open after it so a lost
+/// message pends instead of reading as EOF.
 #[test]
 fn two_messages_in_one_read_are_both_read() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
@@ -927,6 +951,7 @@ fn two_messages_in_one_read_are_both_read() {
 }
 
 /// A TLS handshake the connector fails (`ldaps://`, or StartTLS after the directory agreed) is an
+/// outage that never puts the BIND on the wire.
 #[test]
 fn a_failed_secure_is_an_outage_and_never_binds() {
     let m = module("ldaps://ad.corp.example", serde_json::json!({}));
@@ -1044,6 +1069,9 @@ fn chip_bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
 }
 
 /// LDO D4b: one entry of the op never runs unbounded. A directory that streams Ready messages for
+/// one operation without end (entries, or messages for another id) would hold the call past every
+/// deadline, which is only checked between entries: past a cap of messages for one operation, the
+/// operation fails (an outage), whatever the clock says.
 #[test]
 fn an_operation_that_never_ends_its_messages_is_cut_off() {
     use crate::{Io, LdapBackend, SearchScope};

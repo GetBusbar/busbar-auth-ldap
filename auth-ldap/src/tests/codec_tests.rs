@@ -2,13 +2,22 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The LDAP codec: requests byte for byte as 1.5.5's client wrote them (hand-assembled here, not
+//! through the encoder under test), replies decoded, and every malformed reply an error — never a
+//! panic (OWNER-SIGNED difference 1).
 
 use std::collections::HashMap;
 
 use super::{
-    decode, search, start_tls, unbind, Entry, LdapResult, Message, Reply, SCOPE_BASE, SCOPE_SUBTREE,
+    decode_within, search, start_tls, unbind, Entry, LdapResult, Message, Reply, DECODE_BUDGET,
+    SCOPE_BASE, SCOPE_SUBTREE,
 };
 use crate::ber::{self, BerError};
+
+/// Decode one whole message within a fresh [`DECODE_BUDGET`], as the first message of an operation.
+fn decode(bytes: &[u8]) -> Result<Message, BerError> {
+    let mut budget = DECODE_BUDGET;
+    decode_within(bytes, &mut budget, &mut 0)
+}
 
 /// `tag len content`, short form only (every hand-built message here is under 128 bytes).
 fn tlv(tag: u8, content: &[u8]) -> Vec<u8> {
@@ -44,6 +53,7 @@ fn unbind_and_start_tls_are_their_textbook_bytes() {
 }
 
 /// The group read exactly as 1.5.5 sent it: base scope, never deref, no limits, types and values,
+/// `(objectClass=*)`, the one attribute.
 #[test]
 fn the_group_read_is_1_5_5s_search() {
     let op = [
@@ -314,6 +324,7 @@ fn a_reply_past_the_cap_is_refused_from_its_header() {
 }
 
 /// The chip's BIND message (`Cred::ldap_simple_bind`), as the wire carries it: the bytes above are
+/// 1.5.5's, so the chip's BIND is held to them.
 fn bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
     let mut w = busbar_contract::abi::sdk::cred::SealedWrite::message(
         crate::tests::cred(password).ldap_simple_bind(id, dn),
@@ -385,12 +396,20 @@ fn a_results_far_end_text_is_escaped_and_capped() {
         shown.contains("\\n"),
         "the newline is shown escaped: {shown}"
     );
+    let text: String = r
+        .text
+        .chars()
+        .take(128)
+        .flat_map(char::escape_debug)
+        .collect();
     assert!(
-        shown.chars().count() < 2 * 128 * 4 + 80,
-        "capped: {}",
-        shown.len()
+        shown.ends_with(&format!("text: \"{text}...\"")),
+        "the text is its first 128 characters, escaped: {shown}"
     );
-    assert!(!shown.contains(&"m".repeat(129)), "the DN is capped");
+    assert!(
+        shown.contains(&format!("dn: \"{}...\"", "m".repeat(128))),
+        "the DN is its first 128 characters: {shown}"
+    );
 
     let short = LdapResult {
         rc: 32,
@@ -407,11 +426,11 @@ fn a_results_far_end_text_is_escaped_and_capped() {
 fn directory_result_strings_and_response_names_share_the_decode_budget() {
     let bind = msg(1, &tlv(0x61, &result(0, b"dn", b"diagnostic")));
     let mut budget = 2 * super::PER_STRING + 2 + 10;
-    assert!(super::decode_within(&bind, &mut budget).is_ok());
+    assert!(super::decode_within(&bind, &mut budget, &mut 0).is_ok());
     assert_eq!(budget, 0);
     let mut short = 2 * super::PER_STRING + 2 + 9;
     assert_eq!(
-        super::decode_within(&bind, &mut short),
+        super::decode_within(&bind, &mut short, &mut 0),
         Err(BerError::OverBudget)
     );
 
@@ -421,13 +440,13 @@ fn directory_result_strings_and_response_names_share_the_decode_budget() {
     );
     let mut short = 3 * super::PER_STRING + 3;
     assert_eq!(
-        super::decode_within(&extended, &mut short),
+        super::decode_within(&extended, &mut short, &mut 0),
         Err(BerError::OverBudget)
     );
 
     let lossy = msg(1, &tlv(0x61, &result(0, b"\xff", b"")));
     let mut budget = 2 * super::PER_STRING + 3;
-    assert!(super::decode_within(&lossy, &mut budget).is_ok());
+    assert!(super::decode_within(&lossy, &mut budget, &mut 0).is_ok());
     assert_eq!(budget, 0);
 }
 
@@ -578,4 +597,66 @@ fn values_past_the_cap_are_counted_and_warned() {
     assert!(cap.contains("over-cap"), "{:?}", cap.messages());
     assert!(cap.contains("attribute=memberOf"), "{:?}", cap.messages());
     assert!(cap.contains("skipped=99"), "{:?}", cap.messages());
+}
+
+/// A result code is ENUMERATED `0..maxInt` (RFC 4511 §4.1.9): one below zero or past `u32::MAX`
+/// is malformed, and its words say it is out of range (not "negative" for both).
+#[test]
+fn a_result_code_out_of_range_is_malformed_in_its_own_words() {
+    for code in [&[0xff][..], &[0x01, 0x00, 0x00, 0x00, 0x00]] {
+        let op = [tlv(0x0a, code), tlv(0x04, b""), tlv(0x04, b"")].concat();
+        assert_eq!(
+            decode(&msg(1, &tlv(0x61, &op))),
+            Err(BerError::Malformed("a result code out of range")),
+            "{code:02x?}"
+        );
+    }
+}
+
+/// The warn lines about an attribute's values are capped per OPERATION, not charged to its decode
+/// budget: a hostile entry naming a fresh attribute per bad value logs at most
+/// [`super::MAX_VALUE_WARNS`] lines across all its messages, and still decodes (the bad values
+/// dropped, as one with fewer would).
+#[test]
+fn warnings_about_dropped_values_are_bounded_per_operation() {
+    let bad = ber::element(
+        0x30,
+        &[
+            ber::element(0x04, b"a"),
+            ber::element(0x31, &ber::element(0x04, b"\xff")),
+        ]
+        .concat(),
+    );
+    let entry = |n: usize| {
+        let entry = ber::element(
+            0x64,
+            &[
+                ber::element(0x04, b"uid=a"),
+                ber::element(0x30, &bad.repeat(n)),
+            ]
+            .concat(),
+        );
+        ber::element(0x30, &[ber::element(0x02, &[1]), entry].concat())
+    };
+    let cap = crate::diagnostics::Diagnostics::default();
+    let got = tracing::subscriber::with_default(cap.subscriber(), || decode(&entry(200)));
+    assert!(
+        matches!(&got, Ok(Message { reply: Reply::Entry(e), .. }) if e.attrs["a"].is_empty()),
+        "{got:?}"
+    );
+    assert_eq!(cap.count("not-utf8-values"), 64);
+
+    let cap = crate::diagnostics::Diagnostics::default();
+    let (mut budget, mut warned) = (DECODE_BUDGET, 0);
+    tracing::subscriber::with_default(cap.subscriber(), || {
+        for _ in 0..3 {
+            assert!(decode_within(&entry(40), &mut budget, &mut warned).is_ok());
+        }
+    });
+    assert_eq!(
+        cap.count("not-utf8-values"),
+        64,
+        "the cap spans the operation"
+    );
+    assert_eq!(warned, super::MAX_VALUE_WARNS);
 }

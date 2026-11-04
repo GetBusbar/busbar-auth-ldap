@@ -2,6 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The real LDAP door and loader completion store over a scripted raw carrier. The
+//! carrier controls partial writes and wakes; it never implements service replay.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -26,6 +27,8 @@ struct State {
     secured: bool,
     facts: usize,
     closes: usize,
+    /// The dial bound of every ESTABLISH the host was asked for, in milliseconds.
+    dials: Vec<u64>,
 }
 
 pub(super) struct Carrier {
@@ -57,6 +60,7 @@ impl Carrier {
                 secured: false,
                 facts: 0,
                 closes: 0,
+                dials: Vec::new(),
             }),
         }
     }
@@ -157,8 +161,9 @@ impl DeclaredConns for Carrier {
         need: NeedId,
         desc: &OpenDesc<'_>,
         require_secure: bool,
-        _: u64,
+        dial_timeout_ms: u64,
     ) -> Result<ConnId, ConnError> {
+        self.state.lock().unwrap().dials.push(dial_timeout_ms);
         // Immediate test I/O accepts a separate dial budget without claiming TLS.
         self.open_with_security(caller, need, desc, require_secure)
     }
@@ -294,6 +299,11 @@ fn sealed_bind_resumes_the_last_service_through_the_real_completion_store() {
             assert_eq!(state.pended, pend);
             assert_eq!(state.facts, usize::from(secure), "one secure FACTS check");
             assert_eq!(state.closes, 1, "the login released its stream");
+            assert_eq!(
+                state.dials,
+                [1000],
+                "the one dial is bounded by timeout_secs, not the host's default"
+            );
             drop(state);
             assert_eq!(close(&plugin).outcome, super::Outcome::Ready);
         }

@@ -434,27 +434,30 @@ mod tests {
                 let _ = s.write_all(&bytes);
             }
         });
-        let reservation = TcpListener::bind("127.0.0.1:0").unwrap();
-        let address = reservation.local_addr().unwrap().to_string();
-        drop(reservation);
-        ldap_tls::start(&address, |_| true, &backend);
+        let address = ldap_tls::start("127.0.0.1:0", |_| true, &backend).to_string();
         let c = host(Arc::new(|_, _| {}), trust);
         declare(c.as_ref(), 0, EGRESS_OPERATOR_INFRASTRUCTURE);
-        let id = c.open(
-            OWNER,
-            NeedId(0),
-            &OpenDesc {
-                target: &address,
-                timeout_ms: 5000,
-                ..OpenDesc::default()
-            },
-        )?;
+        let id = c
+            .open(
+                OWNER,
+                NeedId(0),
+                &OpenDesc {
+                    target: &address,
+                    timeout_ms: 5000,
+                    ..OpenDesc::default()
+                },
+            )
+            .expect("the relay takes the plain TCP connection");
         assert!(
-            c.facts(OWNER, id)?.peer_cert.is_none(),
+            c.facts(OWNER, id)
+                .expect("facts of the open stream")
+                .peer_cert
+                .is_none(),
             "plain TCP has no TLS peer"
         );
+        // The upgrade is the one step whose failure this answers: every other step must succeed.
         c.upgrade_secure(OWNER, id, Some("localhost"), None, false, 0)?;
-        let facts = c.facts(OWNER, id)?;
+        let facts = c.facts(OWNER, id).expect("facts of the upgraded stream");
         assert!(
             facts
                 .peer_cert
@@ -464,7 +467,9 @@ mod tests {
         );
         let mut at = 0;
         while at < 5 {
-            at += c.write(OWNER, id, &b"hello"[at..], false, false)?;
+            at += c
+                .write(OWNER, id, &b"hello"[at..], false, false)
+                .expect("write over the upgraded stream");
         }
         let until = std::time::Instant::now() + Duration::from_secs(10);
         let mut answer = Vec::new();
@@ -478,7 +483,7 @@ mod tests {
                 other => panic!("TLS echo failed: {other:?}"),
             }
         }
-        c.close(OWNER, id)?;
+        c.close(OWNER, id).expect("close the upgraded stream");
         Ok(answer)
     }
     #[test]
@@ -488,7 +493,10 @@ mod tests {
     #[test]
     fn red_with_the_anchors_withheld_the_hosts_tls_upgrade_is_refused() {
         let answer = upgraded_echo(None);
-        assert!(answer.is_err(), "upgraded over an untrusted CA: {answer:?}");
+        assert!(
+            matches!(answer, Err(ref e) if *e != ConnError::Pending),
+            "the TLS upgrade itself refuses an untrusted CA: {answer:?}"
+        );
     }
     #[test]
     fn the_conformance_host_guard_refuses_a_private_destination() {

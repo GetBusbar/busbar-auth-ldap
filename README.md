@@ -29,7 +29,7 @@ It is a `cdylib` exporting one busbar 1.6.0 plugin door
 [`busbar-contract`](https://github.com/GetBusbar/busbar/tree/main/crates/busbar-contract)),
 loaded in-process by busbar — `dlopen`'d, not spawned as a separate
 process — or linked into a busbar build as a compiled-in row through the
-same door, on the auth kind's table (`abi::auth` v3). Its declares file
+same door. Its declares file
 (`auth-ldap/declares.json`) states only its network need (`tcp`).
 
 It is a **separate plugin from `busbar-auth-oidc`**, and takes a
@@ -79,13 +79,13 @@ auth:
 | `base_dn` | yes | — | Search base for the search-then-bind user lookup. May be empty for a directory that serves a search from base `""` (the AD Global Catalog, OpenLDAP with `olcDefaultSearchBase`). (The group read is a base read of the bound user's own entry.) |
 | `group_attr` | no | `memberOf` | The attribute on the user entry listing group memberships. Each value is a group DN. Must not be empty. |
 | `role_from` | no | `cn` | How a group DN becomes a role string: `cn` takes the value of the first `CN=` RDN in the directory's own case (a value with no `CN=` RDN is used whole, trimmed); `dn` uses the full DN, trimmed and lowercased. `role_bindings` keys must match that spelling exactly. |
-| `user_search_filter` | no | — | Enables search-then-bind. Must contain `{username}` and parse as an RFC 4515 filter nested at most 32 levels deep (checked at boot); requires `bind_service_dn`. |
+| `user_search_filter` | no | — | Enables search-then-bind. Must contain `{username}` in an assertion value and parse as an RFC 4515 filter nested at most 32 levels deep (checked at boot); requires `bind_service_dn`. As with 1.5.5's parser, a bare unparenthesised item (`uid={username}`) is accepted too. |
 | `bind_service_dn` | no | — | Service-account DN used for the search-then-bind lookup. |
 | `bind_service_password` | no | — | Service-account password, a secret reference. Held by the SDK chip; see [Limitations](#limitations). |
 | `ca_cert_pem` | no | — | PEM of a private CA (an AD enterprise CA) the directory's certificate chains to. Trusted on top of the public roots for `ldaps://` and STARTTLS. A value that holds no certificate is refused at boot. |
 | `start_tls` | no | `false` | Use STARTTLS over an `ldap://` connection instead of implicit LDAPS. |
 | `allow_insecure_transport` | no | `false` | Override the plaintext-transport guard. See below. |
-| `timeout_secs` | no | `10` | Connect and operation timeout, in seconds. Must be at least 1 and at most 120. |
+| `timeout_secs` | no | `10` | Connect and operation timeout, in seconds. Must be at least 1 and at most 120. It bounds the dial and every directory operation; the TLS handshake of `ldaps://` and STARTTLS is bounded by the host connector's own limit. |
 
 Unknown config fields are rejected (`deny_unknown_fields`) — a typo'd or
 stray key fails loudly at boot instead of being silently ignored.
@@ -118,13 +118,17 @@ directory answers are which). Every log line carries `module=ldap` and a
 | `no-match`, `ambiguous`, `empty-dn` | info | the search-then-bind user search found no single entry |
 | `invalid-credentials`, `bind-refused` | info | the directory refused the user bind (49, or another non-outage code) |
 | `no-clock`, `clock-failed`, `directory-error` | warn | an outage: no host clock, or the directory could not answer |
-| `no-entry`, `group-read-refused`, `no-group-attribute`, `range-truncated`, `groups-capped`, `not-utf8-values`, `empty-group-role` | warn | the login stands with fewer (or no) roles |
+| `no-entry`, `group-read-refused`, `no-group-attribute`, `range-truncated`, `groups-capped`, `over-cap`, `not-utf8-values`, `empty-group-role` | warn | the login stands with fewer (or no) roles |
 | `close-failed`, `close-pended` | warn | the host did not complete the synchronous stream release |
 | `reference-skipped` | debug | a search referral was ignored; referrals are not chased |
 | `root-dse-base` (info), `insecure-transport` (warn) | | logged at boot |
 
 `groups-capped` reports `count_at_least`: decoding keeps one value past
 its existing limit to detect truncation without allocating the remaining values.
+`over-cap` is that decoding limit's own line: one attribute's values past it
+were counted (`skipped`) and never read. One operation logs at most 64
+`not-utf8-values` and `over-cap` lines; past that the values are still
+dropped the same way, unlogged, and the login is unchanged.
 
 ### Limitations
 
@@ -132,11 +136,10 @@ its existing limit to detect truncation without allocating the remaining values.
   needs: one on the connector's own trust, and one whose `trust_from` is
   `settings.ca_cert_pem`, which the connector adds to the public roots for
   that need's connections. An instance with `ca_cert_pem` dials the
-  second; one without dials the first. At busbar 1.6.0-dev.2 the
-  connector refuses a need whose `trust_from` names an unset setting, so
-  an instance without `ca_cert_pem` has its anchored need refused at
-  declaration, and busbar records that refusal (`need.1`) in its audit
-  log at each open and reload. Nothing else is affected.
+  second; one without dials the first. The connector treats a
+  `trust_from` naming a `settings.` key as optional, so an instance
+  without `ca_cert_pem` declares its anchored need with no operator CA,
+  and never dials it.
 - **The service-account password is a secret reference.** The Statement
   names `bind_service_password` in its `secret_refs`, so the kernel
   resolves it into `OpenIn.secrets`. It must be a reference (for example

@@ -32,8 +32,8 @@ busbar-contract = { workspace = true }
 busbar-auth-ldap = { path = "../auth-ldap" }
 
 [dev-dependencies]
-# The shared host-services test double (`busbar_contract::services::double`): the dev-only
-# `services-double` feature, on this edge alone; a test's host overrides only what it serves.
+# The SDK's test support (`abi::sdk::test_support`) and its sealed-credential piece: the dev-only
+# `test-support` and `test-seal` features, on this edge alone.
 busbar-contract = { workspace = true, features = ["test-support", "test-seal"] }
 # The conformance test opens this crate's own cdylib WITH its dropped-in door on (see `[features]`).
 busbar-auth-ldap-plugin = { path = ".", features = ["dropped-in"] }

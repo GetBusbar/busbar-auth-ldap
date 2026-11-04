@@ -2,6 +2,15 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! BER, the subset LDAP speaks (RFC 4511 §5.1: definite lengths, one-byte tags), as pure functions
+//! over bytes. No I/O: the LDAP codec ([`crate::codec`]) builds and reads its messages with these.
+//!
+//! Reading is fail-closed:
+//!
+//! * a malformed element is an [`BerError`], never a panic;
+//! * a nested element whose length overruns its parent fails at once ([`BerError::Overrun`]): the
+//!   whole message is already read, so the bytes it promises can never come;
+//! * a message longer than [`INBOUND_CAP`] (16 MiB) is refused from its header
+//!   ([`BerError::TooLarge`]), before its bytes are buffered.
 
 use std::fmt;
 
@@ -151,6 +160,11 @@ fn header(input: &[u8]) -> Result<Option<(u8, u64, usize)>, BerError> {
 }
 
 /// How many bytes the first message at the head of `input` takes, once all of them are there:
+/// `Ok(None)` while more are owed. A message whose stated length passes [`INBOUND_CAP`] is refused
+/// from its header; one that is not a SEQUENCE is malformed.
+///
+/// # Errors
+/// [`BerError::Malformed`], [`BerError::TooLarge`].
 pub fn frame(input: &[u8]) -> Result<Option<usize>, BerError> {
     let Some((tag, len, head)) = header(input)? else {
         return Ok(None);
@@ -167,6 +181,11 @@ pub fn frame(input: &[u8]) -> Result<Option<usize>, BerError> {
 }
 
 /// Read the element at the head of `input` (a whole parent's content): the element and what
+/// follows it. Its length must fit in `input`; one that runs past it is an [`BerError::Overrun`].
+///
+/// # Errors
+/// [`BerError::Malformed`] (no element, a multi-byte tag, an indefinite length),
+/// [`BerError::Overrun`].
 pub fn read(input: &[u8]) -> Result<(Tlv<'_>, &[u8]), BerError> {
     let (tag, len, head) = match header(input)? {
         Some(h) => h,
@@ -188,6 +207,9 @@ pub fn read(input: &[u8]) -> Result<(Tlv<'_>, &[u8]), BerError> {
 }
 
 /// Read the element at the head of `input`, which must carry `tag`.
+///
+/// # Errors
+/// As [`read`]; a different tag is malformed (`what` names the element).
 pub fn expect<'a>(
     input: &'a [u8],
     tag: u8,
@@ -201,6 +223,9 @@ pub fn expect<'a>(
 }
 
 /// An INTEGER-shaped content as an `i64`.
+///
+/// # Errors
+/// Empty, or more than eight octets: malformed.
 pub fn int_value(content: &[u8]) -> Result<i64, BerError> {
     if content.is_empty() {
         return Err(BerError::Malformed("an empty integer"));
@@ -214,18 +239,6 @@ pub fn int_value(content: &[u8]) -> Result<i64, BerError> {
         v = (v << 8) | i64::from(*b);
     }
     Ok(v)
-}
-
-#[cfg(test)]
-/// Every element of a constructed element's `content`, in order.
-pub fn items(mut content: &[u8]) -> Result<Vec<Tlv<'_>>, BerError> {
-    let mut out = Vec::new();
-    while !content.is_empty() {
-        let (t, rest) = read(content)?;
-        out.push(t);
-        content = rest;
-    }
-    Ok(out)
 }
 
 #[cfg(test)]

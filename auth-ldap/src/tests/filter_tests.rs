@@ -2,6 +2,8 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The filter encoder against 1.5.5's: every vector here is ldap3 0.11's own filter test, byte for
+//! byte, plus the filters this module sends (the group read, an escaped search-then-bind username,
+//! an AD in-chain rule).
 
 use super::{encode, PARSE_ERROR};
 use crate::groups::escape_filter;
@@ -93,6 +95,8 @@ fn the_filters_this_module_sends_encode() {
 }
 
 /// The search-then-bind username as applied: `escape_filter` neutralises every metacharacter, and
+/// the encoded filter carries the hostile bytes back as plain value bytes (an equality, never a
+/// substrings or a second filter).
 #[test]
 fn an_escaped_username_is_one_equality_value() {
     let hostile = "a*)(uid=*))(|(uid=*\\\0";

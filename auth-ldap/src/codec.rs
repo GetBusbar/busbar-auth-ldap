@@ -2,6 +2,13 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The LDAP codec (RFC 4511), sans-IO: the requests the module sends as bytes, and the replies it
+//! reads back from bytes, as pure functions. What crosses the host's stream is exactly these
+//! bytes; nothing here opens a socket or does TLS.
+//!
+//! Requests carry the encoding ldap3 writes: a SEARCH (never dereferencing aliases, no size or time
+//! limit, types and values), an UNBIND, and the StartTLS extended request. The simple BIND, which
+//! carries a password, is the chip's sealed message (`Cred::ldap_simple_bind`), never built here. Replies decode fail-closed ([`crate::ber`]): a malformed message,
+//! an overrunning nested length or a message past the 16 MiB cap is an error, never a panic.
 
 use std::collections::HashMap;
 
@@ -25,13 +32,32 @@ const REQUEST_NAME: u8 = 0x80;
 const RESPONSE_NAME: u8 = 0x8a;
 
 /// The most values one attribute keeps: one past the group cap, so the module still sees (and
+/// logs) a truncation; the rest are skipped, never turned into strings.
 pub const MAX_VALUES_KEPT: usize = crate::MAX_GROUP_VALUES + 1;
 
 /// What one operation's replies may decode into memory (DNs, attribute names, values): 4 MiB. A
+/// 16 MiB message of tiny values would otherwise become millions of strings.
 pub const DECODE_BUDGET: usize = 4 * 1024 * 1024;
 
 /// What each decoded string is charged on top of its bytes: its allocation's bookkeeping.
 const PER_STRING: usize = 32;
+
+/// The most warn lines about an attribute's values (`not-utf8-values`, `over-cap`) one operation
+/// logs. A real reply carries only the attributes asked for; a hostile one naming a fresh attribute
+/// per value would otherwise be one log line per attribute. Past it the values are still dropped
+/// (the decode and the login go on as before), unlogged.
+pub const MAX_VALUE_WARNS: u32 = 64;
+
+/// Whether one more warn line about an attribute's values may be logged, counting it in `warned`
+/// (this operation's lines so far, [`MAX_VALUE_WARNS`] at most).
+fn may_warn(warned: &mut u32) -> bool {
+    if *warned < MAX_VALUE_WARNS {
+        *warned += 1;
+        true
+    } else {
+        false
+    }
+}
 
 /// Charge `n` decoded bytes (one string) to `budget`.
 fn charge(budget: &mut usize, n: usize) -> Result<(), BerError> {
@@ -55,6 +81,9 @@ fn message(id: i32, op: &[u8]) -> Vec<u8> {
 }
 
 /// A SEARCH under `base` at `scope` (`SCOPE_*`) for `filter`, asking for `attrs`.
+///
+/// # Errors
+/// The filter does not parse: [`filter::PARSE_ERROR`].
 pub fn search(
     id: i32,
     base: &str,
@@ -177,6 +206,7 @@ pub(crate) fn shown(t: &str) -> String {
 
 impl std::fmt::Display for LdapResult {
     /// The words for an operation that did not succeed (as `LdapError::LdapResult` words it), the
+    /// directory's matched DN and diagnostic escaped and capped ([`shown`]): they are far-end text.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
@@ -258,7 +288,7 @@ fn ldap_result<'a>(
 ) -> Result<(LdapResult, &'a [u8]), BerError> {
     let (code, rest) = ber::expect(content, ber::ENUMERATED, "a result without its code")?;
     let rc = u32::try_from(ber::int_value(code)?)
-        .map_err(|_| BerError::Malformed("a negative result code"))?;
+        .map_err(|_| BerError::Malformed("a result code out of range"))?;
     let (matched, rest) = ber::expect(rest, ber::OCTET_STRING, "a result without its matched DN")?;
     let (diag, rest) = ber::expect(rest, ber::OCTET_STRING, "a result without its diagnostic")?;
     let matched = lossy_text(matched, budget)?;
@@ -275,7 +305,10 @@ fn ldap_result<'a>(
 }
 
 /// An entry, decoded within `budget` ([`DECODE_BUDGET`]): every string it keeps is charged as it
-fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
+/// is made, and an attribute keeps at most [`MAX_VALUES_KEPT`] values, so what a hostile reply
+/// costs is bounded WHILE it decodes. `warned` counts the operation's value warn lines
+/// ([`MAX_VALUE_WARNS`]).
+fn entry(content: &[u8], budget: &mut usize, warned: &mut u32) -> Result<Entry, BerError> {
     let (dn, rest) = ber::expect(content, ber::OCTET_STRING, "an entry without its DN")?;
     charge(budget, dn.len())?;
     let dn = text(dn, "an entry DN that is not UTF-8")?;
@@ -312,17 +345,17 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
                 Err(_) => dropped += 1,
             }
         }
-        if dropped > 0 {
+        if dropped > 0 && may_warn(warned) {
             tracing::warn!(
-                           module = "ldap",
-            reason = "not-utf8-values",
-                           attribute = %shown(&name),
-                           dropped,
-                           kept = values.len(),
-                           "ldap attribute values that are not UTF-8 were dropped"
-                       );
+                module = "ldap",
+                reason = "not-utf8-values",
+                attribute = %shown(&name),
+                dropped,
+                kept = values.len(),
+                "ldap attribute values that are not UTF-8 were dropped"
+            );
         }
-        if skipped > 0 {
+        if skipped > 0 && may_warn(warned) {
             tracing::warn!(
                 module = "ldap",
                 reason = "over-cap",
@@ -336,15 +369,18 @@ fn entry(content: &[u8], budget: &mut usize) -> Result<Entry, BerError> {
     Ok(Entry { dn, attrs })
 }
 
-#[cfg(test)]
-/// Decode one whole message (exactly the bytes [`ber::frame`] measured), within a fresh
-pub fn decode(bytes: &[u8]) -> Result<Message, BerError> {
-    let mut budget = DECODE_BUDGET;
-    decode_within(bytes, &mut budget)
-}
-
-/// [`decode`], charging what it decodes to `budget`: what remains of one operation's
-pub fn decode_within(bytes: &[u8], budget: &mut usize) -> Result<Message, BerError> {
+/// Decode one whole message (exactly the bytes [`ber::frame`] measured), charging what it decodes
+/// to `budget`: what remains of one operation's [`DECODE_BUDGET`]. `warned` is how many value warn
+/// lines the operation has logged so far ([`MAX_VALUE_WARNS`]).
+///
+/// # Errors
+/// Anything that is not an LDAPMessage, an overrunning nested length:
+/// [`BerError`]; [`BerError::OverBudget`] once the budget is spent.
+pub fn decode_within(
+    bytes: &[u8],
+    budget: &mut usize,
+    warned: &mut u32,
+) -> Result<Message, BerError> {
     let (content, rest) = ber::expect(bytes, ber::SEQUENCE, "a message that is not a SEQUENCE")?;
     if !rest.is_empty() {
         return Err(BerError::Malformed("bytes after the message"));
@@ -359,7 +395,7 @@ pub fn decode_within(bytes: &[u8], budget: &mut usize) -> Result<Message, BerErr
     let (op, _) = ber::read(rest)?;
     let reply = match op.tag {
         BIND_RESPONSE => Reply::Bind(ldap_result(op.content, budget)?.0),
-        SEARCH_RESULT_ENTRY => Reply::Entry(entry(op.content, budget)?),
+        SEARCH_RESULT_ENTRY => Reply::Entry(entry(op.content, budget, warned)?),
         SEARCH_RESULT_REFERENCE => Reply::Reference,
         SEARCH_RESULT_DONE => Reply::Done(ldap_result(op.content, budget)?.0),
         EXTENDED_RESPONSE => {

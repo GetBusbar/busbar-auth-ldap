@@ -2,10 +2,12 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The door's own pieces: the settings blob `validate`/`open`/`refresh` parse, the submitted-field
+//! lookup, and the Statement's facts. The table itself is driven through the real loader in the
+//! plugin crate's `tests/conformance.rs` (linked and dropped in).
 
 use super::{
-    clock_ns, field, keep_reached, take_reached, unreadable, Ldap, Reached, Release, Run, ALIAS,
-    FORM, NAME, NEED, NEEDS, NEED_ANCHORED, SECRET_REFS, STATEMENT, TAIL,
+    clock_ns, field, keep_reached, mid_call_reading, take_reached, unreadable, Ldap, Reached,
+    Release, Run, ALIAS, FORM, NAME, NEED, NEEDS, NEED_ANCHORED, SECRET_REFS, STATEMENT, TAIL,
 };
 use crate::LdapModule;
 use busbar_contract::abi::auth::{
@@ -62,6 +64,7 @@ fn settings_accept_a_minimal_config() {
 }
 
 /// A direct-bind UPN template (`{username}@corp.example`) is not a DN, so the group read off the
+/// bound entry could never succeed; `validate` refuses it.
 #[test]
 fn settings_refuse_a_direct_bind_upn_template() {
     let blob = br#"{
@@ -134,7 +137,27 @@ fn a_failing_host_clock_says_why() {
     assert!(e.contains("pended"), "{e}");
 }
 
+/// A host clock that fails between messages is said at warn, once for the entry of the op however
+/// many messages it misses, and the deadline falls back to the entry's own reading (`None`).
+#[test]
+fn a_clock_failing_between_messages_is_said_once() {
+    let cap = crate::diagnostics::Diagnostics::default();
+    let mut said = false;
+    let readings = tracing::subscriber::with_default(cap.subscriber(), || {
+        [
+            mid_call_reading(Ok(7), &mut said),
+            mid_call_reading(Err("the host clock failed: broke".into()), &mut said),
+            mid_call_reading(Err("the host clock failed: broke".into()), &mut said),
+        ]
+    });
+    assert_eq!(readings, [Some(7), None, None]);
+    assert_eq!(cap.count("clock-failed"), 1, "{:?}", cap.messages());
+    assert!(cap.contains("broke"), "{:?}", cap.messages());
+}
+
 /// The Statement states a credential login that never blocks (no `MARK_BLOCKS`: every call is
+/// Ready or Pending), its ONE need (outbound, a raw `tcp` stream, operator-infrastructure, the
+/// target named per login), and the service password as its one secret reference.
 #[test]
 fn the_statement_states_a_non_blocking_credential_login_over_one_need() {
     assert_eq!(TAIL.caps, CAP_LOGIN);
@@ -223,6 +246,7 @@ fn who(id: &str) -> busbar_contract::auth::Principal {
 }
 
 /// An abandoned ticket's kept identity goes with the next op on its slot; other slots stay, and the
+/// call's own key answers its identity.
 #[test]
 fn a_later_generation_on_the_slot_drops_the_abandoned_identity() {
     let mut reached = Reached::default();
@@ -247,6 +271,7 @@ fn a_later_generation_on_the_slot_drops_the_abandoned_identity() {
 }
 
 /// A call on no ticket (generation 0, never minted) proves nothing about slot 0: a kept identity on
+/// that slot stays for its own re-call.
 #[test]
 fn a_ticketless_call_leaves_slot_zeros_kept_identity() {
     let mut reached = Reached::default();
@@ -259,6 +284,8 @@ fn a_ticketless_call_leaves_slot_zeros_kept_identity() {
 }
 
 /// THE REACHED MAP IS BOUNDED (auth standard S3): at the cap the OLDEST kept identity goes, never
+/// the rest and never all of them, so an in-flight short answer awaiting its re-call survives a
+/// flood of abandoned ones.
 #[test]
 fn the_reached_map_is_bounded_and_evicts_the_oldest() {
     let mut reached = Reached::default();
@@ -310,6 +337,8 @@ fn a_kept_identity_expires_after_the_ttl() {
 }
 
 /// LDAP is a login method and judges no bearer credential on the data plane: its tail states the
+/// login family alone (no `CAP_INBOUND`, so `verify` is never called and answers REFUSED), and no
+/// `FACT_CACHEABLE` (a fact about verify answers it does not give), as busbar-auth-github's.
 #[test]
 fn the_tail_states_the_login_family_alone() {
     assert_eq!(TAIL.caps, CAP_LOGIN);
@@ -319,6 +348,9 @@ fn the_tail_states_the_login_family_alone() {
 }
 
 /// Search-then-bind settings whose service password is a secret reference (no literal in the
+/// settings) validate: `validate` is handed no secrets, so the password-presence rule is `open`'s,
+/// where the resolved secret is known. `open` with no secret still refuses; an explicit empty
+/// literal is refused by both.
 #[test]
 fn validate_accepts_search_then_bind_whose_password_is_a_secret() {
     let blob = br#"{
@@ -360,6 +392,7 @@ fn validate_accepts_search_then_bind_whose_password_is_a_secret() {
 }
 
 /// A settings value of the wrong type is refused WITHOUT quoting it (it may be a secret pasted
+/// into the wrong key); a missing or unknown key is still named.
 #[test]
 fn a_mistyped_setting_is_refused_without_echoing_its_value() {
     for blob in [
@@ -444,6 +477,8 @@ fn a_given_up_login_releases_its_stream() {
 }
 
 /// THE REFUSAL LINES (auth standard S2): every settings refusal is one or more lines in the
+/// contract's instance-relative form (`settings[.<key>]: <reason>`, joined by `\n`, holding
+/// `check_validate_refusal`), the same at `validate` and `open`, and never a value.
 mod refusal_lines {
     use super::*;
     use busbar_contract::abi::mechanism::lifecycle::check_validate_refusal;
@@ -566,6 +601,22 @@ mod refusal_lines {
         );
     }
 
+    /// A literal service password is one refusal line among the others, not the only one said.
+    #[test]
+    fn a_literal_service_password_is_one_line_among_the_others() {
+        let text = refused(&with(
+            json!({"bind_service_password": "hunter2", "timeout_secs": 0}),
+        ));
+        let lines: Vec<&str> = text.split('\n').collect();
+        assert_eq!(lines.len(), 2, "{text:?}");
+        assert!(
+            lines[0].starts_with("settings.bind_service_password: must be a secret reference"),
+            "{text:?}"
+        );
+        assert_eq!(lines[1], "settings.timeout_secs: must be at least 1");
+        assert!(!text.contains("hunter2"), "a value is echoed: {text:?}");
+    }
+
     #[test]
     fn a_missing_or_non_utf8_service_secret_names_the_secret() {
         let blob = with(json!({
@@ -588,6 +639,10 @@ mod refusal_lines {
 }
 
 /// CA-1 / SEC-LDAPCA: a private directory CA (`ca_cert_pem`) is SUPPORTED. A blob that holds a
+/// certificate validates, and the module dials on the ANCHORED need (whose `trust_from` hands the
+/// connector that CA, on top of the public roots, for both `ldaps://` and STARTTLS); without it,
+/// the public need. A `ca_cert_pem` that holds no certificate is refused by name, never accepted
+/// and ignored.
 mod private_ca {
     use super::*;
     use busbar_contract::abi::sdk::life::Life;
