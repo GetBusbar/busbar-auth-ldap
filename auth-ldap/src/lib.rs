@@ -290,7 +290,13 @@ impl LdapModule {
     /// `password` as a BIND carries it: an `ldaps://` URL, or STARTTLS, lets it go out only on a
     /// connection the host connector reports secured ([`Cred::secure_required`]).
     fn guarded(&self, password: &Cred) -> Cred {
-        let password = password.clone().secure_for(self.cfg.url.trim());
+        let password = password.clone().require_secure_if(
+            self.cfg
+                .url
+                .trim()
+                .split_once("://")
+                .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("ldaps")),
+        );
         if self.cfg.start_tls {
             password.require_secure()
         } else {
