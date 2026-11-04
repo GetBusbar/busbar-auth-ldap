@@ -695,7 +695,7 @@ impl busbar_plugin_loader::dispatch::EnvelopeSink for Heard {
 }
 
 fn settings() -> Vec<u8> {
-    let mut v: serde_json::Value = serde_json::from_str(include_str!("conformance.json")).unwrap();
+    let mut v: serde_json::Value = conformance_inputs();
     v["settings"]["ca_cert_pem"] = conformance_host::anchors().into();
     serde_json::to_vec(&v["settings"]).unwrap()
 }
@@ -767,7 +767,7 @@ fn direct_script(leg: Leg) -> (Vec<String>, Vec<String>) {
         tail.login_kind,
         tail.carriers
     )];
-    let inputs: serde_json::Value = serde_json::from_str(include_str!("conformance.json")).unwrap();
+    let inputs: serde_json::Value = conformance_inputs();
     let settings = settings();
     for bad in inputs["auth"]["bad_settings"].as_array().unwrap() {
         let bytes = if let Some(text) = bad.as_str() {
@@ -1445,7 +1445,7 @@ fn ldap_has_no_plane_transport_or_outbound_family() {
         assert_eq!(facts.login_kind, auth::LOGIN_KIND_CREDENTIAL);
         assert!(facts.styles.is_empty());
     }
-    let inputs: serde_json::Value = serde_json::from_str(include_str!("conformance.json")).unwrap();
+    let inputs: serde_json::Value = conformance_inputs();
     assert!(inputs["auth"]["outbound"].is_null());
     assert!(inputs["plane"].is_null());
     assert!(inputs["transport"].is_null());
@@ -1476,4 +1476,12 @@ fn a_restated_version_does_not_match_the_honest_row() {
         load_linked::<Auth>(&row, network_bind(&d)).err(),
         Some(busbar_plugin_loader::dispatch::LoadError::StatementMismatch)
     );
+}
+
+fn conformance_inputs() -> serde_json::Value {
+    let front = conformance_host::tls_front(start_tls, upstream());
+    serde_json::from_str(
+        &include_str!("conformance.json").replace(conformance_host::FAR_END, front),
+    )
+    .expect("conformance settings with the actual bound relay address")
 }

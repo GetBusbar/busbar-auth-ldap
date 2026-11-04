@@ -712,8 +712,8 @@ fn ldaps_with_a_private_ca_verifies() {
             .to_owned()
             .into_boxed_str(),
     );
-    let front: &'static str = Box::leak(format!("localhost:{}", free_port()).into_boxed_str());
-    ldap_tls::start(front, |_| true, upstream);
+    let address = ldap_tls::start("localhost:0", |_| true, upstream);
+    let front: &'static str = Box::leak(format!("localhost:{}", address.port()).into_boxed_str());
     let ldaps = format!("ldaps://{front}");
     let client = reqwest::blocking::Client::builder()
         .redirect(reqwest::redirect::Policy::none())

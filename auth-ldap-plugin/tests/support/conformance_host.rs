@@ -23,9 +23,12 @@ mod ldap_tls;
 pub use ldap_tls::anchors;
 pub const FAR_END: &str = "localhost:41859";
 
-pub fn tls_front(preamble: fn(&mut TcpStream) -> bool, upstream: &'static str) {
-    static STARTED: OnceLock<()> = OnceLock::new();
-    STARTED.get_or_init(|| ldap_tls::start(FAR_END, preamble, upstream));
+pub fn tls_front(preamble: fn(&mut TcpStream) -> bool, upstream: &'static str) -> &'static str {
+    static FRONT: OnceLock<String> = OnceLock::new();
+    FRONT.get_or_init(|| {
+        let address = ldap_tls::start("localhost:0", preamble, upstream);
+        format!("localhost:{}", address.port())
+    })
 }
 
 #[derive(Clone)]

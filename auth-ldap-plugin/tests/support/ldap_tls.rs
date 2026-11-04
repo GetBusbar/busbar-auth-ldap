@@ -20,8 +20,15 @@ pub fn anchors() -> &'static str {
     &ca().ca_pem
 }
 
-pub fn start(at: &str, preamble: fn(&mut TcpStream) -> bool, upstream: &str) {
+pub fn start(
+    at: &str,
+    preamble: fn(&mut TcpStream) -> bool,
+    upstream: &str,
+) -> std::net::SocketAddr {
     let listener = TcpListener::bind(at).expect("bind the LDAP TLS relay");
+    let address = listener
+        .local_addr()
+        .expect("the bound LDAP TLS relay address");
     let tls = ServerTls::new(&[ca().leaf_der.clone()], &ca().key_der, None, &[])
         .expect("the LDAP relay has a TLS identity");
     let upstream = upstream.to_owned();
@@ -33,6 +40,7 @@ pub fn start(at: &str, preamble: fn(&mut TcpStream) -> bool, upstream: &str) {
             std::thread::spawn(move || relay(tcp, &tls, preamble, &upstream));
         }
     });
+    address
 }
 
 fn relay(
