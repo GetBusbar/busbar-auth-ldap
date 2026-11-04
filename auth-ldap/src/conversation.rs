@@ -611,6 +611,18 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
         }
         match self.reply()? {
             Reply::Bind(r) => {
+                if r.ad_account_locked() {
+                    tracing::info!(
+                        module = "ldap",
+                        reason = "bind-account-locked",
+                        rc = r.rc,
+                        ad_data = "775",
+                        directory_result = "account-locked",
+                        "ldap bind refused: directory reports an account lockout"
+                    );
+                }
+                // Keep only the result code: neither the diagnostic nor matched DN survives
+                // into the login replay, and its static diagnostic event is emitted only once.
                 self.keep(Kept::Bound(r.rc));
                 Ok(r.rc)
             }

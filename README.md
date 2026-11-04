@@ -117,6 +117,7 @@ directory answers are which). Every log line carries `module=ldap` and a
 | `missing-field`, `invalid-field`, `empty-password`, `bad-username` | info | the submission is refused before or without a bind |
 | `no-match`, `ambiguous`, `empty-dn` | info | the search-then-bind user search found no single entry |
 | `invalid-credentials`, `bind-refused` | info | the directory refused the user bind (49, or another non-outage code) |
+| `bind-account-locked` | info | an AD bind failure reports the exact `data 775` account-lockout marker; only a static code and label are logged |
 | `no-clock`, `clock-failed`, `directory-error` | warn | an outage: no host clock, or the directory could not answer |
 | `no-entry`, `group-read-refused`, `no-group-attribute`, `range-truncated`, `groups-capped`, `over-cap`, `not-utf8-values`, `empty-group-role` | warn | the login stands with fewer (or no) roles |
 | `close-failed`, `close-pended` | warn | the host did not complete the synchronous stream release |
@@ -226,6 +227,12 @@ are rejected before connecting, avoiding unnecessary directory work. Search-mode
 usernames containing printable LDAP syntax continue to be escaped and accepted.
 Service-bind rejection diagnostics include the numeric LDAP result and its static
 name, never the password, DN or server-supplied diagnostic text.
+AD BindResponse diagnostics with the exact `data 775` marker additionally emit
+`bind-account-locked`, `ad_data=775`, and the static `account-locked` label once.
+The raw diagnostic and matched DN are never logged. Invalid UTF-8, control characters,
+ambiguous data fields, and other diagnostic markers do not produce this classification.
+User and service bind verdicts remain unchanged; the user-facing response does not
+reveal account-lockout status.
 
 ## Build
 

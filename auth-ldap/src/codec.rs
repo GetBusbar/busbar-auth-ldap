@@ -138,6 +138,40 @@ pub struct LdapResult {
     pub text: String,
 }
 
+impl LdapResult {
+    /// Recognize AD's account-lockout subcode without returning directory-controlled text.
+    /// A replacement character may represent invalid UTF-8 decoded lossily; fail closed on it.
+    pub(crate) fn ad_account_locked(&self) -> bool {
+        const PREFIX: &str = "80090308: LdapErr:";
+        if self.rc != 49 || self.text.chars().any(|c| c.is_control() || c == '\u{fffd}') {
+            return false;
+        }
+        let text = self.text.trim();
+        if !text
+            .get(..PREFIX.len())
+            .is_some_and(|head| head.eq_ignore_ascii_case(PREFIX))
+        {
+            return false;
+        }
+        let mut fields = text.split(',').skip(1).map(str::trim);
+        let context =
+            fields.any(|field| field.eq_ignore_ascii_case("comment: AcceptSecurityContext error"));
+        if !context {
+            return false;
+        }
+        // Only an entire data field matches, never 7750, x775 or text containing "data 775".
+        // Conflicting/duplicate data fields are not a trustworthy diagnostic classification.
+        let mut data = text.split(',').skip(1).map(str::trim).filter(|field| {
+            field
+                .get(..5)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("data "))
+        });
+        data.next()
+            .is_some_and(|field| field.eq_ignore_ascii_case("data 775"))
+            && data.next().is_none()
+    }
+}
+
 /// RFC 4511's name for a result code, as it is spelled in error text.
 #[must_use]
 pub const fn rc_name(rc: u32) -> &'static str {

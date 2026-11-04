@@ -1272,3 +1272,144 @@ fn ldap_endpoints_refuse_signed_ports() {
         "host:389"
     );
 }
+
+fn diagnostic_bind_response(rc: i64, diagnostic: &[u8]) -> Vec<u8> {
+    let mut body = Vec::new();
+    ber::int(&mut body, ber::ENUMERATED, rc);
+    ber::tlv(
+        &mut body,
+        ber::OCTET_STRING,
+        b"cn=matched-private-canary,dc=example",
+    );
+    ber::tlv(&mut body, ber::OCTET_STRING, diagnostic);
+    message(1, ber::element(0x61, &body))
+}
+
+#[test]
+fn ad_bind_diagnostic_775_is_static_private_and_does_not_change_login_verdicts() {
+    const PASSWORD: &str = "submitted-password-canary";
+    const SERVICE_PASSWORD: &str = "service-password-canary";
+    const SERVICE_DN: &str = "cn=service-private-canary,dc=example";
+    for service in [false, true] {
+        let extra = if service {
+            serde_json::json!({
+                "user_search_filter": "(uid={username})",
+                "bind_service_dn": SERVICE_DN,
+                "bind_service_password": SERVICE_PASSWORD,
+            })
+        } else {
+            serde_json::json!({})
+        };
+        let module = module("ldap://127.0.0.1", extra);
+        for prefix in ["80090308: LdapErr:", "80090308: LDAPERR:"] {
+            let text = format!("{prefix} DSID-private-canary, comment: AcceptSecurityContext error, DATA 775, v893; raw-private-canary {PASSWORD} {SERVICE_PASSWORD} {SERVICE_DN}");
+            let mut directory =
+                Directory::new(vec![diagnostic_bind_response(49, text.as_bytes())]).pending();
+            let captured = crate::diagnostics::Diagnostics::capturing_debug();
+            let (answer, entries) =
+                tracing::subscriber::with_default(captured.subscriber(), || {
+                    login(&module, &mut directory, PASSWORD)
+                });
+            assert_eq!(
+                answer,
+                if service {
+                    Login::Outage
+                } else {
+                    Login::BadCredential
+                }
+            );
+            assert!(entries > 1, "the reply crossed pending/replay boundaries");
+            assert_eq!(
+                captured.count("bind-account-locked"),
+                1,
+                "{:?}",
+                captured.messages()
+            );
+            assert!(captured.contains("ad_data=\"775\""));
+            assert!(captured.contains("directory_result=\"account-locked\""));
+            for private in [
+                PASSWORD,
+                SERVICE_PASSWORD,
+                SERVICE_DN,
+                ALICE,
+                "matched-private-canary",
+                "raw-private-canary",
+                "DSID-private-canary",
+                "AcceptSecurityContext",
+            ] {
+                assert!(
+                    !captured.contains(private),
+                    "directory or credential text escaped: {:?}",
+                    captured.messages()
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn ad_bind_diagnostic_wrong_absent_and_invalid_utf8_markers_are_not_classified() {
+    let module = module("ldap://127.0.0.1", serde_json::json!({}));
+    let context = "80090308: LdapErr: DSID-private-canary, comment: AcceptSecurityContext error";
+    let mut diagnostics: Vec<Vec<u8>> = [
+        "",
+        "data 775",
+        "not AD, data 775",
+        "80090308: LdapErr: data 775",
+    ]
+    .into_iter()
+    .map(|s| s.as_bytes().to_vec())
+    .collect();
+    for data in [
+        "metadata 775",
+        "data 7750",
+        "data x775",
+        "data 0775",
+        "data 775 extra",
+        "data 52e",
+        "data 775, data 52e",
+        "data 775, data 775",
+        "data\t775",
+        "note=data 775",
+        "data 775\nforged-log-line",
+    ] {
+        diagnostics.push(format!("{context}, {data}, v893").into_bytes());
+    }
+    let mut invalid = format!("{context}, data 775, v893").into_bytes();
+    invalid.push(0xff);
+    diagnostics.push(invalid);
+    for text in diagnostics {
+        let captured = crate::diagnostics::Diagnostics::capturing_debug();
+        let mut directory = Directory::new(vec![diagnostic_bind_response(49, &text)]).pending();
+        let (answer, _) = tracing::subscriber::with_default(captured.subscriber(), || {
+            login(&module, &mut directory, "password-canary")
+        });
+        assert_eq!(answer, Login::BadCredential);
+        assert!(
+            !captured.contains("bind-account-locked"),
+            "false classification for {text:?}: {:?}",
+            captured.messages()
+        );
+        for private in [
+            "private-canary",
+            "password-canary",
+            "forged-log-line",
+            ALICE,
+        ] {
+            assert!(!captured.contains(private), "{:?}", captured.messages());
+        }
+    }
+    let mut directory = Directory::new(vec![
+        diagnostic_bind_response(0, format!("{context}, data 775, v893").as_bytes()),
+        done(2, 0),
+    ]);
+    let captured = crate::diagnostics::Diagnostics::capturing_debug();
+    let (answer, _) = tracing::subscriber::with_default(captured.subscriber(), || {
+        login(&module, &mut directory, "pw")
+    });
+    assert!(
+        matches!(answer, Login::Identity(_)),
+        "success remains success"
+    );
+    assert!(!captured.contains("bind-account-locked"));
+}
