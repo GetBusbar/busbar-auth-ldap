@@ -225,6 +225,8 @@ impl LdapModule {
     /// Build the module from parsed config: every settings check ([`check_settings`]) so a
     /// misconfiguration fails at boot, not on the first login, then the search-then-bind service
     /// password rule; logs (info) an empty search base and (warn) an opted-out plaintext transport.
+    /// Callers supplying an opaque service credential must reject control characters before
+    /// capture; [`Self::from_settings_with`] performs that check for resolved secrets.
     pub fn new(cfg: LdapConfig) -> Result<Self, String> {
         check_settings(&cfg)?;
 
@@ -497,8 +499,12 @@ impl LdapModule {
         let mut cfg = parse_settings(settings)?;
         settings_refusals(&cfg)?;
         if let Some(secret) = secrets.first().filter(|s| !s.is_empty()) {
-            if std::str::from_utf8(secret).is_err() {
-                return Err("secrets: `bind_service_password` is not UTF-8".to_string());
+            let text = std::str::from_utf8(secret)
+                .map_err(|_| "secrets: `bind_service_password` is not UTF-8".to_string())?;
+            if text.chars().any(char::is_control) {
+                return Err(
+                    "secrets: `bind_service_password` contains a control character".to_string(),
+                );
             }
             cfg.bind_service_password = Some(Cred::captured(Zeroizing::new(secret.to_vec())));
         }
@@ -508,6 +514,8 @@ impl LdapModule {
     /// One credential submission over `wire`, resumable: the `username` and `password` the form
     /// declared, absent when not submitted. An absent field or an empty password never reaches the
     /// wire (an empty password is an anonymous bind that "succeeds" on many directories).
+    /// Callers must reject control characters before capturing the opaque password; the plugin
+    /// door checks the submitted text before capture.
     ///
     /// [`Poll::Pending`] = a wire service pends: call again on the wake with the same `conv` (what
     /// completed answers from it; nothing is sent twice). `now_ns` is the caller's monotonic clock
@@ -798,8 +806,7 @@ fn principal_id(user_dn: &str) -> String {
 
 impl LdapModule {
     /// Connect to the directory, BIND with the credentials, read the user's groups, and build a
-    /// [`Principal`]. The connect comes first, so a username the DN template refuses is refused
-    /// after it.
+    /// [`Principal`]. Validate the username before opening a directory connection.
     /// Generic over [`LdapBackend`] so the reject paths are unit-testable: a non-zero user-bind result
     /// code, an empty or AMBIGUOUS (>1 match) search, and an over-long group list are all refused or
     /// capped here.
@@ -809,19 +816,31 @@ impl LdapModule {
         username: &str,
         password: &Cred,
     ) -> Result<Principal, BindError> {
+        let direct_dn = if self.cfg.user_search_filter.is_some() {
+            if username.is_empty() || username.chars().any(char::is_control) {
+                tracing::info!(
+                    module = "ldap",
+                    reason = "bad-username",
+                    "ldap login refused: empty username or control character"
+                );
+                return Err(BindError::InvalidCredentials);
+            }
+            None
+        } else {
+            Some(self.bind_dn_for(username).map_err(|reason| {
+                tracing::info!(
+                    module = "ldap",
+                    reason = "bad-username",
+                    refusal = %reason,
+                    "ldap login refused: the DN template refused the username"
+                );
+                BindError::InvalidCredentials
+            })?)
+        };
         ldap.connect()
             .map_err(at(&format!("connect {}", shown_url(&self.cfg.url))))?;
 
         let user_dn = if let Some(filter_tpl) = &self.cfg.user_search_filter {
-            if username.is_empty() {
-                tracing::info!(
-                    module = "ldap",
-                    reason = "empty-username",
-                    "ldap login refused: empty username"
-                );
-                return Err(BindError::InvalidCredentials);
-            }
-
             let svc_dn = self.cfg.bind_service_dn.as_deref().unwrap_or("");
             let svc_pw = self
                 .cfg
@@ -833,7 +852,8 @@ impl LdapModule {
                 .map_err(at("service bind"))?;
             if rc != 0 {
                 return Err(BindError::Directory(format!(
-                    "service bind rejected (rc={rc})"
+                    "service bind rejected (rc={rc} {})",
+                    codec::rc_name(rc)
                 )));
             }
             let filter = filter_tpl.replace("{username}", groups::escape_filter(username).as_str());
@@ -874,15 +894,7 @@ impl LdapModule {
             }
             entry.dn
         } else {
-            self.bind_dn_for(username).map_err(|reason| {
-                tracing::info!(
-                    module = "ldap",
-                    reason = "bad-username",
-                    refusal = %reason,
-                    "ldap login refused: the DN template refused the username"
-                );
-                BindError::InvalidCredentials
-            })?
+            direct_dn.unwrap_or_default()
         };
 
         let rc = ldap

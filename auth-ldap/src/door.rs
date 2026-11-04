@@ -279,7 +279,7 @@ fn begin(module: Arc<LdapModule>, fields: &[(&[u8], &[u8])], release: Option<Rel
 }
 
 /// Why a submission the form's fields cannot be read from is refused, when a field was submitted
-/// but is not text.
+/// but is not text, or the password contains a control character.
 fn unreadable(fields: &[(&[u8], &[u8])]) -> Option<&'static str> {
     let not_text = |name: &str| {
         fields
@@ -290,6 +290,11 @@ fn unreadable(fields: &[(&[u8], &[u8])]) -> Option<&'static str> {
         Some("the username field is not UTF-8")
     } else if not_text(PASSWORD.0) {
         Some("the password field is not UTF-8")
+    } else if fields.iter().any(|(name, value)| {
+        *name == PASSWORD.0.as_bytes()
+            && std::str::from_utf8(value).is_ok_and(|text| text.chars().any(char::is_control))
+    }) {
+        Some("the password field contains a control character")
     } else {
         None
     }
@@ -489,9 +494,9 @@ fn drive(
             if let Some(reason) = unreadable(&fields) {
                 tracing::info!(
                     module = "ldap",
-                    reason = "not-text",
+                    reason = "invalid-field",
                     refusal = %reason,
-                    "ldap login refused: a submitted field is not UTF-8"
+                    "ldap login refused: invalid submitted field"
                 );
                 return Poll::Ready(Login::BadCredential);
             }

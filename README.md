@@ -114,7 +114,7 @@ directory answers are which). Every log line carries `module=ldap` and a
 
 | reason | level | when |
 |---|---|---|
-| `missing-field`, `not-text`, `empty-password`, `empty-username`, `bad-username` | info | the submission is refused before or without a bind |
+| `missing-field`, `invalid-field`, `empty-password`, `bad-username` | info | the submission is refused before or without a bind |
 | `no-match`, `ambiguous`, `empty-dn` | info | the search-then-bind user search found no single entry |
 | `invalid-credentials`, `bind-refused` | info | the directory refused the user bind (49, or another non-outage code) |
 | `no-clock`, `clock-failed`, `directory-error` | warn | an outage: no host clock, or the directory could not answer |
@@ -212,6 +212,20 @@ dropped the same way, unlogged, and the login is unchanged.
   roles, and the plugin logs a `warn` that the list is truncated: a user
   in more groups than the range gets fewer roles, never more. The rest of
   the range (`;range=1500-*`) is not requested.
+
+## Differences from 1.5.5
+
+The credential form rejects passwords containing Unicode control characters
+(including NUL, tab, CR/LF and DEL) before capturing them or opening a directory
+connection. Resolved service-account passwords with those characters refuse boot.
+Ordinary Unicode passwords, spaces and punctuation are unchanged. This prevents
+credential truncation or interpretation differences in downstream directory systems.
+
+Invalid direct-bind usernames and empty or control-containing search usernames
+are rejected before connecting, avoiding unnecessary directory work. Search-mode
+usernames containing printable LDAP syntax continue to be escaped and accepted.
+Service-bind rejection diagnostics include the numeric LDAP result and its static
+name, never the password, DN or server-supplied diagnostic text.
 
 ## Build
 

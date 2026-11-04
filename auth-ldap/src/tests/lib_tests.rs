@@ -786,6 +786,7 @@ fn config_rejects_client_secret() {
 /// logic — result-code handling, ambiguity, group cap, roles, principal id — is unit-testable.
 #[derive(Default)]
 struct FakeLdap {
+    connects: usize,
     /// A bind whose password equals this string returns `reject_rc` (49, invalidCredentials, when
     /// unset); all others 0.
     reject_password: Option<String>,
@@ -836,6 +837,10 @@ struct FakeLdap {
 }
 
 impl LdapBackend for FakeLdap {
+    fn connect(&mut self) -> Result<(), Io> {
+        self.connects += 1;
+        Ok(())
+    }
     fn simple_bind(&mut self, dn: &str, password: &Cred) -> Result<u32, Io> {
         let password = cred_text(password);
         let password = password.as_str();
@@ -1974,4 +1979,70 @@ fn a_group_value_mapping_to_an_empty_role_is_named() {
     });
     assert!(roles.is_empty());
     assert_eq!(cap.count("empty-group-role"), 1, "{:?}", cap.messages());
+}
+
+#[test]
+fn hardening_invalid_username_never_connects() {
+    for (cfg, names) in [
+        (
+            base_cfg(),
+            vec!["", "alice,admin", " alice", "alice\0", "alice\n"],
+        ),
+        (search_cfg(), vec!["", "alice\0", "alice\n", "alice\u{85}"]),
+    ] {
+        let module = LdapModule::new(cfg).unwrap();
+        for name in names {
+            let mut ldap = FakeLdap::default();
+            assert!(matches!(
+                module.bind_and_identify_on(&mut ldap, name, "pw"),
+                Err(BindError::InvalidCredentials)
+            ));
+            assert_eq!(ldap.connects, 0);
+            assert!(ldap.binds.is_empty());
+        }
+    }
+}
+
+#[test]
+fn hardening_service_bind_reason_is_safe_and_named() {
+    for rc in [49, 52, 999] {
+        let module = LdapModule::new(search_cfg()).unwrap();
+        let mut ldap = FakeLdap {
+            reject_password: Some("svc-secret".into()),
+            reject_rc: Some(rc),
+            ..Default::default()
+        };
+        let Err(BindError::Directory(error)) =
+            module.bind_and_identify_on(&mut ldap, "alice", "user-secret")
+        else {
+            panic!("expected service outage")
+        };
+        assert!(error.contains(&format!("rc={rc}")));
+        assert!(error.contains(crate::codec::rc_name(rc)));
+        assert!(!error.contains("svc-secret"));
+        assert!(!error.contains("user-secret"));
+        assert!(!error.contains("cn=svc"));
+    }
+}
+
+#[test]
+fn hardening_resolved_service_password_controls_refused() {
+    let settings = br#"{"url":"ldaps://x","bind_dn_template":"uid={username},dc=x","base_dn":"dc=x","user_search_filter":"(uid={username})","bind_service_dn":"cn=svc"}"#;
+    for password in [
+        "secret\0tail",
+        "secret\ttail",
+        "secret\ntail",
+        "secret\u{7f}tail",
+        "secret\u{85}tail",
+    ] {
+        let error = LdapModule::from_settings_with(settings, &[password.as_bytes()])
+            .err()
+            .expect("refused");
+        assert_eq!(
+            error,
+            "secrets: `bind_service_password` contains a control character"
+        );
+        assert!(!error.contains(password));
+    }
+    assert!(LdapModule::from_settings_with(settings, &[" päss密碼 🔐 ".as_bytes()]).is_ok());
 }

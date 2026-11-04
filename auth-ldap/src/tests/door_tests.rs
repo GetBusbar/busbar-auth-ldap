@@ -1237,3 +1237,23 @@ mod reached_clock_callbacks {
         drop(inline);
     }
 }
+
+#[test]
+fn hardening_submitted_password_controls_refused() {
+    for password in [
+        "secret\0tail",
+        "secret\ttail",
+        "secret\ntail",
+        "secret\u{7f}tail",
+        "secret\u{85}tail",
+    ] {
+        assert_eq!(
+            unreadable(&[(b"password", password.as_bytes())]),
+            Some("the password field contains a control character")
+        );
+    }
+    assert_eq!(
+        unreadable(&[(b"password", " päss密碼 🔐 ".as_bytes())]),
+        None
+    );
+}
