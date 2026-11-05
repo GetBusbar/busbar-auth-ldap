@@ -19,6 +19,7 @@ busbar-contract = { workspace = true }
 # Reads a `ca_cert_pem` certificate block's body, to refuse one that holds no certificate.
 base64 = { workspace = true }
 serde = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 # The bytes a credential is captured from (a resolved secret, a submitted password) are moved into
 # the chip's `Cred` in a buffer wiped on drop.
@@ -29,7 +30,6 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 jsonschema = { workspace = true }
-serde_json = { workspace = true }
 tracing-subscriber = { workspace = true }
 busbar-plugin-loader = { workspace = true }
 # The chip's dev-only test support (`abi::sdk::test_support::chip`): a test's own wire writes the

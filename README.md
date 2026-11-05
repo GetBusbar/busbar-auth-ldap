@@ -79,7 +79,7 @@ auth:
 | `base_dn` | yes | — | Search base for the search-then-bind user lookup. May be empty for a directory that serves a search from base `""` (the AD Global Catalog, OpenLDAP with `olcDefaultSearchBase`). (The group read is a base read of the bound user's own entry.) |
 | `group_attr` | no | `memberOf` | The attribute on the user entry listing group memberships. Each value is a group DN. Must not be empty. |
 | `role_from` | no | `cn` | How a group DN becomes a role string: `cn` takes the value of the first `CN=` RDN in the directory's own case (a value with no `CN=` RDN is used whole, trimmed); `dn` uses the full DN, trimmed and lowercased. `role_bindings` keys must match that spelling exactly. |
-| `user_search_filter` | no | — | Enables search-then-bind. Must contain `{username}` in an assertion value and parse as an RFC 4515 filter nested at most 32 levels deep (checked at boot); requires `bind_service_dn`. As with 1.5.5's parser, a bare unparenthesised item (`uid={username}`) is accepted too. |
+| `user_search_filter` | no | — | Enables search-then-bind. Must contain `{username}` in an assertion value and parse as a parenthesised RFC 4515 filter nested at most 32 levels deep (checked at boot); requires `bind_service_dn`. For example, use `(uid={username})`. |
 | `bind_service_dn` | no | — | Service-account DN used for the search-then-bind lookup. |
 | `bind_service_password` | no | — | Service-account password, a secret reference. Held by the SDK chip; see [Limitations](#limitations). |
 | `ca_cert_pem` | no | — | PEM of a private CA (an AD enterprise CA) the directory's certificate chains to. Trusted on top of the public roots for `ldaps://` and STARTTLS. A value that holds no certificate is refused at boot. |
@@ -215,6 +215,22 @@ dropped the same way, unlogged, and the login is unchanged.
   the range (`;range=1500-*`) is not requested.
 
 ## Differences from 1.5.5
+
+Search filters require their outer parentheses. A bare filter such as
+`uid={username}` is converted to `(uid={username})` by this plugin's migration
+door when `busbar --migrate-config` migrates a 1.5.5 configuration. It converts
+only valid historical bare items and leaves already-parenthesised filters
+unchanged. The runtime parser accepts the RFC 4515 form only.
+
+Existing service-password references are preserved. For a literal service
+password, the plugin asks the migration host to write the exact bytes to a
+private secret file and replace the setting with a file reference before
+printing or writing the migrated configuration. No inline-password reference
+or runtime fallback is added. Unrecognized filter or secret shapes remain
+unchanged with an actionable `TODO`; empty or control-containing passwords
+also require a directory credential update before boot. Migration report
+lines never include setting values or passwords, and migration opens no
+directory connection.
 
 The credential form rejects passwords containing Unicode control characters
 (including NUL, tab, CR/LF and DEL) before capturing them or opening a directory

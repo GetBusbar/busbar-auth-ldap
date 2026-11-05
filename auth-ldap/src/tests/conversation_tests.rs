@@ -745,18 +745,17 @@ fn the_timeout_bounds_each_operation_not_the_whole_login() {
     );
 }
 
-/// The order 1.5.5 had (seam 6): the connection is opened before the DN template refuses a
-/// username, so a refused username is still a bad credential, after the dial.
+/// Reject an invalid DN-template username before consuming a directory connection.
 #[test]
-fn a_username_the_dn_template_refuses_is_refused_after_the_dial() {
+fn a_username_the_dn_template_refuses_is_refused_before_the_dial() {
     let m = module("ldap://127.0.0.1", serde_json::json!({}));
     let mut dir = Directory::new(Vec::new());
     let mut conv = Conversation::new();
     let got = m.login_text(&mut conv, &mut dir, Some("admin,dc=x"), Some("pw"), Some(0));
     assert_eq!(got, Poll::Ready(Login::BadCredential));
-    assert_eq!(dir.seen, vec![Seen::Establish("127.0.0.1:389".into())]);
+    assert!(dir.seen.is_empty(), "no connection is established");
     assert!(dir.written.is_empty(), "no bind is sent for it");
-    assert!(conv.opened(), "the caller closes what was opened");
+    assert!(!conv.opened(), "no connection needs closing");
 
     let mut dir = Directory::new(Vec::new());
     dir.refuse_establish = Some("the connection was refused".into());

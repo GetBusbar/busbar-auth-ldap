@@ -2,9 +2,9 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The search filter: an RFC 4515 string filter to its RFC 4511 BER `Filter`, as a pure function.
-//! The grammar is ldap3's `filter::parse`, alternative for alternative:
+//! The grammar follows RFC 4515:
 //!
-//! * a filter is `(` and, or, not or an item `)`, or a bare item;
+//! * a filter is `(` and, or, not or an item `)`;
 //! * an item is equality / presence / substrings (`attr=...`), `>=` `<=` `~=`, or an extensible
 //!   match (`attr[:dn][:rule]:=v` or `[:dn]:rule:=v`);
 //! * an attribute is a numeric OID (no superfluous leading zeroes) or a name starting with a
@@ -49,17 +49,13 @@ pub const MAX_DEPTH: usize = 32;
 /// # Errors
 /// The filter does not parse.
 pub fn encode(filter: &str) -> Result<Vec<u8>, &'static str> {
-    match filtexpr(filter.as_bytes()) {
+    match self::filter(filter.as_bytes(), 1) {
         Some((ber, [])) => Ok(ber),
         _ => Err(PARSE_ERROR),
     }
 }
 
 type Parsed<'a> = Option<(Vec<u8>, &'a [u8])>;
-
-fn filtexpr(i: &[u8]) -> Parsed<'_> {
-    filter(i, 1).or_else(|| item(i))
-}
 
 /// A parenthesised filter at nesting level `depth` (1 = outermost).
 fn filter(i: &[u8], depth: usize) -> Parsed<'_> {

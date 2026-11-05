@@ -48,6 +48,7 @@ pub mod conversation;
 pub mod door;
 pub(crate) mod filter;
 pub(crate) mod groups;
+pub(crate) mod migrate;
 
 use conversation::{Conversation, Over, Wire};
 

@@ -631,6 +631,7 @@ mod table {
         ops: busbar_contract::abi::auth::Ops,
         statement: super::STATEMENT,
         lifecycle: life(Ldap),
+        migrate: busbar_contract::abi::sdk::migrate::Migrator<crate::migrate::LdapMigration>,
         kind_ops: {
             verify: Safe<NotServed<VerifyIn, IdentifyOut>>,
             begin_login: Safe<BeginLogin>,

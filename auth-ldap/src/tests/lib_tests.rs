@@ -199,6 +199,7 @@ fn an_unparseable_search_filter_is_refused_by_name() {
         "(sAMAccountName={username}".to_string(),
         "sAMAccountName={username})".to_string(),
         "((uid={username}))".to_string(),
+        "uid={username}".to_string(),
         format!("{}(uid={{username}}){}", "(!".repeat(40), ")".repeat(40)),
         // `{username}` where an attribute or a matching rule goes parses for a bare-name sample
         // but fails for most real usernames: the boot check's sample carries escapes.

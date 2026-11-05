@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The filter encoder against 1.5.5's: every vector here is ldap3 0.11's own filter test, byte for
-//! byte, plus the filters this module sends (the group read, an escaped search-then-bind username,
-//! an AD in-chain rule).
+//! RFC 4515 filters encoded as LDAP BER, including the filters this module sends (the group read,
+//! an escaped search-then-bind username, an AD in-chain rule). The standard vectors retain their
+//! historical oracle bytes; bare items are rejected by the current grammar.
 
 use super::{encode, PARSE_ERROR};
 use crate::groups::escape_filter;
@@ -20,9 +20,8 @@ fn greater_or_equal_and_approx_encode_their_own_choice() {
 }
 
 #[test]
-fn the_1_5_5_vectors_encode_byte_for_byte() {
-    let vectors: [(&str, &[u8]); 17] = [
-        ("a=v", b"\xa3\x06\x04\x01a\x04\x01v"),
+fn standard_filter_vectors_encode_as_ldap_ber() {
+    let vectors: [(&str, &[u8]); 16] = [
         ("(a=v)", b"\xa3\x06\x04\x01a\x04\x01v"),
         ("(a<=2)", b"\xa6\x06\x04\x01a\x04\x012"),
         ("(a=*)", b"\x87\x01a"),
@@ -52,7 +51,7 @@ fn the_1_5_5_vectors_encode_byte_for_byte() {
 }
 
 #[test]
-fn the_filters_1_5_5_refused_are_refused() {
+fn malformed_filters_are_refused() {
     for filter in [
         "(&)",
         "(|)",
@@ -72,6 +71,20 @@ fn the_filters_1_5_5_refused_are_refused() {
         "(a=v(x)",
     ] {
         assert_eq!(encode(filter), Err(PARSE_ERROR), "{filter:?}");
+    }
+}
+
+#[test]
+fn a_filter_requires_outer_parentheses() {
+    for item in [
+        "uid=alice",
+        "uid=*",
+        "uid=al*ce",
+        "uid>=alice",
+        "uid:dn:=alice",
+    ] {
+        assert_eq!(encode(item), Err(PARSE_ERROR), "{item:?}");
+        assert!(encode(&format!("({item})")).is_ok(), "{item:?}");
     }
 }
 
