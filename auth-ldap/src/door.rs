@@ -100,12 +100,18 @@ const _: () = assert!(NEED != NEED_ANCHORED, "the two needs are two indices");
 /// `OpenIn.secrets` (a literal value refuses boot).
 pub const SECRET_REFS: &[AbiStr] = &[abi_str("bind_service_password")];
 
+/// JSON Schema for the lifecycle settings document, embedded in the signed Statement.
+const SETTINGS_SCHEMA: &[u8] = include_bytes!("../settings.schema.json");
+
 /// This plugin's Statement.
 pub const STATEMENT: Statement = with_tail(
-    statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
-        .with_rewrites(REWRITES)
-        .with_needs(NEEDS)
-        .with_secret_refs(SECRET_REFS),
+    Statement {
+        settings_schema: busbar_contract::abi::mechanism::call::Blob::json(SETTINGS_SCHEMA),
+        ..statement(NAME, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
+            .with_rewrites(REWRITES)
+            .with_needs(NEEDS)
+            .with_secret_refs(SECRET_REFS)
+    },
     &TAIL,
 );
 
@@ -642,3 +648,7 @@ pub use table::{door, MACRO_DOOR};
 #[cfg(test)]
 #[path = "tests/door_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "settings_schema_tests.rs"]
+mod settings_schema_tests;

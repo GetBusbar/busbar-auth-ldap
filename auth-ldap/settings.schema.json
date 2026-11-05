@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "LDAP login settings",
+  "description": "Lifecycle settings parsed as LdapConfig. The host removes and resolves the bind_service_password reference before validation and lends the secret separately at open. Lifecycle validation additionally parses the LDAP URL, enforces the plaintext transport policy, parses the RFC 4515 filter and checks certificate DER framing.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "url",
+    "bind_dn_template",
+    "base_dn"
+  ],
+  "properties": {
+    "url": {
+      "type": "string",
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+      "description": "An ldap:// or ldaps:// endpoint accepted by the dialer. Plaintext to non-loopback requires start_tls or allow_insecure_transport."
+    },
+    "bind_dn_template": {
+      "type": "string",
+      "pattern": "\\{username\\}",
+      "description": "Contains {username}; direct-bind additionally requires = so it names a DN."
+    },
+    "base_dn": {
+      "type": "string"
+    },
+    "group_attr": {
+      "type": "string",
+      "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]",
+      "default": "memberOf"
+    },
+    "role_from": {
+      "type": "string",
+      "enum": [
+        "cn",
+        "dn"
+      ],
+      "default": "cn"
+    },
+    "user_search_filter": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "pattern": "\\{username\\}",
+      "description": "Optional RFC 4515 filter with {username} in an assertion value. Enables search-then-bind."
+    },
+    "bind_service_dn": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Required and non-blank with a user_search_filter."
+    },
+    "bind_service_password": {
+      "type": "null",
+      "writeOnly": true,
+      "description": "Only absent or null reaches lifecycle settings. A literal password is refused; configure the Statement secret reference for host resolution. A non-empty resolved password is required at open in search-then-bind mode."
+    },
+    "ca_cert_pem": {
+      "type": [
+        "string",
+        "null"
+      ],
+      "description": "Optional additional CA PEM. Every CERTIFICATE block must decode to DER beginning with a SEQUENCE byte, and at least one block is required."
+    },
+    "start_tls": {
+      "type": "boolean",
+      "default": false
+    },
+    "allow_insecure_transport": {
+      "type": "boolean",
+      "default": false
+    },
+    "timeout_secs": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 120,
+      "default": 10
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": [
+          "user_search_filter"
+        ],
+        "properties": {
+          "user_search_filter": {
+            "type": "string"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "bind_service_dn"
+        ],
+        "properties": {
+          "bind_service_dn": {
+            "type": "string",
+            "pattern": "[^\\x09-\\x0D \\x85\\u00A0\\u1680\\u2000-\\u200A\\u2028\\u2029\\u202F\\u205F\\u3000]"
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "bind_dn_template": {
+            "pattern": "="
+          }
+        }
+      }
+    }
+  ]
+}
