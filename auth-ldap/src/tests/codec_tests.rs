@@ -709,3 +709,76 @@ fn a_truncated_character_is_charged_as_one_replacement() {
     assert_eq!(r.text, "ab\u{fffd}");
     assert_eq!(budget, 0);
 }
+
+#[test]
+fn ignored_reply_tails_must_be_complete_ber() {
+    // Formerly accepted: successful BindResponse followed by an OCTET STRING owing two bytes.
+    let witness = [
+        0x30, 0x0e, 0x02, 0x01, 0x01, 0x61, 0x09, 0x0a, 0x01, 0x00, 0x04, 0x00, 0x04, 0x00, 0x04,
+        0x02,
+    ];
+    assert_eq!(decode(&witness), Err(BerError::Overrun));
+    for tag in [0x61, 0x65, 0x78] {
+        let body = [result(0, b"", b""), vec![0x04, 0x02]].concat();
+        assert_eq!(decode(&msg(1, &tlv(tag, &body))), Err(BerError::Overrun));
+    }
+    let bind = tlv(0x61, &result(0, b"", b""));
+    for tail in [
+        vec![0x04],
+        vec![0x04, 0x02],
+        tlv(0xa0, &tlv(0x30, &[0x04, 0x02])),
+    ] {
+        assert_eq!(
+            decode(&msg(1, &[bind.clone(), tail].concat())),
+            Err(BerError::Overrun)
+        );
+    }
+    // Malformed tails after an entry's attributes and after an attribute's values.
+    for attributes in [
+        [tlv(0x30, &[]), vec![0x04, 0x02]].concat(),
+        tlv(
+            0x30,
+            &tlv(
+                0x30,
+                &[tlv(0x04, b"cn"), tlv(0x31, &[]), vec![0x04, 0x02]].concat(),
+            ),
+        ),
+    ] {
+        let entry = tlv(0x64, &[tlv(0x04, b"dn"), attributes].concat());
+        assert_eq!(decode(&msg(1, &entry)), Err(BerError::Overrun));
+    }
+}
+
+#[test]
+fn optional_controls_and_extensions_remain_opaque_and_bounded() {
+    let control = tlv(
+        0x30,
+        &[
+            tlv(0x04, b"1.2"),
+            tlv(0x01, &[0xff]),
+            tlv(0x04, &[0x04, 0xff]),
+        ]
+        .concat(),
+    );
+    let body = [
+        result(0, b"", b""),
+        tlv(0xa3, &tlv(0x04, b"ldap://example")),
+        tlv(0x87, b"sasl"),
+    ]
+    .concat();
+    let wire = msg(1, &[tlv(0x61, &body), tlv(0xa0, &control)].concat());
+    assert!(matches!(
+        decode(&wire),
+        Ok(Message {
+            reply: Reply::Bind(_),
+            ..
+        })
+    ));
+    let mut nested = vec![];
+    for _ in 0..70 {
+        nested = ber::element(ber::SEQUENCE, &nested);
+    }
+    let op = ber::element(0x61, &[result(0, b"", b""), nested].concat());
+    let wire = ber::element(ber::SEQUENCE, &[tlv(0x02, &[1]), op].concat());
+    assert!(matches!(decode(&wire), Err(BerError::Malformed(_))));
+}

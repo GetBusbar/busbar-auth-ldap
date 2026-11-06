@@ -222,6 +222,35 @@ pub fn expect<'a>(
     Ok((t.content, rest))
 }
 
+/// Validate every element, including ignored optional fields, without allocating or decoding
+/// primitive payloads. Constructed extensions may nest at most 64 levels; an explicit stack
+/// bounds work space even for a hostile reply. OCTET STRING control values remain opaque.
+pub(crate) fn validate_elements(mut input: &[u8]) -> Result<(), BerError> {
+    let mut parents: [&[u8]; 64] = [&[]; 64];
+    let mut depth = 0;
+    loop {
+        if input.is_empty() {
+            if depth == 0 {
+                return Ok(());
+            }
+            depth -= 1;
+            input = parents[depth];
+            continue;
+        }
+        let (element, rest) = read(input)?;
+        if element.tag & 0x20 != 0 && !element.content.is_empty() {
+            let slot = parents.get_mut(depth).ok_or(BerError::Malformed(
+                "constructed fields nested more than 64 levels",
+            ))?;
+            *slot = rest;
+            depth += 1;
+            input = element.content;
+        } else {
+            input = rest;
+        }
+    }
+}
+
 /// An INTEGER-shaped content as an `i64`.
 ///
 /// # Errors

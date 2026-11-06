@@ -417,6 +417,9 @@ pub fn decode_within(
     if !rest.is_empty() {
         return Err(BerError::Malformed("bytes after the message"));
     }
+    // LDAP sequences are extensible: ignore unknown well-formed optional fields, but never
+    // ignore an incomplete BER tail, including inside controls, results and attributes.
+    ber::validate_elements(content)?;
     let (id, rest) = ber::expect(content, ber::INTEGER, "a message without its id")?;
     let id = i32::try_from(ber::int_value(id)?)
         .map_err(|_| BerError::Malformed("a message id out of range"))?;
