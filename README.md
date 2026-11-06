@@ -7,7 +7,6 @@ The AD/LDAP auth module as a droppable busbar plugin: a cdylib exporting the aut
 |---|---|---|---|---|
 | `auth` | `ldap` | `busbar-auth-ldap-plugin` | 1.6.0 (pinned in `.busbar-ref`) | Apache-2.0 |
 
-[![ci](https://github.com/GetBusbar/busbar-auth-ldap/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/GetBusbar/busbar-auth-ldap/actions/workflows/ci.yml)
 <!-- fleet:header:end -->
 
 ## What it is for
