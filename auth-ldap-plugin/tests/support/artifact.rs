@@ -41,6 +41,7 @@ pub fn plugin_path() -> std::path::PathBuf {
         .unwrap();
     for source in [
         "Cargo.toml",
+        "Cargo.lock",
         "auth-ldap/Cargo.toml",
         "auth-ldap-plugin/Cargo.toml",
         "auth-ldap/src",

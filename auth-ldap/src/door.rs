@@ -25,8 +25,8 @@ use busbar_contract::abi::mechanism::door::{Rewrite, Statement};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::auth_door::with_tail;
 use busbar_contract::abi::sdk::auth_kit::login_identity;
-use busbar_contract::abi::sdk::conn::{Answer, Connector, Host};
-use busbar_contract::abi::sdk::cred::{Cred, SealedWrite};
+use busbar_contract::abi::sdk::conn::{Answer, ConnFailure, Connector, Host};
+use busbar_contract::abi::sdk::cred::{Cred, SealedWrite, NOT_SECURE};
 use busbar_contract::abi::sdk::door::{abi_str, alias, statement, AbiIn, AbiOut};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, Safe, SafeSlot};
@@ -56,7 +56,7 @@ const TAIL: AuthTail = {
     t
 };
 
-/// The need every login's stream is established on.
+/// The need a login dials on when the operator names no private CA.
 pub const NEED: u32 = 0;
 /// The need a login dials on when the operator names a private CA (`ca_cert_pem`).
 pub const NEED_ANCHORED: u32 = 1;
@@ -432,7 +432,18 @@ impl Wire for HostWire<'_> {
     }
 
     fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>> {
-        self.serve(|c, s| w.poll(c, s))
+        let mut refused = false;
+        let answer = self.serve(|c, s| {
+            let answer = w.poll(c, s);
+            refused =
+                matches!(&answer, Poll::Ready(Err(ConnFailure::Refused(t))) if t == NOT_SECURE);
+            answer
+        });
+        if refused {
+            // The chip closed the stream it would not bind on: nothing is left to release.
+            self.stream = None;
+        }
+        answer
     }
 
     fn now_ns(&mut self) -> Option<u64> {

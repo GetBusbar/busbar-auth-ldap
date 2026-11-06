@@ -79,6 +79,7 @@ fn only_valid_historical_bare_items_are_wrapped() {
         "uid=*{username}*",
         "uid>={username}",
         "uid:dn:caseExactMatch:={username}",
+        ":dn:2.5.13.5:={username}",
     ] {
         let original = json!({"user_search_filter": bare});
         let migrated = LdapMigration::migrate(original, "1.5.5");
@@ -89,6 +90,11 @@ fn only_valid_historical_bare_items_are_wrapped() {
     for unknown in [
         json!("uid={username})"),
         json!("(&(uid={username})"),
+        // A bare AND, OR or NOT was never a 1.5.5 item: it failed every login, so wrapping it
+        // would silently give it a meaning (NOT matches everyone but the user).
+        json!("!(uid={username})"),
+        json!("&(uid={username})(objectClass=person)"),
+        json!("|(uid={username})(mail={username})"),
         json!("uid=someone"),
         json!("{username}=alice"),
         json!("CANARY{username}"),
@@ -141,7 +147,12 @@ fn unsafe_password_shapes_remain_unchanged_with_private_todos() {
 
 #[test]
 fn literal_password_bytes_are_retained_only_in_settings_until_the_host_lifts_them() {
-    for password in ["none", "", "CANARY\npassword", "päss密碼 ${VAR}"] {
+    for (password, todo) in [
+        ("none", false),
+        ("", true),
+        ("CANARY\npassword", true),
+        ("päss密碼 ${VAR}", false),
+    ] {
         let original = json!({"bind_service_password": password});
         let migrated = door_migrate(&original, "1.5.5");
         assert_eq!(migrated.settings, original);
@@ -153,7 +164,8 @@ fn literal_password_bytes_are_retained_only_in_settings_until_the_host_lifts_the
         );
         assert_eq!(
             migrated.report.iter().any(|line| line.starts_with("TODO")),
-            password.is_empty() || password.chars().any(char::is_control)
+            todo,
+            "{password:?}"
         );
         assert!(!migrated.report.join("\n").contains("CANARY"));
         assert!(!migrated.report.join("\n").contains("${VAR}"));
@@ -162,4 +174,56 @@ fn literal_password_bytes_are_retained_only_in_settings_until_the_host_lifts_the
         let lifted = json!({"bind_service_password": {"file": "/private/ldap-secret"}});
         assert_eq!(door_migrate(&lifted, "1.5.5"), Migrated::unchanged(lifted));
     }
+}
+
+/// Only the released baseline converts, in either spelling the host reports it; any other source
+/// version (a near miss included) is handed back unchanged with nothing to report.
+#[test]
+fn only_the_released_baseline_converts() {
+    for from in ["1.5.5", "v1.5.5"] {
+        let migrated = LdapMigration::migrate(old_settings(), from);
+        assert_eq!(
+            migrated.settings["user_search_filter"], "(uid={username})",
+            "{from}"
+        );
+        assert_eq!(migrated.needs.len(), 1, "{from}");
+    }
+    for from in [
+        "", "1.5.4", "v1.5.4", "1.5.5.1", "1.5.50", "V1.5.5", "1.6.0",
+    ] {
+        assert_eq!(
+            LdapMigration::migrate(old_settings(), from),
+            Migrated::unchanged(old_settings()),
+            "{from:?}"
+        );
+    }
+}
+
+/// A 1.5.5 settings value that is not an object is left as it is, with one TODO asking for one.
+#[test]
+fn settings_that_are_not_an_object_are_left_with_a_todo() {
+    for settings in [Value::Null, json!([]), json!("ldaps://directory.example")] {
+        let migrated = LdapMigration::migrate(settings.clone(), "1.5.5");
+        assert_eq!(migrated.settings, settings);
+        assert_eq!(migrated.report.len(), 1, "{settings}");
+        assert!(
+            migrated.report[0].starts_with("TODO settings: "),
+            "{settings}"
+        );
+        assert!(migrated.needs.is_empty());
+    }
+}
+
+/// An explicit null filter or service password is already current: nothing changes or is reported.
+#[test]
+fn null_filter_and_password_are_unchanged_and_unreported() {
+    let settings = json!({
+        "url": "ldaps://directory.example",
+        "user_search_filter": null,
+        "bind_service_password": null
+    });
+    assert_eq!(
+        LdapMigration::migrate(settings.clone(), "1.5.5"),
+        Migrated::unchanged(settings)
+    );
 }

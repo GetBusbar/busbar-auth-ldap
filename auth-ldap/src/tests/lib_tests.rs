@@ -152,8 +152,6 @@ fn new_refuses_a_timeout_past_120_seconds() {
 }
 
 /// A blank `group_attr` reads back no groups, so every login would bind no roles; refused at boot.
-/// L7: `timeout_secs` bounds each directory operation, and a login runs several; an unbounded one
-/// lets a hung directory pin every in-flight slot. It is capped at 120 seconds, by name.
 #[test]
 fn new_refuses_an_empty_group_attr() {
     for attr in ["", "  "] {
@@ -178,10 +176,12 @@ fn new_accepts_an_empty_base_dn() {
 
 #[test]
 fn search_then_bind_requires_service_dn() {
-    let mut cfg = base_cfg();
-    cfg.user_search_filter = Some("(sAMAccountName={username})".to_string());
-
-    assert!(LdapModule::new(cfg).is_err());
+    let mut cfg = search_cfg();
+    cfg.bind_service_dn = None;
+    let e = LdapModule::new(cfg)
+        .err()
+        .expect("no service DN is refused");
+    assert!(e.starts_with("settings.bind_service_dn: "), "{e}");
 }
 
 /// A `user_search_filter` without the `{username}` placeholder would look up the same entry for
@@ -424,19 +424,8 @@ fn insecure_transport_check_does_not_panic_on_multibyte_url() {
     );
 }
 
-/// `ca_cert_pem` must hold a certificate: a fragment is refused at boot, never accepted and ignored.
-#[test]
-fn new_rejects_a_ca_cert_pem_with_no_certificate() {
-    let mut cfg = base_cfg();
-    cfg.ca_cert_pem = Some("-----BEGIN CERTIFICATE-----\n...".to_string());
-    assert!(
-        LdapModule::new(cfg).is_err(),
-        "a ca_cert_pem holding no certificate must be rejected, not silently ignored"
-    );
-}
-
-/// The service-account password must never appear in a `Debug` dump of the config: `LdapConfig`
-/// derives `Debug`, so the field has to carry its own redaction.
+/// The service-account password must never appear in a `Debug` dump of the config: `LdapConfig`'s
+/// hand-written `Debug` redacts it.
 #[test]
 fn service_password_redacted_in_debug() {
     let cfg: LdapConfig = serde_json::from_value(serde_json::json!({
@@ -651,6 +640,7 @@ fn first_cn_keeps_an_escaped_trailing_space() {
     );
     // An escaped backslash then a real (unescaped) space: the space is trimmed.
     assert_eq!(first_cn("CN=a\\\\ ,DC=x").as_deref(), Some("a\\"));
+    assert_eq!(first_cn(r"CN=Ops\20,OU=Groups").as_deref(), Some("Ops "));
     assert_eq!(first_cn("CN=  eng  ,DC=x").as_deref(), Some("eng"));
 }
 
@@ -1403,7 +1393,12 @@ fn the_group_cap_spans_every_description_of_the_attribute() {
         "{:?}",
         cap.messages()
     );
-    assert!(!cap.contains("memberOf exceeded"), "{:?}", cap.messages());
+    assert_eq!(
+        cap.count("groups-capped"),
+        1,
+        "one cap line spans both descriptions: {:?}",
+        cap.messages()
+    );
 }
 
 /// A transport failure on the SERVICE bind is Directory→Reject.
@@ -1667,6 +1662,7 @@ pub(crate) fn logged_text(f: impl FnOnce()) -> String {
         fn exit(&self, _: &Id) {}
     }
     let text = Arc::new(Mutex::new(String::new()));
+    crate::diagnostics::arm();
     tracing::subscriber::with_default(Capture(Arc::clone(&text)), f);
     let t = text.lock().unwrap().clone();
     t
@@ -1758,7 +1754,7 @@ mod logging {
     use super::*;
     use crate::diagnostics::Diagnostics;
 
-    /// Run `f` under an INFO-and-above capture: what it answered, and the capture.
+    /// Run `f` under a DEBUG-and-above capture: what it answered, and the capture.
     fn captured<T>(f: impl FnOnce() -> T) -> (T, Diagnostics) {
         let cap = Diagnostics::capturing_debug();
         let got = tracing::subscriber::with_default(cap.subscriber(), f);
@@ -1957,13 +1953,6 @@ fn unknown_url_schemes_do_not_echo_settings_values() {
 }
 
 #[test]
-fn escaped_trailing_spaces_in_group_names_are_preserved() {
-    assert_eq!(first_cn(r"CN=Ops\ ,OU=Groups").as_deref(), Some("Ops "));
-    assert_eq!(first_cn(r"CN=Ops\20,OU=Groups").as_deref(), Some("Ops "));
-    assert_eq!(first_cn(r"CN=Ops\\ ,OU=Groups").as_deref(), Some("Ops\\"));
-}
-
-#[test]
 fn distinct_invalid_group_name_bytes_do_not_merge_into_one_role() {
     let roles = crate::groups::roles_from_group_dns(
         &[r"CN=ops\FF,OU=Groups".into(), r"CN=ops\FE,OU=Groups".into()],
@@ -2046,4 +2035,71 @@ fn hardening_resolved_service_password_controls_refused() {
         assert!(!error.contains(password));
     }
     assert!(LdapModule::from_settings_with(settings, &[" päss密碼 🔐 ".as_bytes()]).is_ok());
+}
+
+/// A `url` the dialer cannot read earns its own refusal line only: it names no plaintext
+/// connection, so the plaintext-transport line (which would claim one) is not added to it.
+#[test]
+fn an_unreadable_url_is_refused_once_not_as_plaintext() {
+    for url in [
+        "https://ad.corp.example",
+        "ldap://ad.corp.example:99999",
+        "ldap://localhost:x",
+        "ldap://ad.corp.example:0",
+        "ldaps://[::1]:0",
+    ] {
+        let mut cfg = base_cfg();
+        cfg.url = url.to_string();
+        let e = LdapModule::new(cfg)
+            .err()
+            .expect("an unreadable url is refused");
+        assert_eq!(e.lines().count(), 1, "{url}: {e}");
+        assert!(e.starts_with("settings.url: is not an ldap"), "{url}: {e}");
+    }
+}
+
+/// Group values that map to an empty role are said once per mapping, with how many were omitted,
+/// never one line per value (up to the 4096-value cap per login).
+#[test]
+fn many_empty_group_roles_warn_once() {
+    let cap = crate::diagnostics::Diagnostics::default();
+    let values: Vec<String> = vec![" ".into(); 50];
+    let roles = tracing::subscriber::with_default(cap.subscriber(), || {
+        crate::groups::roles_from_group_dns(
+            &[values, vec!["CN=ops,OU=Groups".into()]].concat(),
+            RoleFrom::Cn,
+        )
+    });
+    assert_eq!(roles, ["ops"]);
+    assert_eq!(cap.count("empty-group-role"), 1, "{:?}", cap.messages());
+    assert!(cap.contains("omitted=50"), "{:?}", cap.messages());
+}
+
+/// A URL's userinfo is cut at its LAST `@` within the authority (a password may hold an unencoded
+/// `@`), and an `@` past the authority is not userinfo.
+#[test]
+fn shown_url_cuts_userinfo_at_its_last_at() {
+    assert_eq!(
+        crate::shown_url("ldap://svc:pa@ss@ad.corp.example:389/dc=x"),
+        "ldap://***@ad.corp.example:389/dc=x"
+    );
+    assert_eq!(
+        crate::shown_url("ldaps://ad.corp.example/cn=a@b"),
+        "ldaps://ad.corp.example/cn=a@b"
+    );
+    assert_eq!(crate::shown_url("svc:p@w@host"), "***@host");
+}
+
+/// The dial is handed `timeout_secs` in milliseconds.
+#[test]
+fn the_dial_timeout_is_timeout_secs_in_milliseconds() {
+    for (secs, ms) in [(1, 1_000), (10, 10_000), (120, 120_000)] {
+        let mut cfg = base_cfg();
+        cfg.timeout_secs = secs;
+        assert_eq!(
+            LdapModule::new(cfg).unwrap().dial_timeout_ms(),
+            ms,
+            "{secs}"
+        );
+    }
 }

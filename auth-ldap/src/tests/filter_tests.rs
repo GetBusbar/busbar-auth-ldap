@@ -157,3 +157,21 @@ fn a_numeric_oid_has_at_least_two_components() {
     assert_eq!(encode("(1=value)"), Err(PARSE_ERROR));
     assert!(encode("(1.2=value)").is_ok());
 }
+
+/// RFC 4515 §3's `dnattrs = COLON "dn"` is an ABNF quoted string, so case-insensitive (RFC 5234
+/// §2.3): `:DN:` and `:Dn:` mark dnAttributes exactly as `:dn:` does, never a rule named `DN`.
+#[test]
+fn the_dn_attributes_marker_is_case_insensitive() {
+    for (upper, lower) in [
+        ("(ou:DN:=People)", "(ou:dn:=People)"),
+        ("(ou:Dn:2.5.13.5:=x)", "(ou:dn:2.5.13.5:=x)"),
+        ("(:DN:2.5.13.5:=x)", "(:dn:2.5.13.5:=x)"),
+    ] {
+        assert_eq!(ber(upper), ber(lower), "{upper}");
+    }
+    let rule = ber("(cn:DNMatch:=value)");
+    assert_eq!(
+        rule, b"\xa9\x14\x81\x07DNMatch\x82\x02cn\x83\x05value",
+        "a rule whose name begins with DN stays a rule, with no dnAttributes"
+    );
+}

@@ -27,6 +27,7 @@ pub fn roles_from_group_dns(group_dns: &[String], mode: RoleFrom) -> Vec<String>
     let mut out: Vec<String> = Vec::with_capacity(group_dns.len());
 
     let mut seen: HashSet<String> = HashSet::with_capacity(group_dns.len());
+    let mut omitted = 0_usize;
     for dn in group_dns {
         let role = match mode {
             RoleFrom::Cn => match first_cn(dn) {
@@ -38,25 +39,30 @@ pub fn roles_from_group_dns(group_dns: &[String], mode: RoleFrom) -> Vec<String>
             RoleFrom::Dn => dn.trim().to_lowercase(),
         };
         if role.is_empty() {
-            tracing::warn!(
-                module = "ldap",
-                reason = "empty-group-role",
-                "ldap group value maps to an empty role and was omitted"
-            );
+            omitted += 1;
         } else if seen.insert(role.clone()) {
             out.push(role);
         }
     }
+    if omitted > 0 {
+        tracing::warn!(
+            module = "ldap",
+            reason = "empty-group-role",
+            omitted,
+            "ldap group values map to an empty role and were omitted"
+        );
+    }
     out
 }
 
-/// Extract the value of the first `CN=` attribute of a DN, unescaping the handful of DN escapes we
-/// care about (`\,` `\=` `\+`). Case-insensitive on the `CN` attribute name (LDAP is). A
+/// Extract the value of the first `CN=` attribute of a DN, unescaping its RFC 4514 escapes (every
+/// `\c` single-character escape and `\XX` hex pair). Case-insensitive on the `CN` attribute name (LDAP is). A
 /// multi-valued RDN (`CN=a+UID=b`) is split at its unescaped `+`, and an RDN with no `=` is
-/// skipped. Returns `None` if there is no CN component.
+/// skipped. Returns `None` if there is no CN component, or if its hex escapes do not decode as
+/// UTF-8 (the caller then uses the whole value).
 pub(crate) fn first_cn(dn: &str) -> Option<String> {
-    for rdn in split_unescaped(dn, ',') {
-        for ava in split_unescaped(&rdn, '+') {
+    for rdn in split_unescaped(dn, b',') {
+        for ava in split_unescaped(rdn, b'+') {
             let Some((attr, val)) = ava.split_once('=') else {
                 continue;
             };
@@ -84,29 +90,32 @@ fn trim_unescaped(v: &str) -> &str {
 
 /// Split a DN at every unescaped `sep` (`,` between RDNs, `+` between the attribute-value
 /// assertions of a multi-valued RDN), keeping each `\x` escape whole for the value unescaper. (A
-/// minimal RFC 4514 split — enough for real AD/OpenLDAP memberOf values.)
-fn split_unescaped(dn: &str, sep: char) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut cur = String::new();
-    let mut chars = dn.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => {
-                cur.push('\\');
-                if let Some(n) = chars.next() {
-                    cur.push(n);
-                }
-            }
-            c if c == sep => {
-                parts.push(std::mem::take(&mut cur));
-            }
-            _ => cur.push(c),
+/// minimal RFC 4514 split — enough for real AD/OpenLDAP memberOf values.) The parts borrow `dn`:
+/// a directory value is split without an allocation per part. A trailing empty part is dropped.
+fn split_unescaped(dn: &str, sep: u8) -> impl Iterator<Item = &str> {
+    let bytes = dn.as_bytes();
+    let (mut start, mut at, mut done) = (0, 0, false);
+    std::iter::from_fn(move || {
+        if done {
+            return None;
         }
-    }
-    if !cur.is_empty() {
-        parts.push(cur);
-    }
-    parts
+        while at < bytes.len() {
+            match bytes[at] {
+                // The escaped byte is never a separator: `sep` is ASCII, and a multi-byte
+                // character's later bytes are all non-ASCII.
+                b'\\' => at += 2,
+                b if b == sep => {
+                    let part = &dn[start..at];
+                    at += 1;
+                    start = at;
+                    return Some(part);
+                }
+                _ => at += 1,
+            }
+        }
+        done = true;
+        (start < dn.len()).then(|| &dn[start..])
+    })
 }
 
 /// Unescape the DN-value escapes that survive [`split_unescaped`], per RFC 4514:

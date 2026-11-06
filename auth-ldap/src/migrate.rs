@@ -37,11 +37,11 @@ impl Migrate for LdapMigration {
                         migrated.report.push(FILTER_TODO.into());
                     } else if crate::filter::encode(&sample).is_ok() {
                         // Already current syntax: retain spelling and make reruns a no-op.
-                    } else if !template.starts_with('(')
+                    } else if !template.starts_with(['(', '&', '|', '!'])
                         && crate::filter::encode(&format!("({sample})")).is_ok()
                     {
-                        // A bare item was the old parser's only alternative to a parenthesised
-                        // filter. The strict parser validates the equivalent wrapped item, with
+                        // A bare item (never an AND, OR or NOT) was the old parser's only
+                        // alternative to a parenthesised filter. The strict parser validates the equivalent wrapped item, with
                         // the hostile sample ensuring the placeholder is an assertion value.
                         *template = format!("({template})");
                         migrated.report.push(

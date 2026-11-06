@@ -172,12 +172,18 @@ fn extensible(i: &[u8]) -> Parsed<'_> {
     attr_dn_mrule(i).or_else(|| dn_mrule(i))
 }
 
+/// The `:dn` dnAttributes marker (`dnattrs = COLON "dn"`, an ABNF string, so any case: RFC 5234
+/// §2.3) when a `:` follows it: whether it is there, and what follows it (that `:` included).
+fn dnattrs(i: &[u8]) -> (bool, &[u8]) {
+    match i {
+        [b':', d, n, b':', ..] if [*d, *n].eq_ignore_ascii_case(b"dn") => (true, &i[3..]),
+        _ => (false, i),
+    }
+}
+
 fn attr_dn_mrule(i: &[u8]) -> Parsed<'_> {
     let (attr, i) = attributedescription(i)?;
-    let (dn, i) = match i.strip_prefix(b":dn") {
-        Some(r) if r.starts_with(b":") => (true, r),
-        _ => (false, i),
-    };
+    let (dn, i) = dnattrs(i);
     let (mrule, i) = match i.strip_prefix(b":").and_then(attributetype) {
         Some((m, r)) => (Some(m), r),
         None => (None, i),
@@ -188,10 +194,7 @@ fn attr_dn_mrule(i: &[u8]) -> Parsed<'_> {
 }
 
 fn dn_mrule(i: &[u8]) -> Parsed<'_> {
-    let (dn, i) = match i.strip_prefix(b":dn") {
-        Some(r) if r.starts_with(b":") => (true, r),
-        _ => (false, i),
-    };
+    let (dn, i) = dnattrs(i);
     let (mrule, i) = attributetype(i.strip_prefix(b":")?)?;
     let i = i.strip_prefix(b":=")?;
     let (value, i) = unescaped(i)?;

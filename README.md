@@ -76,8 +76,8 @@ auth:
 | `url` | yes | — | `ldaps://host:636` (implicit TLS), or `ldap://host:389` for plaintext/STARTTLS. |
 | `bind_dn_template` | yes | — | Turns a username into the bind DN. Must contain `{username}`; validated at boot. In direct-bind mode it must expand to a DN (contain `=`). |
 | `base_dn` | yes | — | Search base for the search-then-bind user lookup. May be empty for a directory that serves a search from base `""` (the AD Global Catalog, OpenLDAP with `olcDefaultSearchBase`). (The group read is a base read of the bound user's own entry.) |
-| `group_attr` | no | `memberOf` | The attribute on the user entry listing group memberships. Each value is a group DN. Must not be empty. |
-| `role_from` | no | `cn` | How a group DN becomes a role string: `cn` takes the value of the first `CN=` RDN in the directory's own case (a value with no `CN=` RDN is used whole, trimmed); `dn` uses the full DN, trimmed and lowercased. `role_bindings` keys must match that spelling exactly. |
+| `group_attr` | no | `memberOf` | The attribute on the user entry listing group memberships. Each value is a group DN. Must not be empty. Name it as the directory returns it (`memberOf`, not its OID): the reply is matched by name, case-insensitively, options ignored. |
+| `role_from` | no | `cn` | How a group DN becomes a role string: `cn` takes the value of the first `CN=` RDN in the directory's own case (a value with no `CN=` RDN, an empty one, or one whose `\XX` escapes do not decode as UTF-8 is used whole, trimmed); `dn` uses the full DN, trimmed and lowercased. `role_bindings` keys must match that spelling exactly. |
 | `user_search_filter` | no | — | Enables search-then-bind. Must contain `{username}` in an assertion value and parse as a parenthesised RFC 4515 filter nested at most 32 levels deep (checked at boot); requires `bind_service_dn`. For example, use `(uid={username})`. |
 | `bind_service_dn` | no | — | Service-account DN used for the search-then-bind lookup. |
 | `bind_service_password` | no | — | Service-account password, a secret reference. Held by the SDK chip; see [Limitations](#limitations). |
@@ -102,7 +102,8 @@ STARTTLS is rejected at config time: it would put the service-account
 password and every end-user password on the wire in the clear.
 `allow_insecure_transport: true` knowingly overrides that guard for a
 trusted, isolated segment. It is a no-op for `ldaps://`, for STARTTLS,
-and for a loopback host.
+and for a loopback host (`localhost`, `127.0.0.1` or `::1`; any other
+address counts as remote).
 
 ### Verdicts
 
@@ -117,13 +118,15 @@ directory answers are which). Every log line carries `module=ldap` and a
 | `no-match`, `ambiguous`, `empty-dn` | info | the search-then-bind user search found no single entry |
 | `invalid-credentials`, `bind-refused` | info | the directory refused the user bind (49, or another non-outage code) |
 | `bind-account-locked` | info | an AD bind failure reports the exact `data 775` account-lockout marker; only a static code and label are logged |
-| `no-clock`, `clock-failed`, `directory-error` | warn | an outage: no host clock, or the directory could not answer |
+| `no-clock`, `clock-failed`, `directory-error` | warn | an outage: no host clock, or the directory could not answer (a `clock-failed` between messages is not: the login goes on, timed on the clock reading it began with) |
 | `no-entry`, `group-read-refused`, `no-group-attribute`, `range-truncated`, `groups-capped`, `over-cap`, `not-utf8-values`, `empty-group-role` | warn | the login stands with fewer (or no) roles |
 | `close-failed`, `close-pended` | warn | the host did not complete the synchronous stream release |
 | `reference-skipped` | debug | a search referral was ignored; referrals are not chased |
 | `root-dse-base` (info), `insecure-transport` (warn) | | logged at boot |
 
-`groups-capped` reports `count_at_least`: decoding keeps one value past
+`range-truncated` and `empty-group-role` are logged at most once per login,
+counting the partial descriptions (`partial`) and the omitted values
+(`omitted`). `groups-capped` reports `count_at_least`: decoding keeps one value past
 its existing limit to detect truncation without allocating the remaining values.
 `over-cap` is that decoding limit's own line: one attribute's values past it
 were counted (`skipped`) and never read. One operation logs at most 64
@@ -244,7 +247,7 @@ Service-bind rejection diagnostics include the numeric LDAP result and its stati
 name, never the password, DN or server-supplied diagnostic text.
 AD BindResponse diagnostics with the exact `data 775` marker additionally emit
 `bind-account-locked`, `ad_data=775`, and the static `account-locked` label once.
-The raw diagnostic and matched DN are never logged. Invalid UTF-8, control characters,
+The bind's raw diagnostic and matched DN are never logged. Invalid UTF-8, control characters,
 ambiguous data fields, and other diagnostic markers do not produce this classification.
 User and service bind verdicts remain unchanged; the user-facing response does not
 reveal account-lockout status.
@@ -272,10 +275,10 @@ names is `busbar-contract` — the plugin contract, whose `abi::sdk` module
 carries the export macros. `busbar-plugin-loader` is a dev-dependency only,
 for the linked + dropped-in conformance test and the end-to-end test. Both
 are **git dependencies pinned to one busbar commit**: the `rev` in every
-`Cargo.toml` is field 1 of `.busbar-ref`, and CI's `pin` job refuses a
-manifest that disagrees. No sibling checkout of busbar is needed to build
-or test; the live end-to-end test (`tests/e2e.rs`) builds the real `busbar`
-binary from a checkout named by `BUSBAR_CHECKOUT` (CI's `e2e` job provides
+`Cargo.toml` is field 1 of `.busbar-ref`, and CI refuses a manifest that
+disagrees. No sibling checkout of busbar is needed to build or test; the
+live end-to-end test (`auth-ldap-plugin/tests/e2e.rs`) builds the real
+`busbar` binary from a checkout named by `BUSBAR_CHECKOUT` (CI provides
 one at `.busbar-ref`).
 
 ### Pack and sign

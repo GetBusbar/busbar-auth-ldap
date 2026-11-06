@@ -36,11 +36,16 @@ cleanup() {
     rc=$?
     trap - EXIT
     if [[ -n $server_pid ]]; then
-        "${privilege[@]}" kill "$server_pid" 2>/dev/null || true
+        ${privilege[@]+"${privilege[@]}"} kill "$server_pid" 2>/dev/null || true
     fi
-    if [[ -n $launcher_pid ]]; then wait "$launcher_pid" 2>/dev/null || true; fi
+    # The launcher is slapd in the foreground (-d), under a root sudo unless this runs as root:
+    # with no pidfile read it is still running, and only a privileged kill reaches it.
+    if [[ -n $launcher_pid ]]; then
+        ${privilege[@]+"${privilege[@]}"} kill "$launcher_pid" 2>/dev/null || true
+        wait "$launcher_pid" 2>/dev/null || true
+    fi
     cat "$work/slapd.log" >&2
-    "${privilege[@]}" rm -rf "$work"
+    ${privilege[@]+"${privilege[@]}"} rm -rf "$work"
     echo 'macos-ldap: isolated directory stopped and removed' >&2
     exit "$rc"
 }
@@ -64,18 +69,24 @@ shasum -a 256 "$work/slapd.conf" >&2
 sed '/^rootpw /s/ .*/ [fixture secret]/' "$work/slapd.conf" >&2
 # The existing TLS fixture relays to this exact loopback address. No machine-wide
 # directory configuration, persistent service or test skip is installed.
-"${privilege[@]}" "$slapd" -Tt -u -f "$work/slapd.conf" >> "$work/slapd.log" 2>&1
-"${privilege[@]}" "$slapd" -f "$work/slapd.conf" -h ldap://127.0.0.1:389 -d 256 >> "$work/slapd.log" 2>&1 &
+${privilege[@]+"${privilege[@]}"} "$slapd" -Tt -u -f "$work/slapd.conf" >> "$work/slapd.log" 2>&1
+${privilege[@]+"${privilege[@]}"} "$slapd" -f "$work/slapd.conf" -h ldap://127.0.0.1:389 -d 256 >> "$work/slapd.log" 2>&1 &
 launcher_pid=$!
+ready=
 for _ in {1..100}; do
     if [[ -s $work/slapd.pid ]]; then
         server_pid=$(cat "$work/slapd.pid")
-        if "${privilege[@]}" /usr/sbin/lsof -nP -a -p "$server_pid" \
-            -iTCP:389 -sTCP:LISTEN > "$work/ready.log" 2>&1; then break; fi
+        if ${privilege[@]+"${privilege[@]}"} /usr/sbin/lsof -nP -a -p "$server_pid" \
+            -iTCP:389 -sTCP:LISTEN > "$work/ready.log" 2>&1; then ready=1; break; fi
     fi
-    kill -0 "$launcher_pid" 2>/dev/null || { cat "$work/ready.log" >&2 2>/dev/null || true; exit 1; }
+    ${privilege[@]+"${privilege[@]}"} kill -0 "$launcher_pid" 2>/dev/null || {
+        cat "$work/ready.log" >&2 2>/dev/null || true
+        echo 'macos-ldap: slapd exited before listening' >&2
+        exit 1
+    }
     sleep 0.1
 done
+[[ -n $ready ]] || { echo 'macos-ldap: slapd did not listen on 127.0.0.1:389 in time' >&2; exit 1; }
 cat "$work/ready.log" >&2
 ps -p "$server_pid" -o pid= -o command= >&2
 "$ldapsearch" -x -H ldap://127.0.0.1:389 \

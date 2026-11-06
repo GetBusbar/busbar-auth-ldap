@@ -755,14 +755,12 @@ fn a_username_the_dn_template_refuses_is_refused_before_the_dial() {
     assert_eq!(got, Poll::Ready(Login::BadCredential));
     assert!(dir.seen.is_empty(), "no connection is established");
     assert!(dir.written.is_empty(), "no bind is sent for it");
-    assert!(!conv.opened(), "no connection needs closing");
 
     let mut dir = Directory::new(Vec::new());
     dir.refuse_establish = Some("the connection was refused".into());
     let mut conv = Conversation::new();
     let got = m.login_text(&mut conv, &mut dir, Some("alice"), Some("pw"), Some(0));
     assert_eq!(got, Poll::Ready(Login::Outage));
-    assert!(!conv.opened());
 }
 
 /// Opens, takes every byte, never answers.
@@ -1411,4 +1409,282 @@ fn ad_bind_diagnostic_wrong_absent_and_invalid_utf8_markers_are_not_classified()
         "success remains success"
     );
     assert!(!captured.contains("bind-account-locked"));
+}
+
+/// A directory that splits the group attribute into many partial ranges is said once per login:
+/// one `range-truncated` line naming the first range and how many descriptions were partial, never
+/// one line per description (a hostile reply could name tens of thousands within the budget).
+#[test]
+fn many_partial_ranges_warn_once() {
+    let m = module("ldap://127.0.0.1", serde_json::json!({}));
+    let mut attrs = Vec::new();
+    for k in 0..200 {
+        let mut attr = Vec::new();
+        ber::tlv(
+            &mut attr,
+            ber::OCTET_STRING,
+            format!("memberOf;range={k}-{k}").as_bytes(),
+        );
+        ber::tlv(
+            &mut attr,
+            ber::SET,
+            &ber::element(ber::OCTET_STRING, format!("CN=g{k}").as_bytes()),
+        );
+        ber::tlv(&mut attrs, ber::SEQUENCE, &attr);
+    }
+    let mut content = Vec::new();
+    ber::tlv(&mut content, ber::OCTET_STRING, ALICE.as_bytes());
+    ber::tlv(&mut content, ber::SEQUENCE, &attrs);
+    let mut dir = Directory::new(vec![
+        bind_response(1, 0),
+        message(2, ber::element(0x64, &content)),
+        done(2, 0),
+    ]);
+    let cap = crate::diagnostics::Diagnostics::default();
+    let (got, _) =
+        tracing::subscriber::with_default(cap.subscriber(), || login(&m, &mut dir, "pw"));
+    let Login::Identity(p) = got else {
+        panic!("{got:?}")
+    };
+    assert_eq!(p.roles.len(), 200, "every returned value still maps");
+    assert_eq!(cap.count("range-truncated"), 1, "{:?}", cap.messages());
+    assert!(cap.contains("partial=200"), "{:?}", cap.messages());
+}
+
+/// A search keeps only the attributes it asked for: the user search asks for none (`1.1`), so a
+/// directory that answers it with attributes anyway leaves none in the conversation, which every
+/// later wake of the login replays (and would otherwise copy each time).
+#[test]
+fn a_search_keeps_only_the_attributes_it_asked_for() {
+    let m = module(
+        "ldap://127.0.0.1",
+        serde_json::json!({
+            "user_search_filter": "(uid={username})",
+            "bind_service_dn": "cn=svc,dc=x",
+            "bind_service_password": "svc-pw",
+        }),
+    );
+    let mut dir = Directory::new(vec![
+        bind_response(1, 0),
+        entry(2, ALICE, "description", &["unrequested"; 50]),
+        done(2, 0),
+        bind_response(3, 0),
+        entries(
+            4,
+            ALICE,
+            &[
+                ("memberOf", "CN=eng,DC=x"),
+                ("MEMBEROF;range=0-0", "CN=ops,DC=x"),
+                ("description", "unrequested"),
+            ],
+        ),
+        done(4, 0),
+    ])
+    .pending();
+    let mut conv = Conversation::new();
+    let got = loop {
+        if let Poll::Ready(l) =
+            m.login_text(&mut conv, &mut dir, Some("alice"), Some("pw"), Some(0))
+        {
+            break l;
+        }
+    };
+    let Login::Identity(p) = got else {
+        panic!("{got:?}")
+    };
+    assert_eq!(
+        p.roles,
+        ["ops", "eng"],
+        "the group attribute maps in any case and with options"
+    );
+    let found: Vec<_> = conv
+        .kept
+        .iter()
+        .filter_map(|k| match k {
+            super::Kept::Found(entries) => Some(entries),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(found.len(), 2, "the user search and the group read");
+    assert!(
+        found[0].iter().all(|e| e.attrs.is_empty()),
+        "the user search kept attributes it never asked for: {:?}",
+        found[0]
+    );
+    let mut kept: Vec<_> = found[1][0].attrs.keys().map(String::as_str).collect();
+    kept.sort_unstable();
+    assert_eq!(
+        kept,
+        ["MEMBEROF;range=0-0", "memberOf"],
+        "the group read keeps its own attribute, every spelling, and nothing else"
+    );
+}
+
+/// A stream whose reads take the time `steps` says (one second each past them), on a clock the
+/// stream owner offers between messages.
+struct Paced {
+    dir: Directory,
+    now: u64,
+    steps: VecDeque<u64>,
+}
+
+impl Wire for Paced {
+    fn establish(&mut self, target: &str) -> Poll<Result<(), String>> {
+        self.dir.establish(target)
+    }
+    fn secure(&mut self) -> Poll<Result<(), String>> {
+        self.dir.secure()
+    }
+    fn write(&mut self, bytes: &[u8]) -> Poll<Result<usize, String>> {
+        self.dir.write(bytes)
+    }
+    fn write_sealed(&mut self, w: &mut SealedWrite) -> Poll<Result<(), String>> {
+        self.dir.write_sealed(w)
+    }
+    fn read(&mut self, buf: &mut [u8]) -> Poll<Result<usize, String>> {
+        self.now += self.steps.pop_front().unwrap_or(1) * 1_000_000_000;
+        self.dir.read(buf)
+    }
+    fn now_ns(&mut self) -> Option<u64> {
+        Some(self.now)
+    }
+}
+
+/// Each operation gives up `timeout_secs` after IT begins, on the stream owner's clock, even when
+/// earlier operations of the same entry took most of that long: a bind answered in 9 s of a 10 s
+/// budget leaves the group read its own 10 s, not the 1 s left of the bind's.
+#[test]
+fn each_operation_has_its_own_timeout_from_its_own_start() {
+    let m = module("ldap://127.0.0.1", serde_json::json!({"timeout_secs": 10}));
+    let mut wire = Paced {
+        dir: Directory::new(vec![
+            bind_response(1, 0),
+            entry(2, ALICE, "memberOf", &["CN=eng,DC=x"]),
+            done(2, 0),
+        ]),
+        now: 0,
+        steps: VecDeque::from([9, 1, 1]),
+    };
+    let mut conv = Conversation::new();
+    let got = m.login_text(&mut conv, &mut wire, Some("alice"), Some("pw"), Some(0));
+    let Poll::Ready(Login::Identity(p)) = got else {
+        panic!("{got:?}")
+    };
+    assert_eq!(p.roles, ["eng"]);
+}
+
+/// One SearchResultEntry carrying several single-valued attributes.
+fn entries(id: i64, dn: &str, attrs: &[(&str, &str)]) -> Vec<u8> {
+    let mut list = Vec::new();
+    for (name, value) in attrs {
+        let mut a = Vec::new();
+        ber::tlv(&mut a, ber::OCTET_STRING, name.as_bytes());
+        ber::tlv(
+            &mut a,
+            ber::SET,
+            &ber::element(ber::OCTET_STRING, value.as_bytes()),
+        );
+        ber::tlv(&mut list, ber::SEQUENCE, &a);
+    }
+    let mut op = Vec::new();
+    ber::tlv(&mut op, ber::OCTET_STRING, dn.as_bytes());
+    ber::tlv(&mut op, ber::SEQUENCE, &list);
+    message(id, ber::element(0x64, &op))
+}
+
+/// Message ids run 1..=i32::MAX and then wrap to 1, never to 0 (an unsolicited notice) or below.
+#[test]
+fn message_ids_wrap_past_i32_max_to_one() {
+    let mut conv = Conversation::default();
+    assert_eq!(conv.next_id(), 1);
+    conv.next_id = i32::MAX - 1;
+    assert_eq!(conv.next_id(), i32::MAX);
+    assert_eq!(conv.next_id(), 1);
+}
+
+/// The operation-ending failures of the stream and the directory, each named.
+#[test]
+fn stream_and_reply_failures_end_the_operation_in_their_own_words() {
+    use crate::{Io, LdapBackend, SearchScope};
+    let failed = |r: Result<Vec<crate::DirEntry>, Io>| match r {
+        Err(Io::Failed(e)) => e,
+        r => panic!("{r:?}"),
+    };
+
+    // A URL the dialer cannot read never reaches the stream.
+    let mut dir = Directory::new(Vec::new());
+    let mut conv = Conversation::new();
+    let mut over = super::Over::new(&mut conv, &mut dir, "https://x", false, Some(0), 10);
+    assert_eq!(
+        over.connect(),
+        Err(Io::Failed(
+            "unknown LDAP URL scheme (expected ldap or ldaps)".into()
+        ))
+    );
+    assert!(dir.seen.is_empty(), "no dial");
+
+    // A write the stream takes nothing of.
+    let mut dir = Directory::new(Vec::new());
+    dir.write_chunk = Some(0);
+    let mut conv = Conversation::new();
+    let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, Some(0), 10);
+    over.connect().expect("connects");
+    let e = failed(over.search("dc=x", SearchScope::Base, "(objectClass=*)", &["cn"]));
+    assert_eq!(e, "the directory took no bytes");
+
+    // A filter that does not encode fails its operation before a byte is sent.
+    let mut dir = Directory::new(Vec::new());
+    let mut conv = Conversation::new();
+    let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, Some(0), 10);
+    over.connect().expect("connects");
+    let e = failed(over.search("dc=x", SearchScope::Base, "objectClass=*", &["cn"]));
+    assert_eq!(e, crate::filter::PARSE_ERROR);
+
+    // A search answered with something that is no search result.
+    let mut dir = Directory::new(vec![bind_response(1, 0)]);
+    let mut conv = Conversation::new();
+    let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, Some(0), 10);
+    over.connect().expect("connects");
+    let e = failed(over.search("dc=x", SearchScope::Base, "(objectClass=*)", &["cn"]));
+    assert_eq!(e, "malformed reply: not a search result");
+
+    // An unsolicited message (id 0) that is not an ExtendedResponse still ends the session.
+    let mut dir = Directory::new(vec![bind_response(0, 52)]);
+    let mut conv = Conversation::new();
+    let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", false, Some(0), 10);
+    over.connect().expect("connects");
+    let e = failed(over.search("dc=x", SearchScope::Base, "(objectClass=*)", &["cn"]));
+    assert_eq!(
+        e,
+        "the directory ended the session: an unsolicited notification"
+    );
+}
+
+/// StartTLS answered with a refusal, or with something that is no ExtendedResponse, never
+/// secures the stream: the connect fails with the answer's words, having sent the StartTLS request
+/// alone.
+#[test]
+fn a_refused_or_malformed_start_tls_answer_fails_the_connect() {
+    use crate::{Io, LdapBackend};
+    for (reply, want) in [
+        (extended(1, 52), "rc=52 (unavailable)"),
+        (
+            bind_response(1, 0),
+            "malformed reply: not an extended response",
+        ),
+    ] {
+        let mut dir = Directory::new(vec![reply]);
+        let mut conv = Conversation::new();
+        let mut over = super::Over::new(&mut conv, &mut dir, "ldap://127.0.0.1", true, Some(0), 10);
+        match over.connect() {
+            Err(Io::Failed(e)) => assert!(e.contains(want), "{e}"),
+            r => panic!("{r:?}"),
+        }
+        assert!(!dir.seen.contains(&Seen::Secure), "never secured");
+        assert_eq!(
+            dir.written,
+            codec::start_tls(1),
+            "the StartTLS request alone"
+        );
+    }
 }

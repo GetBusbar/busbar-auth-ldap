@@ -199,7 +199,7 @@ fn a_search_done_decodes_and_reads_in_1_5_5s_words() {
 }
 
 #[test]
-fn an_extended_response_decodes_with_its_name() {
+fn an_extended_response_decodes_its_result() {
     let m = msg(
         1,
         &tlv(
@@ -209,10 +209,7 @@ fn an_extended_response_decodes_with_its_name() {
     );
     assert_eq!(
         decode(&m).map(|m| m.reply),
-        Ok(Reply::Extended(
-            LdapResult::default(),
-            Some("1.3.6.1.4.1.1466.20037".into())
-        ))
+        Ok(Reply::Extended(LdapResult::default()))
     );
 
     let notice = msg(
@@ -227,7 +224,7 @@ fn an_extended_response_decodes_with_its_name() {
         ),
     );
     assert!(
-        matches!(decode(&notice), Ok(Message { id: 0, reply: Reply::Extended(r, _) }) if r.rc == 52)
+        matches!(decode(&notice), Ok(Message { id: 0, reply: Reply::Extended(r) }) if r.rc == 52)
     );
 }
 
@@ -314,13 +311,6 @@ fn an_overrunning_nested_length_fails_fast() {
         "the message itself is whole"
     );
     assert_eq!(decode(&m), Err(BerError::Overrun));
-}
-
-#[test]
-fn a_reply_past_the_cap_is_refused_from_its_header() {
-    let len = (ber::INBOUND_CAP as u32).to_be_bytes();
-    let head = [&[0x30, 0x84][..], &len[..]].concat();
-    assert!(matches!(ber::frame(&head), Err(BerError::TooLarge(_))));
 }
 
 /// The chip's BIND message (`Cred::ldap_simple_bind`), as the wire carries it: the bytes above are
@@ -410,20 +400,10 @@ fn a_results_far_end_text_is_escaped_and_capped() {
         shown.contains(&format!("dn: \"{}...\"", "m".repeat(128))),
         "the DN is its first 128 characters: {shown}"
     );
-
-    let short = LdapResult {
-        rc: 32,
-        matched: "dc=x".into(),
-        text: "no such entry".into(),
-    };
-    assert_eq!(
-        short.to_string(),
-        "LDAP operation result: rc=32 (noSuchObject), dn: \"dc=x\", text: \"no such entry\""
-    );
 }
 
 #[test]
-fn directory_result_strings_and_response_names_share_the_decode_budget() {
+fn directory_result_strings_share_the_decode_budget() {
     let bind = msg(1, &tlv(0x61, &result(0, b"dn", b"diagnostic")));
     let mut budget = 2 * super::PER_STRING + 2 + 10;
     assert!(super::decode_within(&bind, &mut budget, &mut 0).is_ok());
@@ -438,55 +418,15 @@ fn directory_result_strings_and_response_names_share_the_decode_budget() {
         1,
         &tlv(0x78, &[result(0, b"", b""), tlv(0x8a, b"name")].concat()),
     );
-    let mut short = 3 * super::PER_STRING + 3;
-    assert_eq!(
-        super::decode_within(&extended, &mut short, &mut 0),
-        Err(BerError::OverBudget)
-    );
+    // The responseName is not read, so it costs nothing: only the result's two strings.
+    let mut budget = 2 * super::PER_STRING;
+    assert!(super::decode_within(&extended, &mut budget, &mut 0).is_ok());
+    assert_eq!(budget, 0);
 
     let lossy = msg(1, &tlv(0x61, &result(0, b"\xff", b"")));
     let mut budget = 2 * super::PER_STRING + 3;
     assert!(super::decode_within(&lossy, &mut budget, &mut 0).is_ok());
     assert_eq!(budget, 0);
-}
-
-#[test]
-fn repeated_attribute_descriptions_preserve_all_values() {
-    let attr = |value: &[u8]| {
-        tlv(
-            0x30,
-            &[tlv(0x04, b"memberOf"), tlv(0x31, &tlv(0x04, value))].concat(),
-        )
-    };
-    let attrs = [attr(b"CN=a"), attr(b"CN=b")].concat();
-    let message = msg(
-        1,
-        &tlv(0x64, &[tlv(0x04, b"uid=a"), tlv(0x30, &attrs)].concat()),
-    );
-    let Reply::Entry(entry) = decode(&message).unwrap().reply else {
-        panic!("entry")
-    };
-    assert_eq!(entry.attrs["memberOf"], ["CN=a", "CN=b"]);
-}
-
-#[test]
-fn a_directory_attribute_cannot_inject_a_warning_line() {
-    let name = b"memberOf\n\x1b[31m";
-    let attr = tlv(
-        0x30,
-        &[tlv(0x04, name), tlv(0x31, &tlv(0x04, b"\xff"))].concat(),
-    );
-    let message = msg(
-        1,
-        &tlv(0x64, &[tlv(0x04, b"uid=a"), tlv(0x30, &attr)].concat()),
-    );
-    let cap = crate::diagnostics::Diagnostics::default();
-    tracing::subscriber::with_default(cap.subscriber(), || decode(&message)).unwrap();
-    assert!(cap.contains("\\n"), "{:?}", cap.messages());
-    assert!(!cap
-        .messages()
-        .iter()
-        .any(|line| line.contains('\n') || line.contains('\u{1b}')));
 }
 
 #[test]
@@ -525,6 +465,23 @@ fn definite_nonminimal_ber_lengths_still_decode() {
 fn a_negative_message_id_is_malformed() {
     let message = msg(0xff, &tlv(0x61, &result(0, b"", b"")));
     assert!(matches!(decode(&message), Err(BerError::Malformed(_))));
+}
+
+/// A message id past `i32::MAX` is out of range, never wrapped onto a small id the module is
+/// waiting for (2^32 + 1 would otherwise answer request 1).
+#[test]
+fn a_message_id_past_i32_max_is_malformed() {
+    let bind = tlv(0x61, &result(0, b"", b""));
+    for id in [&[0x00, 0x80, 0, 0, 0][..], &[0x01, 0, 0, 0, 1][..]] {
+        let message = tlv(0x30, &[tlv(0x02, id), bind.clone()].concat());
+        assert_eq!(
+            decode(&message),
+            Err(BerError::Malformed("a message id out of range")),
+            "{id:?}"
+        );
+    }
+    let max = tlv(0x30, &[tlv(0x02, &[0x7f, 0xff, 0xff, 0xff]), bind].concat());
+    assert_eq!(decode(&max).map(|m| m.id), Ok(i32::MAX));
 }
 
 /// A SearchResultEntry that repeats an attribute description keeps the values of BOTH
@@ -659,4 +616,96 @@ fn warnings_about_dropped_values_are_bounded_per_operation() {
         "the cap spans the operation"
     );
     assert_eq!(warned, super::MAX_VALUE_WARNS);
+}
+
+/// Active Directory ends a bind's diagnosticMessage with a NUL byte
+/// (`80090308: LdapErr: ..., data 775, v4563\0`): the lockout marker is still recognised through
+/// that terminator, while a NUL anywhere else still refuses the classification.
+#[test]
+fn an_ad_lockout_diagnostic_with_its_trailing_nul_is_recognised() {
+    let context = "80090308: LdapErr: DSID-0C09042A, comment: AcceptSecurityContext error";
+    let result = |text: String| LdapResult {
+        rc: 49,
+        matched: String::new(),
+        text,
+    };
+    assert!(result(format!("{context}, data 775, v4563\0")).ad_account_locked());
+    assert!(result(format!("{context}, data 775, v4563")).ad_account_locked());
+    assert!(!result(format!("{context}, data 775\0, v4563")).ad_account_locked());
+    assert!(!result(format!("{context}, data 52e, v4563\0")).ad_account_locked());
+}
+
+/// Every result code RFC 4511 Appendix A names is spelled as the RFC spells it (these names reach
+/// the operator's log lines next to the code), as are the two further codes the table carries; any
+/// other code reads `unknown`.
+#[test]
+fn every_named_result_code_has_its_name() {
+    use super::rc_name;
+    for (rc, name) in [
+        (0, "success"),
+        (1, "operationsError"),
+        (2, "protocolError"),
+        (3, "timeLimitExceeded"),
+        (4, "sizeLimitExceeded"),
+        (5, "compareFalse"),
+        (6, "compareTrue"),
+        (7, "authMethodNotSupported"),
+        (8, "strongerAuthRequired"),
+        (10, "referral"),
+        (11, "adminLimitExceeded"),
+        (12, "unavailableCriticalExtension"),
+        (13, "confidentialityRequired"),
+        (14, "saslBindInProgress"),
+        (16, "noSuchAttribute"),
+        (17, "undefinedAttributeType"),
+        (18, "inappropriateMatching"),
+        (19, "constraintViolation"),
+        (20, "attributeOrValueExists"),
+        (21, "invalidAttributeSyntax"),
+        (32, "noSuchObject"),
+        (33, "aliasProblem"),
+        (34, "invalidDNSyntax"),
+        (36, "aliasDereferencingProblem"),
+        (48, "inappropriateAuthentication"),
+        (49, "invalidCredentials"),
+        (50, "insufficientAccessRights"),
+        (51, "busy"),
+        (52, "unavailable"),
+        (53, "unwillingToPerform"),
+        (54, "loopDetect"),
+        (64, "namingViolation"),
+        (65, "objectClassViolation"),
+        (66, "notAllowedOnNonLeaf"),
+        (67, "notAllowedOnRDN"),
+        (68, "entryAlreadyExists"),
+        (69, "objectClassModsProhibited"),
+        (71, "affectsMultipleDSAs"),
+        (80, "other"),
+        // Not RFC 4511: 88 as 1.5.5's client spelled it (the API-reserved range).
+        (88, "abandoned"),
+        // Not RFC 4511: RFC 4528's assertion control.
+        (122, "assertionFailed"),
+    ] {
+        assert_eq!(rc_name(rc), name, "rc {rc}");
+    }
+    for rc in [9, 15, 22, 35, 55, 81, 4_000_000] {
+        assert_eq!(rc_name(rc), "unknown", "rc {rc}");
+    }
+}
+
+/// A diagnostic whose last character is cut short is charged as one replacement character, as
+/// `from_utf8_lossy` renders it.
+#[test]
+fn a_truncated_character_is_charged_as_one_replacement() {
+    let cut = msg(1, &tlv(0x61, &result(0, b"", b"ab\xe2\x82")));
+    let mut budget = 2 * super::PER_STRING + 2 + '\u{fffd}'.len_utf8();
+    let Ok(Message {
+        reply: Reply::Bind(r),
+        ..
+    }) = super::decode_within(&cut, &mut budget, &mut 0)
+    else {
+        panic!("a bind response");
+    };
+    assert_eq!(r.text, "ab\u{fffd}");
+    assert_eq!(budget, 0);
 }

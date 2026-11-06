@@ -671,10 +671,6 @@ fn ldap_form_flow_binds_mints_key_and_gates_wrong_password() {
     );
     let page = ok_page.text().unwrap();
     assert!(
-        page.contains("ldap:uid=alice"),
-        "identity ldap:uid=alice must appear: {page}"
-    );
-    assert!(
         page.contains("user:ldap:uid=alice"),
         "the key is bound to alice's own self-serve group: {page}"
     );

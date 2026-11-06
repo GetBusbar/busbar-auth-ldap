@@ -108,9 +108,11 @@ impl Endpoint {
         }
         let port = match port {
             None | Some("") => default_port,
+            // Port 0 names no listener: no directory can answer on it.
             Some(p) if p.bytes().all(|b| b.is_ascii_digit()) => p
                 .parse::<u16>()
                 .ok()
+                .filter(|port| *port != 0)
                 .ok_or_else(|| "url parse error: invalid port number".to_string())?,
             Some(_) => return Err("url parse error: invalid port number".to_string()),
         };
@@ -231,7 +233,7 @@ const MAX_ENTRIES_KEPT: usize = 2;
 
 /// The most messages one operation reads. Its deadline is checked between entries of the op, so a
 /// directory that answers Ready forever (entries, or messages for another id) is cut off here. A
-/// group read answers one entry and a user search is refused past two; 1024 is far above any.
+/// group read answers one entry and a user search is refused past one; 1024 is far above any.
 const MAX_MESSAGES: u32 = 1024;
 
 /// The most bytes one operation reads from the directory in all, however many messages carry them:
@@ -251,7 +253,6 @@ pub struct Conversation {
     inbound: Vec<u8>,
     buf: Box<[u8]>,
     next_id: i32,
-    opened: bool,
     deadline_ns: Option<u64>,
 }
 
@@ -271,15 +272,8 @@ impl Conversation {
             inbound: Vec::new(),
             buf: vec![0; READ_CHUNK].into_boxed_slice(),
             next_id: 0,
-            opened: false,
             deadline_ns: None,
         }
-    }
-
-    /// Whether the stream was opened (and so is the caller's to close).
-    #[must_use]
-    pub const fn opened(&self) -> bool {
-        self.opened
     }
 
     /// The instant (the caller's monotonic clock) the operation in progress gives up, once set.
@@ -348,14 +342,18 @@ impl<'a, W: Wire> Over<'a, W> {
         Err(Io::Failed(e.into()))
     }
 
-    /// The operation in progress, begun as `start` when none is.
+    /// The operation in progress, begun as `start` when none is, its deadline then set
+    /// `timeout_secs` from now. A resumed operation already past its deadline ends here with
+    /// [`TIMEOUT`] (the operation is dropped).
     fn doing(&mut self, start: impl FnOnce(&mut Conversation) -> Doing) -> Result<(), Io> {
         let wait = self.timeout_secs.saturating_mul(crate::NS_PER_SEC);
         if self.conv.doing.is_none() {
             let mut d = start(&mut *self.conv);
             d.read_bytes = self.conv.inbound.len();
             self.conv.doing = Some(d);
-            self.conv.deadline_ns = self.now_ns.map(|n| n.saturating_add(wait));
+            // The operation's own start: the stream owner's clock now, else the entry's reading.
+            let began = self.wire.now_ns().or(self.now_ns);
+            self.conv.deadline_ns = began.map(|n| n.saturating_add(wait));
         } else if let Some(now) = self.now_ns {
             let deadline = *self
                 .conv
@@ -494,7 +492,7 @@ impl<'a, W: Wire> Over<'a, W> {
             }
             if m.id == 0 {
                 let text = match m.reply {
-                    Reply::Extended(r, _) => r.to_string(),
+                    Reply::Extended(r) => r.to_string(),
                     _ => "an unsolicited notification".to_string(),
                 };
                 return self.fail(format!("the directory ended the session: {text}"));
@@ -524,6 +522,16 @@ impl<'a, W: Wire> Over<'a, W> {
     }
 }
 
+/// Whether a search for `attrs` asked for the attribute `description`: its type (options
+/// ignored, case-insensitive) is one asked for. `1.1` asks for none (RFC 4511 §4.5.1.8).
+fn asked(attrs: &[&str], description: &str) -> bool {
+    let kind = crate::attribute_type(description);
+    attrs
+        .iter()
+        .filter(|a| **a != crate::NO_ATTRIBUTES)
+        .any(|a| crate::attribute_type(a).eq_ignore_ascii_case(kind))
+}
+
 fn wired<T>(p: Poll<Result<T, String>>) -> Result<T, Option<String>> {
     match p {
         Poll::Pending => Err(None),
@@ -547,28 +555,25 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                 Stage::Establish => match wired(self.wire.establish(&endpoint.target)) {
                     Err(None) => return Err(Io::Pending),
                     Err(Some(e)) => return self.fail(e),
-                    Ok(()) => {
-                        self.conv.opened = true;
-                        match endpoint.security {
-                            Security::Plain => break,
-                            Security::Implicit => self.set_stage(Stage::Secure),
-                            Security::StartTls => {
-                                let id = self.conv.next_id();
-                                if let Some(d) = self.conv.doing.as_mut() {
-                                    d.id = id;
-                                    d.out = codec::start_tls(id);
-                                    d.stage = Stage::SendStartTls;
-                                }
+                    Ok(()) => match endpoint.security {
+                        Security::Plain => break,
+                        Security::Implicit => self.set_stage(Stage::Secure),
+                        Security::StartTls => {
+                            let id = self.conv.next_id();
+                            if let Some(d) = self.conv.doing.as_mut() {
+                                d.id = id;
+                                d.out = codec::start_tls(id);
+                                d.stage = Stage::SendStartTls;
                             }
                         }
-                    }
+                    },
                 },
                 Stage::SendStartTls => {
                     self.send()?;
                     self.set_stage(Stage::ReadStartTls);
                 }
                 Stage::ReadStartTls => match self.reply()? {
-                    Reply::Extended(r, _) if r.rc == 0 => {
+                    Reply::Extended(r) if r.rc == 0 => {
                         if !self.conv.inbound.is_empty() {
                             return self.fail(
                                 "the directory sent data after the StartTLS response, before TLS",
@@ -576,7 +581,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
                         }
                         self.set_stage(Stage::Secure);
                     }
-                    Reply::Extended(r, _) => return self.fail(r.to_string()),
+                    Reply::Extended(r) => return self.fail(r.to_string()),
                     _ => return self.fail("malformed reply: not an extended response"),
                 },
                 Stage::Secure => match wired(self.wire.secure()) {
@@ -654,9 +659,12 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
         }
         loop {
             match self.reply()? {
-                Reply::Entry(e) => {
+                Reply::Entry(mut e) => {
                     if let Some(d) = self.conv.doing.as_mut() {
                         if d.entries.len() < MAX_ENTRIES_KEPT {
+                            // Only what the search asked for is kept (and replayed on every later
+                            // wake): a directory may answer `1.1` or one attribute with more.
+                            e.attrs.retain(|description, _| asked(attrs, description));
                             d.entries.push(e);
                         }
                     }

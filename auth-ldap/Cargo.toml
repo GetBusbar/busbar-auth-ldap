@@ -25,8 +25,7 @@ tracing = { workspace = true }
 # the chip's `Cred` in a buffer wiped on drop.
 zeroize = { workspace = true }
 # No LDAP client crate and no socket or TLS stack: the module speaks LDAP through its own sans-IO
-# codec (src/ber.rs, src/filter.rs, src/codec.rs) over the host connector's stream (BUSBAR-1.6.0.md
-# THE DESIGN §5; R5/Q82).
+# codec (src/ber.rs, src/filter.rs, src/codec.rs) over the host connector's stream.
 
 [dev-dependencies]
 jsonschema = { workspace = true }

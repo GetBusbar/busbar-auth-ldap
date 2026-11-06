@@ -184,14 +184,18 @@ pub struct LdapConfig {
 fn default_group_attr() -> String {
     "memberOf".to_string()
 }
+
 /// Nanoseconds in a second: the host clock's unit per `timeout_secs` unit.
 pub(crate) const NS_PER_SEC: u64 = 1_000_000_000;
 
 /// The longest `timeout_secs` may be, in seconds.
 const MAX_TIMEOUT_SECS: u64 = 120;
 
+/// `timeout_secs` when the settings name none, in seconds.
+const DEFAULT_TIMEOUT_SECS: u64 = 10;
+
 fn default_timeout_secs() -> u64 {
-    10
+    DEFAULT_TIMEOUT_SECS
 }
 
 impl fmt::Debug for LdapConfig {
@@ -439,7 +443,7 @@ fn holds_a_certificate(pem: &str) -> bool {
         };
         let body: String = after[..end].split_whitespace().collect();
         match base64::engine::general_purpose::STANDARD.decode(body) {
-            Ok(der) if der.first() == Some(&0x30) => found = true,
+            Ok(der) if der.first() == Some(&ber::SEQUENCE) => found = true,
             _ => return false,
         }
         rest = &after[end + END.len()..];
@@ -450,6 +454,8 @@ fn holds_a_certificate(pem: &str) -> bool {
 /// Would binding over this URL send credentials in CLEARTEXT on the network? True only for a
 /// plaintext `ldap://` scheme (not `ldaps://`), with STARTTLS off, to a NON-loopback host. `ldaps://`
 /// is implicit TLS; STARTTLS upgrades the `ldap://` socket; a loopback host never leaves the box.
+/// A URL the dialer cannot read names no connection at all: [`check_settings`] refuses it on its
+/// own line, and it never reaches a dial.
 fn is_insecure_transport(url: &str, start_tls: bool) -> bool {
     let url = url.trim();
 
@@ -461,7 +467,7 @@ fn is_insecure_transport(url: &str, start_tls: bool) -> bool {
         return false;
     }
 
-    !conversation::Endpoint::parse(url, false).is_ok_and(|e| is_loopback_host(&e.host))
+    conversation::Endpoint::parse(url, false).is_ok_and(|e| !is_loopback_host(&e.host))
 }
 
 /// Is this host a loopback address that never leaves the machine? Matches the canonical trio only —
@@ -694,7 +700,8 @@ pub(crate) const fn is_outage(rc: u32) -> bool {
 /// Why a bind attempt did not yield an identity.
 #[derive(Debug)]
 enum BindError {
-    /// The directory rejected the username/password (LDAP result 49 or a no-match/ambiguous search).
+    /// The credential is refused: the directory answered LDAP result 49, the user search matched
+    /// no entry, several, or one with an empty DN, or the username is one the module never sends.
     InvalidCredentials,
     /// The user bind answered a non-zero result code other than 49 that is not a server/session
     /// condition ([`is_outage`]): the credential is refused, and the code is logged.
@@ -1005,17 +1012,31 @@ impl LdapModule {
                     "ldap group attribute exceeded the cap; truncating group values"
                 );
             }
+            // One line per login, naming the first partial range and how many there were: a
+            // reply may split the attribute into as many descriptions as its budget holds.
+            let mut partial = 0_usize;
+            let mut first_partial = None;
             for (description, values) in attributes {
                 if let Some(range) = partial_range(&description) {
-                    tracing::warn!(
-                        module = "ldap",
-                        reason = "range-truncated",
-                        attribute = %codec::shown(&description),
-                        range = %codec::shown(&range["range=".len()..]),
-                        "ldap group attribute truncated by the directory's MaxValRange; only the returned values are mapped to roles"
-                    );
+                    partial += 1;
+                    if partial == 1 {
+                        first_partial = Some((
+                            codec::shown(&description),
+                            codec::shown(&range["range=".len()..]),
+                        ));
+                    }
                 }
                 group_dns.extend(values.into_iter().take(MAX_GROUP_VALUES - group_dns.len()));
+            }
+            if let Some((attribute, range)) = first_partial {
+                tracing::warn!(
+                    module = "ldap",
+                    reason = "range-truncated",
+                    attribute = %attribute,
+                    range = %range,
+                    partial,
+                    "ldap group attribute truncated by the directory's MaxValRange; only the returned values are mapped to roles"
+                );
             }
         }
 

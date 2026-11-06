@@ -28,8 +28,6 @@ const EXTENDED_REQUEST: u8 = 0x77;
 const EXTENDED_RESPONSE: u8 = 0x78;
 /// ExtendedRequest's `requestName` [0] (RFC 4511 §4.12).
 const REQUEST_NAME: u8 = 0x80;
-/// ExtendedResponse's `responseName` [10] (RFC 4511 §4.12).
-const RESPONSE_NAME: u8 = 0x8a;
 
 /// The most values one attribute keeps: one past the group cap, so the module still sees (and
 /// logs) a truncation; the rest are skipped, never turned into strings.
@@ -141,12 +139,16 @@ pub struct LdapResult {
 impl LdapResult {
     /// Recognize AD's account-lockout subcode without returning directory-controlled text.
     /// A replacement character may represent invalid UTF-8 decoded lossily; fail closed on it.
+    /// AD terminates its diagnostic with a NUL, which is the one control character allowed.
     pub(crate) fn ad_account_locked(&self) -> bool {
         const PREFIX: &str = "80090308: LdapErr:";
-        if self.rc != 49 || self.text.chars().any(|c| c.is_control() || c == '\u{fffd}') {
+        let text = self.text.strip_suffix('\0').unwrap_or(&self.text);
+        if self.rc != crate::LDAP_INVALID_CREDENTIALS
+            || text.chars().any(|c| c.is_control() || c == '\u{fffd}')
+        {
             return false;
         }
-        let text = self.text.trim();
+        let text = text.trim();
         if !text
             .get(..PREFIX.len())
             .is_some_and(|head| head.eq_ignore_ascii_case(PREFIX))
@@ -274,8 +276,9 @@ pub enum Reply {
     Reference,
     /// A SearchResultDone.
     Done(LdapResult),
-    /// An ExtendedResponse, with its responseName when present.
-    Extended(LdapResult, Option<String>),
+    /// An ExtendedResponse: its result (StartTLS and a Notice of Disconnection are judged on it
+    /// alone; the responseName is not read).
+    Extended(LdapResult),
     /// Any other protocol op, by its tag.
     Other(u8),
 }
@@ -315,27 +318,21 @@ fn lossy_text(bytes: &[u8], budget: &mut usize) -> Result<String, BerError> {
     Ok(String::from_utf8_lossy(bytes).into_owned())
 }
 
-/// An LDAPResult's three leading components, and what follows them.
-fn ldap_result<'a>(
-    content: &'a [u8],
-    budget: &mut usize,
-) -> Result<(LdapResult, &'a [u8]), BerError> {
+/// An LDAPResult's three leading components; what follows them (a referral, an
+/// ExtendedResponse's name) is not read.
+fn ldap_result(content: &[u8], budget: &mut usize) -> Result<LdapResult, BerError> {
     let (code, rest) = ber::expect(content, ber::ENUMERATED, "a result without its code")?;
     let rc = u32::try_from(ber::int_value(code)?)
         .map_err(|_| BerError::Malformed("a result code out of range"))?;
     let (matched, rest) = ber::expect(rest, ber::OCTET_STRING, "a result without its matched DN")?;
-    let (diag, rest) = ber::expect(rest, ber::OCTET_STRING, "a result without its diagnostic")?;
+    let (diag, _) = ber::expect(rest, ber::OCTET_STRING, "a result without its diagnostic")?;
     let matched = lossy_text(matched, budget)?;
     let diag = lossy_text(diag, budget)?;
-    Ok((
-        LdapResult {
-            rc,
-
-            matched,
-            text: diag,
-        },
-        rest,
-    ))
+    Ok(LdapResult {
+        rc,
+        matched,
+        text: diag,
+    })
 }
 
 /// An entry, decoded within `budget` ([`DECODE_BUDGET`]): every string it keeps is charged as it
@@ -373,7 +370,8 @@ fn entry(content: &[u8], budget: &mut usize, warned: &mut u32) -> Result<Entry, 
                     charge(budget, s.len())?;
                     values.push(s.to_owned());
                 }
-                // Past the cap a value is only counted (warned once per attribute below); the
+                // Past the cap a value is only counted (warned once per attribute below, at most
+                // MAX_VALUE_WARNS lines per operation); the
                 // module still sees `MAX_VALUES_KEPT` and applies its own cap.
                 Ok(_) => skipped += 1,
                 Err(_) => dropped += 1,
@@ -408,8 +406,8 @@ fn entry(content: &[u8], budget: &mut usize, warned: &mut u32) -> Result<Entry, 
 /// lines the operation has logged so far ([`MAX_VALUE_WARNS`]).
 ///
 /// # Errors
-/// Anything that is not an LDAPMessage, an overrunning nested length:
-/// [`BerError`]; [`BerError::OverBudget`] once the budget is spent.
+/// [`BerError::Malformed`] for anything that is not an LDAPMessage, [`BerError::Overrun`] for a
+/// nested length past its parent, [`BerError::OverBudget`] once the budget is spent.
 pub fn decode_within(
     bytes: &[u8],
     budget: &mut usize,
@@ -428,23 +426,11 @@ pub fn decode_within(
 
     let (op, _) = ber::read(rest)?;
     let reply = match op.tag {
-        BIND_RESPONSE => Reply::Bind(ldap_result(op.content, budget)?.0),
+        BIND_RESPONSE => Reply::Bind(ldap_result(op.content, budget)?),
         SEARCH_RESULT_ENTRY => Reply::Entry(entry(op.content, budget, warned)?),
         SEARCH_RESULT_REFERENCE => Reply::Reference,
-        SEARCH_RESULT_DONE => Reply::Done(ldap_result(op.content, budget)?.0),
-        EXTENDED_RESPONSE => {
-            let (result, mut rest) = ldap_result(op.content, budget)?;
-            let mut name = None;
-            while !rest.is_empty() {
-                let (t, next) = ber::read(rest)?;
-                if t.tag == RESPONSE_NAME {
-                    charge(budget, t.content.len())?;
-                    name = Some(text(t.content, "a response name that is not UTF-8")?);
-                }
-                rest = next;
-            }
-            Reply::Extended(result, name)
-        }
+        SEARCH_RESULT_DONE => Reply::Done(ldap_result(op.content, budget)?),
+        EXTENDED_RESPONSE => Reply::Extended(ldap_result(op.content, budget)?),
         other => Reply::Other(other),
     };
     Ok(Message { id, reply })

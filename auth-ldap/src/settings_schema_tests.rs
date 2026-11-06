@@ -56,10 +56,27 @@ fn settings_schema_matches_ldap_lifecycle() {
         ("bind_service_password", Value::Null, true),
         ("bind_service_password", json!("secret"), false),
         ("unknown", Value::Null, false),
+        ("url", json!(" "), false),
+        ("url", json!(1), false),
+        ("group_attr", json!(1), false),
+        ("user_search_filter", json!("(uid=fixed)"), false),
+        ("ca_cert_pem", json!(1), false),
+        ("ca_cert_pem", Value::Null, true),
+        ("allow_insecure_transport", json!("yes"), false),
+        ("allow_insecure_transport", json!(true), true),
+        // An explicit null is absent: direct bind, with no service DN needed.
+        ("user_search_filter", Value::Null, true),
+        ("bind_service_dn", Value::Null, true),
     ] {
         let mut settings = minimal.clone();
         settings[key] = value;
         check(&[(settings, accepted)]);
+    }
+    // Each required key, missing alone, is refused by both.
+    for key in ["url", "bind_dn_template", "base_dn"] {
+        let mut settings = minimal.clone();
+        settings.as_object_mut().unwrap().remove(key);
+        check(&[(settings, false)]);
     }
     let mut search = minimal.clone();
     search["user_search_filter"] = json!("(uid={username})");
@@ -68,6 +85,12 @@ fn settings_schema_matches_ldap_lifecycle() {
     search["bind_dn_template"] = json!("{username}@example");
     // Validate deliberately needs no resolved secret; open obtains it from the host.
     check(&[(search.clone(), true)]);
+    // The placeholder alone refuses, the service DN present.
+    let mut fixed = search.clone();
+    fixed["user_search_filter"] = json!("(uid=fixed)");
+    check(&[(fixed, false)]);
+    search["bind_service_dn"] = Value::Null;
+    check(&[(search.clone(), false)]);
     search["bind_service_dn"] = json!(" ");
     check(&[(search, false)]);
     let cfg: crate::LdapConfig = serde_json::from_value(minimal).unwrap();

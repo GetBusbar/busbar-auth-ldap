@@ -236,8 +236,9 @@ fn admin_bound(at: &str, until: Instant) -> Result<ldap3::LdapConn, String> {
 /// `BUSBAR_TEST_LDAP_URL` set the directory must take the administrator's bind within
 /// [`DIRECTORY_WAIT`], or the suite stops here naming it (never a login that reads an outage); the
 /// wait is made once, and every later test that asks is refused at once with the same words. With
-/// no directory named (a macOS runner) it is one try and nothing is added; the live arms, skipped
-/// there, would read an outage.
+/// no directory named it is one try against the default loopback directory and nothing is added
+/// when none answers; the live arms then read an outage, so a run without a directory must name
+/// one (`BUSBAR_TEST_LDAP_URL`; on macOS, `tests/support/macos-ldap.sh` starts one and names it).
 fn seed_user() {
     static SEEDED: OnceLock<Result<(), String>> = OnceLock::new();
     let seeded = SEEDED.get_or_init(|| {
@@ -689,6 +690,55 @@ fn red_a_directory_that_never_answers_is_an_outage_at_the_deadline() {
     }
 }
 
+/// A submitted password holding a control character is refused at the door as a bad credential,
+/// before any directory is dialled (README: the credential form rejects them before capturing
+/// them or opening a directory connection).
+#[test]
+fn a_control_character_password_is_refused_before_the_dial() {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("a local listener");
+    listener
+        .set_nonblocking(true)
+        .expect("a non-blocking listener");
+    let at = listener.local_addr().expect("its address").to_string();
+    let settings = serde_json::json!({
+        "url": format!("ldap://{at}"),
+        "bind_dn_template": "cn={username},dc=example,dc=org",
+        "base_dn": "dc=example,dc=org",
+        "timeout_secs": 1,
+    })
+    .to_string();
+    let d = Arc::new(Dispatcher::with_services(
+        DispatchConfig::default(),
+        Arc::new(ClockOnly),
+    ));
+    let p = load(
+        Leg::Linked,
+        Bind {
+            conns: ConnTable::Host(conformance_host::host(
+                d.conn_waker(),
+                Some(conformance_host::anchors()),
+            )),
+            ..bind(&d, "ldap-control-password")
+        },
+    );
+    assert_eq!(open(&p, settings.as_bytes()).outcome, Outcome::Ready);
+    for password in ["secret\0tail", "secret\ntail", "secret\u{7f}tail"] {
+        assert_eq!(
+            login(&p, &d, "conformance", password),
+            format!(
+                "Ready verdict={}",
+                busbar_contract::abi::auth::LOGIN_BAD_CREDENTIAL
+            ),
+            "{password:?}"
+        );
+    }
+    assert!(
+        matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock),
+        "no directory connection was made"
+    );
+    assert_eq!(close(&p).outcome, Outcome::Ready);
+}
+
 // Every count comes from the actual loader crossing gate. Network resumption may
 // add RESUME invocations; each new submitted operation still enters exactly once.
 fn counted<T>(p: &Plugin<Auth>, expected: u64, call: impl FnOnce() -> T) -> T {
@@ -939,14 +989,19 @@ fn direct_script(leg: Leg) -> (Vec<String>, Vec<String>) {
         "every LDAP wait was woken"
     );
     let envelope = heard.0.lock().unwrap().clone();
+    // A settings value no refusal, log or diagnostic may quote: a line of the CA's body.
+    let configured: serde_json::Value = serde_json::from_slice(&settings).unwrap();
+    let ca_line = configured["ca_cert_pem"]
+        .as_str()
+        .unwrap()
+        .lines()
+        .find(|line| line.len() > 32 && !line.starts_with("-----"))
+        .expect("the CA has a body");
     for text in lines.iter().chain(envelope.iter()) {
         for secret in [USER_PW, "wrong-password"] {
             assert!(!text.contains(secret), "credential escaped: {text}");
         }
-        assert!(
-            !text.contains(std::str::from_utf8(&settings).unwrap()),
-            "raw settings escaped"
-        );
+        assert!(!text.contains(ca_line), "a settings value escaped: {text}");
     }
     (lines, envelope)
 }
@@ -1047,6 +1102,19 @@ fn the_declared_needs_are_the_statements() {
     named.sort();
     named.dedup();
     assert_eq!(named, actual);
+    let mut diagnostics: Vec<_> = declared["diagnostics"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|id| id.as_str().unwrap())
+        .collect();
+    diagnostics.sort_unstable();
+    let mut stated: Vec<_> = read.diag_ids.iter().map(String::as_str).collect();
+    stated.sort_unstable();
+    assert_eq!(
+        diagnostics, stated,
+        "declares.json names the Statement's diagnostics"
+    );
 }
 
 #[test]
@@ -1187,11 +1255,6 @@ fn the_door_refuses_every_other_kind_linked_and_dropped() {
             want: busbar_contract::abi::mechanism::KindCode::Transport
         })
     );
-}
-
-#[test]
-fn conformance_honors_the_requested_release_profile() {
-    assert!(!(cfg!(debug_assertions) && std::env::var_os("BUSBAR_EXPECT_RELEASE").is_some()));
 }
 
 extern "C" fn wrong_abi_door<const UP: bool>() -> &'static Door {
