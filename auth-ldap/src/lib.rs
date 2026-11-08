@@ -44,8 +44,8 @@ use zeroize::Zeroizing;
 
 pub(crate) mod ber;
 pub(crate) mod codec;
-pub mod conversation;
-pub mod door;
+pub(crate) mod conversation;
+pub(crate) mod door;
 pub(crate) mod filter;
 pub(crate) mod groups;
 pub(crate) mod migrate;
@@ -95,7 +95,7 @@ pub(crate) fn shown_url(url: &str) -> String {
 /// How a group DN read from the directory becomes a [`Principal`] role string.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
-pub enum RoleFrom {
+pub(crate) enum RoleFrom {
     /// Use the first `CN=` RDN value of the group DN (e.g. `CN=engineers,OU=...` → `engineers`).
     /// The natural, human-facing form to key `role_bindings` on.
     #[default]
@@ -112,7 +112,7 @@ pub enum RoleFrom {
 /// ([`shown_url`]) and the service password redacted.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LdapConfig {
+pub(crate) struct LdapConfig {
     /// The directory URL: `ldaps://ad.corp.example:636` (LDAPS) or `ldap://ad.corp.example:389`
     /// (plaintext, or STARTTLS when `start_tls` is set).
     pub url: String,
@@ -222,7 +222,7 @@ impl fmt::Debug for LdapConfig {
 
 /// The LDAP auth module: a login-only method (it authenticates a form POST, it does not verify
 /// opaque bearer tokens on the data plane); the work is [`LdapModule::login_over`].
-pub struct LdapModule {
+pub(crate) struct LdapModule {
     cfg: LdapConfig,
 }
 
@@ -484,7 +484,7 @@ pub(crate) const PASSWORD: (&str, &str) = ("password", "Password");
 
 /// What one credential submission came to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Login {
+pub(crate) enum Login {
     /// The directory bound the user: who.
     Identity(Principal),
     /// No usable credential, or the directory refused it.
@@ -1047,3 +1047,10 @@ impl LdapModule {
         Ok(principal)
     }
 }
+
+/// The validated plugin entry and its generated registration descriptor.
+pub use door::{door, MACRO_DOOR};
+
+#[cfg(test)]
+#[path = "tests/live_e2e.rs"]
+mod live_e2e;

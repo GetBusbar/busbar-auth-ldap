@@ -711,8 +711,8 @@ mod reached_clock_callbacks {
         PieceKind, Ticket as ConnTicket,
     };
     use busbar_contract::services::{
-        Caller, DiskDest, HookAsk, HostServices, Later, NestAsk, Ran, Reading, RecordsList,
-        Snapshot, Stored, TrustKeyRef, UNSERVED,
+        Caller, DiskDest, HookAsk, HostServices, Later, NestAsk, Ran, Reading, RecordsList, Stored,
+        TrustKeyRef, UNSERVED,
     };
     use busbar_contract::transport::ConnFacts;
     use busbar_plugin_loader::dispatch::kinds::auth::Auth;
@@ -791,17 +791,20 @@ mod reached_clock_callbacks {
             _counterparty: &str,
             _item: &str,
             _digest: &str,
-        ) -> Stored {
-            Stored::refused(UNSERVED)
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
         }
         fn trust_decide(
             &self,
             _caller: &Caller,
+            _ticket: busbar_contract::abi::mechanism::ticket::Ticket,
             _key: TrustKeyRef<'_>,
             _expected: Option<&str>,
             _approve: bool,
-        ) -> Stored {
-            Stored::refused(UNSERVED)
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
         }
         fn trust_state(&self, _caller: &Caller, _counterparty: &str) -> Stored {
             Stored::refused(UNSERVED)
@@ -839,8 +842,9 @@ mod reached_clock_callbacks {
             _unit: Option<u64>,
             _ttl_secs: u64,
             _record: &[u8],
-        ) -> Stored {
-            Stored::refused(UNSERVED)
+            _later: Later,
+        ) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
         }
         fn ticket_take(&self, _caller: &Caller, _unit: Option<u64>) -> Stored {
             Stored::refused(UNSERVED)
@@ -931,8 +935,8 @@ mod reached_clock_callbacks {
         ) -> Ran {
             Ran::Now(Stored::refused(UNSERVED))
         }
-        fn snapshot_read(&self, _caller: &Caller, _scope: u32) -> Snapshot {
-            Snapshot::Refused(UNSERVED)
+        fn snapshot_read(&self, _caller: &Caller, _scope: u32, _later: Later) -> Ran {
+            Ran::Now(Stored::refused(UNSERVED))
         }
     }
 
@@ -1108,11 +1112,12 @@ mod reached_clock_callbacks {
 
     struct ObserveComplete;
     impl SafeSlot for ObserveComplete {
+        type Kind = busbar_contract::plugin::markers::AuthKind;
         type In = CompleteLoginIn;
         type Out = IdentifyOut;
         type State = Held<Ldap>;
         fn call(
-            instance: Instance<'_, Held<Ldap>>,
+            instance: Instance<'_, Held<Ldap>, busbar_contract::plugin::markers::AuthKind>,
             input: Lent<'_, CompleteLoginIn>,
             out: Out<'_, IdentifyOut>,
         ) -> Outcome {
@@ -1179,7 +1184,11 @@ mod reached_clock_callbacks {
         SAMPLES.with(|samples| samples.borrow_mut().clear());
         RETAINED.with(|retained| retained.set(false));
         let host = Arc::new(Clock::default());
-        let d = Dispatcher::with_services(DispatchConfig::default(), host.clone());
+        let d = Dispatcher::with_services(
+            DispatchConfig::default(),
+            host.clone(),
+            busbar_contract::services::test_caller_binding(),
+        );
         let p = load_linked::<Auth>(
             &LinkedRow::of_macro(fixture::MACRO_DOOR).unwrap(),
             Bind {
@@ -1211,7 +1220,7 @@ mod reached_clock_callbacks {
             answer.outcome,
             Outcome::Failed,
             "the empty identity buffer requires a re-call; crossings={} error={}",
-            p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst),
+            p.test_invocations().0,
             String::from_utf8_lossy(answer.error.as_deref().unwrap_or_default())
         );
         assert!(input.out.needed_bytes > 0, "the real identity writer ran");

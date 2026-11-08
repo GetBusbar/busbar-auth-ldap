@@ -17,11 +17,11 @@
 //! Under CI (`CI` set) the plugin-ci `service: openldap` arm sets it and the tests RUN; an unset URL
 //! under CI FAILS, so a broken service arm cannot turn the only real-directory gate vacuous.
 
-use busbar_auth_ldap::Login;
+use crate::Login;
 
-#[path = "support/artifact.rs"]
+#[path = "../../../auth-ldap-plugin/tests/support/artifact.rs"]
 mod artifact;
-#[path = "support/ldap_tls.rs"]
+#[path = "../../../auth-ldap-plugin/tests/support/ldap_tls.rs"]
 mod ldap_tls;
 use artifact::plugin_path;
 use std::io::Write as _;
@@ -346,7 +346,7 @@ fn seed_directory(url: &str) {
 /// shipped plugin opens none; its stream is the host connector's). Every call answers at once.
 struct TestStream(Option<std::net::TcpStream>);
 
-impl busbar_auth_ldap::conversation::Wire for TestStream {
+impl crate::conversation::Wire for TestStream {
     fn establish(&mut self, target: &str) -> std::task::Poll<Result<(), String>> {
         let s = std::net::TcpStream::connect(target).map_err(|e| e.to_string());
         std::task::Poll::Ready(s.and_then(|s| {
@@ -381,10 +381,10 @@ impl busbar_auth_ldap::conversation::Wire for TestStream {
 /// over the test's own stream, on a clock (a login with none refuses to run untimed; the stream
 /// never pends, so the deadline is never reached).
 fn live_login(settings: serde_json::Value, username: &str, password: &str) -> Login {
-    let cfg: busbar_auth_ldap::LdapConfig =
+    let cfg: crate::LdapConfig =
         serde_json::from_value(settings).expect("live ldap settings parse");
-    let module = busbar_auth_ldap::LdapModule::new(cfg).expect("live ldap settings are valid");
-    let mut conv = busbar_auth_ldap::conversation::Conversation::new();
+    let module = crate::LdapModule::new(cfg).expect("live ldap settings are valid");
+    let mut conv = crate::conversation::Conversation::new();
     let mut stream = TestStream(None);
     match module.login_over(
         &mut conv,

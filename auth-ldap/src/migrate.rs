@@ -11,6 +11,7 @@ use serde_json::Value;
 pub(crate) struct LdapMigration;
 
 impl Migrate for LdapMigration {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     fn migrate(settings: Value, from: &str) -> Migrated {
         let mut migrated = Migrated::unchanged(settings);
         // Only the released baseline whose settings grammar was verified here. Neither current

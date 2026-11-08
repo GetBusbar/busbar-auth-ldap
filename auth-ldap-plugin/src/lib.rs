@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The **AD/LDAP auth module as a droppable busbar plugin**: the logic crate re-exported whole, and
-//! its door (`busbar_auth_ldap::door::door`, a `plugin_door!` over the auth kind's table) exported
+//! its door (`busbar_auth_ldap::door`, a `plugin_door!` over the auth kind's table) exported
 //! as this image's ONE symbol, `busbar_plugin_door` (`export_door!`) behind the `dropped-in` feature. A build that
 //! links the module names `busbar_auth_ldap::compiled_in::door` from the logic crate, which exports
 //! nothing.
@@ -13,12 +13,12 @@
 #![deny(unsafe_code)]
 #![deny(missing_docs)]
 
-pub use busbar_auth_ldap::*;
+pub use busbar_auth_ldap::{door, MACRO_DOOR};
 
 /// The exported door, behind `dropped-in` (the cdylib build only): the macro's `#[no_mangle]` symbol is
 /// the one exemption.
 #[cfg(feature = "dropped-in")]
 #[allow(unsafe_code)]
 mod exported {
-    busbar_contract::export_door!(busbar_auth_ldap::door::door);
+    busbar_contract::export_door!(busbar_auth_ldap::door);
 }

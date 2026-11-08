@@ -121,7 +121,7 @@ fn timed_out_pending_read_release(close_fails: bool) -> String {
         io: std::ptr::null(),
     };
     // SAFETY: this is the actual macro-generated static LDAP door, whose ops is the auth table.
-    let parts = unsafe { Door::read_parts(busbar_auth_ldap::door::door()) };
+    let parts = unsafe { Door::read_parts(busbar_auth_ldap::door()) };
     let ops = unsafe { &*parts.ops.cast::<Ops>() };
     let settings = br#"{"url":"ldap://127.0.0.1","bind_dn_template":"uid={username},dc=x","base_dn":"dc=x","timeout_secs":1}"#;
     let open = OpenIn {

@@ -26,7 +26,7 @@ use std::net::{TcpListener, TcpStream};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-use busbar_auth_ldap::door::MACRO_DOOR;
+use busbar_auth_ldap::MACRO_DOOR;
 use busbar_contract::abi::auth::{
     slot, CompleteLoginIn, IdentifyOut, IdentityBuf, NamedValue, IDENTITY_BUF_BYTES,
     IDENTITY_GROUPS, LOGIN_OUTAGE,
@@ -473,8 +473,8 @@ fn login(p: &Plugin<Auth>, d: &Dispatcher, username: &str, password: &str) -> St
 struct ClockOnly;
 
 use busbar_contract::services::{
-    Caller, DiskDest, HookAsk, HostServices, Later, NestAsk, Ran, Reading, RecordsList, Snapshot,
-    Stored, TrustKeyRef, UNSERVED,
+    Caller, DiskDest, HookAsk, HostServices, Later, NestAsk, Ran, Reading, RecordsList, Stored,
+    TrustKeyRef, UNSERVED,
 };
 
 impl HostServices for ClockOnly {
@@ -524,17 +524,20 @@ impl HostServices for ClockOnly {
         _counterparty: &str,
         _item: &str,
         _digest: &str,
-    ) -> Stored {
-        Stored::refused(UNSERVED)
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
     fn trust_decide(
         &self,
         _caller: &Caller,
+        _ticket: busbar_contract::abi::mechanism::ticket::Ticket,
         _key: TrustKeyRef<'_>,
         _expected: Option<&str>,
         _approve: bool,
-    ) -> Stored {
-        Stored::refused(UNSERVED)
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
     fn trust_state(&self, _caller: &Caller, _counterparty: &str) -> Stored {
         Stored::refused(UNSERVED)
@@ -572,8 +575,9 @@ impl HostServices for ClockOnly {
         _unit: Option<u64>,
         _ttl_secs: u64,
         _record: &[u8],
-    ) -> Stored {
-        Stored::refused(UNSERVED)
+        _later: Later,
+    ) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
     fn ticket_take(&self, _caller: &Caller, _unit: Option<u64>) -> Stored {
         Stored::refused(UNSERVED)
@@ -646,8 +650,8 @@ impl HostServices for ClockOnly {
     fn hook_call(&self, _caller: &Caller, _unit: Option<u64>, _ask: HookAsk, _later: Later) -> Ran {
         Ran::Now(Stored::refused(UNSERVED))
     }
-    fn snapshot_read(&self, _caller: &Caller, _scope: u32) -> Snapshot {
-        Snapshot::Refused(UNSERVED)
+    fn snapshot_read(&self, _caller: &Caller, _scope: u32, _later: Later) -> Ran {
+        Ran::Now(Stored::refused(UNSERVED))
     }
 }
 
@@ -665,6 +669,7 @@ fn red_a_directory_that_never_answers_is_an_outage_at_the_deadline() {
         let d = Arc::new(Dispatcher::with_services(
             DispatchConfig::default(),
             Arc::new(ClockOnly),
+            busbar_contract::services::test_caller_binding(),
         ));
         let p = load(
             leg,
@@ -710,6 +715,7 @@ fn a_control_character_password_is_refused_before_the_dial() {
     let d = Arc::new(Dispatcher::with_services(
         DispatchConfig::default(),
         Arc::new(ClockOnly),
+        busbar_contract::services::test_caller_binding(),
     ));
     let p = load(
         Leg::Linked,
@@ -748,10 +754,9 @@ fn counted_login<T>(p: &Plugin<Auth>, call: impl FnOnce() -> T) -> T {
     counted_step(p, 1, true, call)
 }
 fn counted_step<T>(p: &Plugin<Auth>, expected: u64, dialing: bool, call: impl FnOnce() -> T) -> T {
-    use std::sync::atomic::Ordering::SeqCst;
-    let before = (p.inner.crossings.load(SeqCst), p.inner.resumes.load(SeqCst));
+    let before = (p.test_invocations().0, p.test_invocations().1);
     let answer = call();
-    let after = (p.inner.crossings.load(SeqCst), p.inner.resumes.load(SeqCst));
+    let after = (p.test_invocations().0, p.test_invocations().1);
     if dialing {
         assert!(
             after.1 > before.1,
@@ -834,7 +839,11 @@ fn direct_script(leg: Leg) -> (Vec<String>, Vec<String>) {
         OutboundReadyIn, OutboundReadyOut, VerifyIn,
     };
     use busbar_contract::abi::mechanism::lifecycle::{RefreshIn, TickIn, TickOut};
-    let d = Dispatcher::with_services(DispatchConfig::default(), Arc::new(ClockOnly));
+    let d = Dispatcher::with_services(
+        DispatchConfig::default(),
+        Arc::new(ClockOnly),
+        busbar_contract::services::test_caller_binding(),
+    );
     let heard = Arc::new(Heard::default());
     let p = load(
         leg,
@@ -843,11 +852,8 @@ fn direct_script(leg: Leg) -> (Vec<String>, Vec<String>) {
             ..live_bind(&d, "ldap-direct")
         },
     );
-    assert_eq!(
-        p.inner.crossings.load(std::sync::atomic::Ordering::SeqCst),
-        0
-    );
-    assert_eq!(p.inner.resumes.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert_eq!(p.test_invocations().0, 0);
+    assert_eq!(p.test_invocations().1, 0);
     let tail = p
         .context::<busbar_plugin_loader::dispatch::kinds::auth::AuthFacts>()
         .expect("auth facts");
@@ -1012,7 +1018,7 @@ fn the_linked_and_the_dropped_in_door_are_one_plugin() {
         busbar_plugin_loader::dispatch::load::door_addresses_of_library(&artifact::plugin_path())
             .expect("the actual LDAP cdylib loads")
             .expect("the actual LDAP cdylib exports its door");
-    let linked = busbar_auth_ldap::door::door();
+    let linked = busbar_auth_ldap::door();
     assert_ne!(
         actual.0, linked as *const Door as usize,
         "dropped and linked door addresses differ"
@@ -1038,7 +1044,11 @@ fn no_configured_credential_crosses_back() {
             (ADMIN_PW, "wrong-password", LOGIN_BAD_CREDENTIAL),
             ("wrong-service-password", USER_PW, LOGIN_OUTAGE),
         ] {
-            let d = Dispatcher::with_services(DispatchConfig::default(), Arc::new(ClockOnly));
+            let d = Dispatcher::with_services(
+                DispatchConfig::default(),
+                Arc::new(ClockOnly),
+                busbar_contract::services::test_caller_binding(),
+            );
             let heard = Arc::new(Heard::default());
             let p = load(
                 leg,
@@ -1139,8 +1149,11 @@ fn network_bind(d: &Dispatcher) -> Bind {
 #[test]
 fn a_changed_statement_is_refused_linked_and_dropped() {
     use busbar_plugin_loader::dispatch::LoadError;
-    let d = Dispatcher::new(DispatchConfig::default());
-    let honest = rendering_of(busbar_auth_ldap::door::door).unwrap();
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
+    let honest = rendering_of(busbar_auth_ldap::door).unwrap();
     let statement = rendering_of(another_version_door)
         .expect("the actual LDAP door with another version renders");
     rendering::read(&statement).expect("the mismatched Statement remains valid rendering");
@@ -1150,7 +1163,7 @@ fn a_changed_statement_is_refused_linked_and_dropped() {
     );
     let row = LinkedRow {
         statement: statement.clone(),
-        door: busbar_plugin_loader::dispatch::load::raw(busbar_auth_ldap::door::door),
+        door: busbar_plugin_loader::dispatch::load::raw(busbar_auth_ldap::door),
     };
     assert_eq!(
         load_linked::<Auth>(&row, network_bind(&d)).err(),
@@ -1165,11 +1178,14 @@ fn a_changed_statement_is_refused_linked_and_dropped() {
 #[test]
 fn the_door_refuses_every_other_kind_linked_and_dropped() {
     use busbar_plugin_loader::dispatch::kinds::{
-        export::Export, hook::Hook, plane::Plane, secret::Secret, store::Store,
+        export::Export, hook::Hook, plane::Plane, secret::Secret, store_v4::StoreV4 as Store,
         transport::Transport,
     };
-    let d = Dispatcher::new(DispatchConfig::default());
-    let row = row(busbar_auth_ldap::door::door);
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
+    let row = row(busbar_auth_ldap::door);
     let path = artifact::plugin_path();
     assert_eq!(
         load_linked::<Export>(&row, network_bind(&d)).err(),
@@ -1258,7 +1274,7 @@ fn the_door_refuses_every_other_kind_linked_and_dropped() {
 }
 
 extern "C" fn wrong_abi_door<const UP: bool>() -> &'static Door {
-    let real = busbar_auth_ldap::door::door();
+    let real = busbar_auth_ldap::door();
     let abi = if UP {
         real.kind_abi() + 1
     } else {
@@ -1275,9 +1291,12 @@ extern "C" fn wrong_abi_door<const UP: bool>() -> &'static Door {
 
 #[test]
 fn another_kind_abi_is_refused() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     for door in [wrong_abi_door::<true> as DoorFn, wrong_abi_door::<false>] {
-        let host = busbar_auth_ldap::door::door().kind_abi();
+        let host = busbar_auth_ldap::door().kind_abi();
         let abi = door().kind_abi();
         let want = busbar_plugin_loader::dispatch::LoadError::KindAbi {
             kind: busbar_contract::abi::mechanism::KindCode::Auth,
@@ -1291,7 +1310,7 @@ fn another_kind_abi_is_refused() {
             .unwrap();
         assert_eq!(refused, want);
         assert!(refused.to_string().contains("rebuild"));
-        let mut statement = rendering_of(busbar_auth_ldap::door::door).unwrap();
+        let mut statement = rendering_of(busbar_auth_ldap::door).unwrap();
         let at = busbar_contract::abi::mechanism::rendering::RENDERING_MAGIC.len() + 8;
         statement[at..at + 4].copy_from_slice(&door().kind_abi().to_le_bytes());
         assert_eq!(
@@ -1322,14 +1341,17 @@ extern "C" fn failing_ready_door() -> &'static Door {
     Box::leak(Box::new(unsafe {
         Door::__from_parts(DoorParts {
             ready: Some(failing_ready),
-            ..busbar_auth_ldap::door::door().parts()
+            ..busbar_auth_ldap::door().parts()
         })
     }))
 }
 
 #[test]
 fn red_a_failing_ready_refuses_the_boot() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let p = load_linked::<Auth>(&row(failing_ready_door), network_bind(&d)).unwrap();
     assert_eq!(
         counted(&p, 1, || open(&p, &settings())).outcome,
@@ -1348,7 +1370,10 @@ fn red_a_failing_ready_refuses_the_boot() {
 
 #[test]
 fn red_a_networked_door_with_no_connection_table_is_refused() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let row = LinkedRow::of_macro(MACRO_DOOR).unwrap();
     let wanted = LoadError::NoConnectionTable {
         plugin: "busbar-auth-ldap".into(),
@@ -1440,7 +1465,7 @@ mod custody {
         // SAFETY: the local input, exclusive output, nested buffers and strings live through this crossing.
         let raw = unsafe {
             f(
-                p.inner.ctx(),
+                p.test_host_context(),
                 std::ptr::from_ref(&i).cast::<c_void>(),
                 &mut o,
             )
@@ -1465,7 +1490,7 @@ mod custody {
         // SAFETY: the local input, exclusive output, nested buffers and strings live through this crossing.
         let raw = unsafe {
             f.expect("the host offers READ and WRITE")(
-                p.inner.ctx(),
+                p.test_host_context(),
                 std::ptr::from_ref(&i).cast::<c_void>(),
                 &mut o,
             )
@@ -1482,7 +1507,7 @@ mod custody {
         // SAFETY: the local input, exclusive output, nested buffers and strings live through this crossing.
         let raw = unsafe {
             CONN_SLOTS.close.expect("the host offers CLOSE")(
-                p.inner.ctx(),
+                p.test_host_context(),
                 std::ptr::from_ref(&i).cast::<c_void>(),
                 &mut o,
             )
@@ -1492,7 +1517,10 @@ mod custody {
 
     #[test]
     fn ldap_connections_refuse_undeclared_needs_and_other_instances() {
-        let d = Dispatcher::new(DispatchConfig::default());
+        let d = Dispatcher::new(
+            DispatchConfig::default(),
+            busbar_contract::services::test_caller_binding(),
+        );
         let table = Arc::new(sealed_replay::Carrier::new(d.conn_waker(), false, false));
         for leg in [Leg::Linked, Leg::Dropped] {
             let owner = load(
@@ -1536,7 +1564,7 @@ mod custody {
 }
 
 extern "C" fn wrong_layout_door<const ZERO: bool>() -> &'static Door {
-    let real = busbar_auth_ldap::door::door();
+    let real = busbar_auth_ldap::door();
     // SAFETY: only the rejected fingerprint is changed; all product pointers stay static.
     Box::leak(Box::new(unsafe {
         Door::__from_parts(DoorParts {
@@ -1548,7 +1576,10 @@ extern "C" fn wrong_layout_door<const ZERO: bool>() -> &'static Door {
 
 #[test]
 fn red_a_door_built_against_another_kind_layout_is_refused() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let honest = LinkedRow::of_macro(MACRO_DOOR).unwrap();
     for door in [
         wrong_layout_door::<false> as DoorFn,
@@ -1563,7 +1594,7 @@ fn red_a_door_built_against_another_kind_layout_is_refused() {
         };
         assert_eq!(*kind, busbar_contract::abi::mechanism::KindCode::Auth);
         assert_eq!(*stated, door().layout());
-        assert_eq!(*host, busbar_auth_ldap::door::door().layout());
+        assert_eq!(*host, busbar_auth_ldap::door().layout());
         assert!(refused
             .to_string()
             .contains("rebuild against this busbar-contract"));
@@ -1593,7 +1624,10 @@ fn red_a_door_built_against_another_kind_layout_is_refused() {
 #[test]
 fn ldap_has_no_plane_transport_or_outbound_family() {
     use busbar_contract::abi::{auth, mechanism::KindCode};
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     for leg in [Leg::Linked, Leg::Dropped] {
         let p = load(leg, network_bind(&d));
         assert_eq!(p.kind(), KindCode::Auth);
@@ -1613,7 +1647,7 @@ fn ldap_has_no_plane_transport_or_outbound_family() {
 }
 
 extern "C" fn another_version_door() -> &'static Door {
-    let real = busbar_auth_ldap::door::door();
+    let real = busbar_auth_ldap::door();
     // SAFETY: real's Statement points at immutable static product data; copy it and change only version.
     let mut statement = unsafe { *real.statement() };
     statement.version = AbiStr::of_bytes(b"99.0.0");
@@ -1628,9 +1662,12 @@ extern "C" fn another_version_door() -> &'static Door {
 }
 #[test]
 fn a_restated_version_does_not_match_the_honest_row() {
-    let d = Dispatcher::new(DispatchConfig::default());
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
     let row = LinkedRow {
-        statement: rendering_of(busbar_auth_ldap::door::door).unwrap(),
+        statement: rendering_of(busbar_auth_ldap::door).unwrap(),
         door: busbar_plugin_loader::dispatch::load::raw(another_version_door),
     };
     assert_eq!(

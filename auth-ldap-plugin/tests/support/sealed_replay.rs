@@ -266,6 +266,7 @@ fn sealed_bind_resumes_the_last_service_through_the_real_completion_store() {
             let d = Arc::new(Dispatcher::with_services(
                 DispatchConfig::default(),
                 Arc::new(super::ClockOnly),
+                busbar_contract::services::test_caller_binding(),
             ));
             let carrier = Arc::new(Carrier::new(d.conn_waker(), partial, pend));
             let settings = serde_json::json!({

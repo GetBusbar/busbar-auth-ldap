@@ -211,6 +211,7 @@ impl Ldap {
 }
 
 impl Life for Ldap {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     const CANCEL: u32 = CANCEL_ABANDONED;
 
     /// The settings-only checks: `validate` is handed no secrets, so a secret-referenced service
@@ -238,11 +239,12 @@ impl Life for Ldap {
 pub struct BeginLogin;
 
 impl SafeSlot for BeginLogin {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     type In = BeginLoginIn;
     type Out = BeginLoginOut;
     type State = Held<Ldap>;
     fn call(
-        _: Instance<'_, Held<Ldap>>,
+        _: Instance<'_, Held<Ldap>, busbar_contract::plugin::markers::AuthKind>,
         _: Lent<'_, BeginLoginIn>,
         mut out: Out<'_, BeginLoginOut>,
     ) -> Outcome {
@@ -342,7 +344,7 @@ impl Release {
 
     /// The release through `host`'s connector on no ticket, as the SDK closes a parked exchange
     /// it gives up (a close never pends); a host refusal is logged.
-    fn through(host: Host) -> Self {
+    fn through(host: Host<busbar_contract::plugin::markers::AuthKind>) -> Self {
         Self::new(
             move |stream| match host.connector(Ticket::NONE).close(stream) {
                 Poll::Ready(Ok(())) => {}
@@ -374,9 +376,9 @@ impl Drop for Run {
 /// services count from the handle of the one that pended last (`Host::connector_from`), so the
 /// replay re-issues exactly that one and the host answers its result.
 struct HostWire<'h> {
-    conn: Option<Connector<'h>>,
+    conn: Option<Connector<'h, busbar_contract::plugin::markers::AuthKind>>,
     /// The host and the op's ticket, for the clock read between messages ([`Wire::now_ns`]).
-    clock: Option<(&'h Host, Ticket)>,
+    clock: Option<(&'h Host<busbar_contract::plugin::markers::AuthKind>, Ticket)>,
     /// Whether a failing clock between messages was already said ([`mid_call_reading`]).
     clock_failed: bool,
     need: u32,
@@ -390,7 +392,7 @@ impl HostWire<'_> {
     /// Make one service through `f`: a pending one leaves `at` on its own handle.
     fn serve<T>(
         &mut self,
-        f: impl FnOnce(&mut Connector<'_>, u64) -> Answer<T>,
+        f: impl FnOnce(&mut Connector<'_, busbar_contract::plugin::markers::AuthKind>, u64) -> Answer<T>,
     ) -> Poll<Result<T, String>> {
         let Some(c) = self.conn.as_mut() else {
             return Poll::Ready(Err("the instance was handed no host tables".to_string()));
@@ -477,7 +479,10 @@ fn mid_call_reading(reading: Result<u64, String>, said: &mut bool) -> Option<u64
 
 /// The host's monotonic clock, when it offers one; a clock that fails says why, at warn (the
 /// login then refuses to run untimed: [`LdapModule::login_over`]).
-fn now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
+fn now(
+    host: Option<&Host<busbar_contract::plugin::markers::AuthKind>>,
+    ticket: Ticket,
+) -> Option<u64> {
     match clock_ns(host?.connector(ticket).clock_now()) {
         Ok(ns) => Some(ns),
         Err(reason) => {
@@ -497,7 +502,7 @@ fn now(host: Option<&Host>, ticket: Ticket) -> Option<u64> {
 /// closed. `now` is the host clock's reading this call began with.
 fn drive(
     h: &Held<Ldap>,
-    instance: &Instance<'_, Held<Ldap>>,
+    instance: &Instance<'_, Held<Ldap>, busbar_contract::plugin::markers::AuthKind>,
     input: Lent<'_, CompleteLoginIn>,
     out: &mut Out<'_, IdentifyOut>,
     now: Option<u64>,
@@ -564,11 +569,12 @@ fn drive(
 pub struct CompleteLogin;
 
 impl SafeSlot for CompleteLogin {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     type In = CompleteLoginIn;
     type Out = IdentifyOut;
     type State = Held<Ldap>;
     fn call(
-        instance: Instance<'_, Held<Ldap>>,
+        instance: Instance<'_, Held<Ldap>, busbar_contract::plugin::markers::AuthKind>,
         input: Lent<'_, CompleteLoginIn>,
         mut out: Out<'_, IdentifyOut>,
     ) -> Outcome {
@@ -624,10 +630,15 @@ impl SafeSlot for CompleteLogin {
 pub struct NotServed<I, O>(PhantomData<(I, O)>);
 
 impl<I: AbiIn, O: AbiOut> SafeSlot for NotServed<I, O> {
+    type Kind = busbar_contract::plugin::markers::AuthKind;
     type In = I;
     type Out = O;
     type State = Held<Ldap>;
-    fn call(_: Instance<'_, Held<Ldap>>, _: Lent<'_, I>, _: Out<'_, O>) -> Outcome {
+    fn call(
+        _: Instance<'_, Held<Ldap>, busbar_contract::plugin::markers::AuthKind>,
+        _: Lent<'_, I>,
+        _: Out<'_, O>,
+    ) -> Outcome {
         Outcome::Refused
     }
 }

@@ -123,7 +123,7 @@ fn a_bind_refused_for_an_insecure_stream_closes_it_once() {
         io: std::ptr::null(),
     };
     // SAFETY: the actual macro-generated static LDAP door, whose ops is the auth table.
-    let parts = unsafe { Door::read_parts(busbar_auth_ldap::door::door()) };
+    let parts = unsafe { Door::read_parts(busbar_auth_ldap::door()) };
     let ops = unsafe { &*parts.ops.cast::<Ops>() };
     let settings = br#"{"url":"ldaps://ad.corp.example","bind_dn_template":"uid={username},dc=x","base_dn":"dc=x"}"#;
     let open = OpenIn {

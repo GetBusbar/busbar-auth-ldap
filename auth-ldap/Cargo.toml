@@ -30,7 +30,21 @@ zeroize = { workspace = true }
 [dev-dependencies]
 jsonschema = { workspace = true }
 tracing-subscriber = { workspace = true }
-busbar-plugin-loader = { workspace = true }
+busbar-plugin-loader = { workspace = true , features = ["test-support"] }
 # The chip's dev-only test support (`abi::sdk::test_support::chip`): a test's own wire writes the
 # sealed BIND it is handed.
-busbar-contract = { workspace = true, features = ["test-seal"] }
+busbar-contract = { workspace = true, features = ["test-seal", "test-support"] }
+
+base64 = { workspace = true }
+
+reqwest = { workspace = true, features = ["json", "blocking"] }
+
+ldap3 = { workspace = true }
+
+serde_json = { workspace = true }
+
+rustls = { workspace = true }
+
+sha2 = { workspace = true }
+
+busbar-core-connector = { workspace = true }
