@@ -21,6 +21,8 @@ use crate::Login;
 
 #[path = "../../../auth-ldap-plugin/tests/support/artifact.rs"]
 mod artifact;
+#[path = "../../../auth-ldap-plugin/tests/support/fresh_namespace.rs"]
+mod fresh_namespace;
 #[path = "../../../auth-ldap-plugin/tests/support/ldap_tls.rs"]
 mod ldap_tls;
 use artifact::plugin_path;
@@ -540,6 +542,7 @@ fn boot(so_path: &std::path::Path, url: &str, extra: &str) -> Booted {
             .unwrap()
             .as_nanos()
     ));
+    std::fs::create_dir(&work).expect("exclusively create the fixture directory");
     let plugins_dir = work.join("plugins");
     std::fs::create_dir_all(&plugins_dir).unwrap();
     pack_ldap(
@@ -547,6 +550,12 @@ fn boot(so_path: &std::path::Path, url: &str, extra: &str) -> Booted {
         env!("CARGO_PKG_VERSION"),
         so_path,
         &plugins_dir.join("busbar-auth-ldap.tar.gz"),
+    );
+
+    // Startup validates this dropped native module before Store floor admission.
+    // Bind that load to the exact signed archive packed by this fixture.
+    let archive_pin = busbar_contract::redacted::sha256_hex(
+        &std::fs::read(plugins_dir.join("busbar-auth-ldap.tar.gz")).unwrap(),
     );
 
     let data_port = free_port();
@@ -585,7 +594,7 @@ fn boot(so_path: &std::path::Path, url: &str, extra: &str) -> Booted {
              auth:\n  key_ttl: \"7d\"\n  signing_key: {{ file: \"{signing}\" }}\n  chain:\n    - keys\n\
              \x20 admin_auth: [admin-tokens]\n\
              \x20 role_bindings:\n    ldap:\n      admins:\n        group: eng-team\n\
-             plugins:\n  enabled: true\n  dir: {plugins}\n  trust:\n    allow_unsigned: true\n\
+             plugins:\n  enabled: true\n  dir: {plugins}\n  fetch:\n    - url: \"https://plugins.example/busbar-auth-ldap.tar.gz\"\n      sha256: \"{archive_pin}\"\n  trust:\n    allow_unsigned: true\n\
              groups:\n  eng-team:\n    limits:\n      - {{ requests: 1000000, per: day }}\n\
              \x20   child_default:\n      limits:\n        - {{ budget: 5000, per: month }}\n        - {{ requests: 1000, per: day }}\n\
              providers:\n  mock:\n    api_key: {{ env: MOCK_KEY }}\n\
@@ -597,13 +606,15 @@ fn boot(so_path: &std::path::Path, url: &str, extra: &str) -> Booted {
     .unwrap();
 
     let stderr_log = work.join("busbar.stderr");
+    let mut command = std::process::Command::new(&busbar_bin);
+    command
+        .env("BUSBAR_CONFIG", &config)
+        .env("BUSBAR_PROVIDERS", &providers)
+        .env("MOCK_KEY", "unused")
+        .env("BUSBAR_ADMIN_TOKEN", "e2e-admin-token")
+        .env("BUSBAR_STATE_FILE", "");
     let mut child = Busbar(
-        std::process::Command::new(&busbar_bin)
-            .env("BUSBAR_CONFIG", &config)
-            .env("BUSBAR_PROVIDERS", &providers)
-            .env("MOCK_KEY", "unused")
-            .env("BUSBAR_ADMIN_TOKEN", "e2e-admin-token")
-            .env("BUSBAR_STATE_FILE", "")
+        fresh_namespace::initialize_and_serve(command, &work, 1)
             .stdout(std::process::Stdio::null())
             .stderr(std::fs::File::create(&stderr_log).expect("busbar's stderr log"))
             .spawn()
