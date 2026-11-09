@@ -1537,28 +1537,30 @@ mod custody {
                     ..bind(&d, "ldap-other")
                 },
             );
-            let (outcome, stream, text) = establish(&owner, 0, "localhost:389");
-            assert_eq!(outcome, Outcome::Ready, "{text}");
-            assert_eq!(io(&owner, stream, true).0, Outcome::Ready);
-            for need in [2, u32::MAX] {
-                let (outcome, _, text) = establish(&owner, need, "localhost:389");
-                assert_eq!(
-                    (outcome, text.as_str()),
-                    (Outcome::Refused, ConnError::UndeclaredNeed.text())
-                );
-            }
-            for answer in [
-                io(&other, stream, true),
-                io(&other, stream, false),
-                close_stream(&other, stream),
-            ] {
-                assert_eq!(
-                    (answer.0, answer.2.as_str()),
-                    (Outcome::Refused, ConnError::NotOwner.text())
-                );
-            }
-            assert_eq!(io(&owner, stream, true).0, Outcome::Ready);
-            assert_eq!(close_stream(&owner, stream).0, Outcome::Ready);
+            owner.test_in_host_operation(|| {
+                let (outcome, stream, text) = establish(&owner, 0, "localhost:389");
+                assert_eq!(outcome, Outcome::Ready, "{text}");
+                assert_eq!(io(&owner, stream, true).0, Outcome::Ready);
+                for need in [2, u32::MAX] {
+                    let (outcome, _, text) = establish(&owner, need, "localhost:389");
+                    assert_eq!(
+                        (outcome, text.as_str()),
+                        (Outcome::Refused, ConnError::UndeclaredNeed.text())
+                    );
+                }
+                for answer in [
+                    io(&other, stream, true),
+                    io(&other, stream, false),
+                    close_stream(&other, stream),
+                ] {
+                    assert_eq!(
+                        (answer.0, answer.2.as_str()),
+                        (Outcome::Refused, ConnError::NotOwner.text())
+                    );
+                }
+                assert_eq!(io(&owner, stream, true).0, Outcome::Ready);
+                assert_eq!(close_stream(&owner, stream).0, Outcome::Ready);
+            });
         }
     }
 }
