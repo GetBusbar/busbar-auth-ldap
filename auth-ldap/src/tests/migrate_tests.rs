@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-use busbar_contract::abi::sdk::migrate::{Migrate, MigrateNeed, Migrated};
+use busbar_contract::abi::sdk::migrate::{Migrate, MigrateNeed, Migrated, MigrationAnswer};
 use serde_json::{json, Value};
 
 use super::LdapMigration;
@@ -17,7 +17,7 @@ fn old_settings() -> Value {
     })
 }
 
-fn door_migrate(settings: &Value, from: &str) -> Migrated {
+fn door_migrate(settings: &Value, from: &str) -> MigrationAnswer {
     busbar_plugin_loader::dispatch::migrate::migrate_door(
         busbar_plugin_loader::dispatch::load::raw(crate::door::door),
         settings,
@@ -27,15 +27,22 @@ fn door_migrate(settings: &Value, from: &str) -> Migrated {
     .expect("LDAP declares a migrator")
 }
 
+// Compare the guarded answer with known fixture data without opening its settings.
+fn assert_settings(answer: &MigrationAnswer, settings: Value) {
+    assert_eq!(
+        answer,
+        &MigrationAnswer::from(Migrated {
+            settings,
+            report: answer.report.clone(),
+            needs: answer.needs.clone(),
+        })
+    );
+}
+
 #[test]
 fn released_settings_migrate_through_the_door_without_disclosing_the_password() {
     let old = old_settings();
     let migrated = door_migrate(&old, "1.5.5");
-    assert_eq!(migrated.settings["user_search_filter"], "(uid={username})");
-    assert_eq!(
-        migrated.settings["bind_service_password"],
-        old["bind_service_password"]
-    );
     assert_eq!(migrated.report.len(), 2);
     assert!(migrated.report[1].starts_with("settings.bind_service_password:"));
     assert!(!migrated
@@ -53,22 +60,25 @@ fn released_settings_migrate_through_the_door_without_disclosing_the_password() 
         .contains("MIGRATION_SECRET_CANARY"));
     let mut expected = old;
     expected["user_search_filter"] = json!("(uid={username})");
-    assert_eq!(migrated.settings, expected);
+    assert_settings(&migrated, expected);
 }
 
 #[test]
 fn references_are_preserved_and_a_second_migration_is_a_no_op() {
     for reference in [
-        json!({"env": "LDAP_BIND_PASSWORD"}),
-        json!({"file": "/run/secrets/ldap"}),
-        json!({"module": "vault", "settings": {"path": "directory", "key": "password"}}),
+        json!({"module": "source-fixture", "settings": {"name": "LDAP_BIND_PASSWORD"}}),
+        json!({"module": "source-fixture", "settings": {"path": "/run/secrets/ldap"}}),
+        json!({"module": "source-fixture", "settings": {"path": "directory", "key": "password"}}),
     ] {
         let mut old = old_settings();
         old["bind_service_password"] = reference.clone();
         let first = door_migrate(&old, "1.5.5");
-        assert_eq!(first.settings["bind_service_password"], reference);
-        let second = door_migrate(&first.settings, "1.5.5");
-        assert_eq!(second, Migrated::unchanged(first.settings));
+        let mut expected = old;
+        expected["user_search_filter"] = json!("(uid={username})");
+        assert_settings(&first, expected.clone());
+        assert!(first.needs.is_empty());
+        let second = door_migrate(&expected, "1.5.5");
+        assert_eq!(second, MigrationAnswer::from(Migrated::unchanged(expected)));
     }
 }
 
@@ -116,7 +126,7 @@ fn current_and_unknown_versions_do_not_get_historical_conversion() {
         let original = old_settings();
         assert_eq!(
             door_migrate(&original, version),
-            Migrated::unchanged(original)
+            MigrationAnswer::from(Migrated::unchanged(original))
         );
     }
     let mut original = old_settings();
@@ -126,18 +136,23 @@ fn current_and_unknown_versions_do_not_get_historical_conversion() {
         .remove("bind_service_password");
     assert!(crate::LdapModule::validate_settings(&serde_json::to_vec(&original).unwrap()).is_err());
     let migrated = door_migrate(&original, "1.5.5");
-    assert!(
-        crate::LdapModule::validate_settings(&serde_json::to_vec(&migrated.settings).unwrap())
-            .is_ok()
-    );
+    original["user_search_filter"] = json!("(uid={username})");
+    assert_settings(&migrated, original.clone());
+    assert!(crate::LdapModule::validate_settings(&serde_json::to_vec(&original).unwrap()).is_ok());
 }
 
 #[test]
 fn unsafe_password_shapes_remain_unchanged_with_private_todos() {
-    for password in [json!({"inline": "CANARY"}), json!(false)] {
+    for password in [
+        json!({"inline": "CANARY"}),
+        json!(false),
+        // Context-free parsing does not infer an owner for legacy shorthand.
+        json!({"env": "CANARY_ENV"}),
+        json!({"file": "/private/CANARY_FILE"}),
+    ] {
         let original = json!({"bind_service_password": password});
         let migrated = door_migrate(&original, "1.5.5");
-        assert_eq!(migrated.settings, original);
+        assert_settings(&migrated, original);
         assert_eq!(migrated.report.len(), 1);
         assert!(migrated.report[0].starts_with("TODO settings.bind_service_password:"));
         assert!(!migrated.report[0].contains("CANARY"));
@@ -155,7 +170,7 @@ fn literal_password_bytes_are_retained_only_in_settings_until_the_host_lifts_the
     ] {
         let original = json!({"bind_service_password": password});
         let migrated = door_migrate(&original, "1.5.5");
-        assert_eq!(migrated.settings, original);
+        assert_settings(&migrated, original);
         assert_eq!(
             migrated.needs,
             vec![MigrateNeed::ExternalizeSecret {
@@ -171,8 +186,14 @@ fn literal_password_bytes_are_retained_only_in_settings_until_the_host_lifts_the
         assert!(!migrated.report.join("\n").contains("${VAR}"));
         // The host fulfills the need before publishing the config. Its actual file handling
         // is covered by the host's tests; this verifies the plugin's post-lift idempotence.
-        let lifted = json!({"bind_service_password": {"file": "/private/ldap-secret"}});
-        assert_eq!(door_migrate(&lifted, "1.5.5"), Migrated::unchanged(lifted));
+        // The host writes the admitted path source's canonical module/settings reference.
+        let lifted = json!({"bind_service_password": {
+            "module": "source-fixture", "settings": {"path": "/private/ldap-secret"}
+        }});
+        assert_eq!(
+            door_migrate(&lifted, "1.5.5"),
+            MigrationAnswer::from(Migrated::unchanged(lifted))
+        );
     }
 }
 

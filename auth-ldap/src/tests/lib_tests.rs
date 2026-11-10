@@ -51,7 +51,7 @@ pub(crate) fn cred(text: &str) -> Cred {
 
 /// The text a credential carries, read back off the chip's BIND message as the wire takes it.
 pub(crate) fn cred_text(c: &Cred) -> String {
-    let mut w = SealedWrite::message(c.ldap_simple_bind(1, ""));
+    let mut w = SealedWrite::message(crate::codec::simple_bind(1, "", c));
     let mut bytes = Vec::new();
     let sent: std::task::Poll<Result<(), ()>> =
         busbar_contract::abi::sdk::test_support::chip::drive_sealed(&mut w, |b| {

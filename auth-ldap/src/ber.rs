@@ -79,10 +79,15 @@ fn push_len(out: &mut Vec<u8>, len: usize) {
     out.extend_from_slice(&bytes[skip..]);
 }
 
+/// Append a tag and definite length, including for content held in sealed custody.
+pub(crate) fn push_header(out: &mut Vec<u8>, tag: u8, len: usize) {
+    out.push(tag);
+    push_len(out, len);
+}
+
 /// Append one element: `tag`, the length of `content`, `content`.
 pub fn tlv(out: &mut Vec<u8>, tag: u8, content: &[u8]) {
-    out.push(tag);
-    push_len(out, content.len());
+    push_header(out, tag, content.len());
     out.extend_from_slice(content);
 }
 
