@@ -55,3 +55,6 @@ sha2 = { workspace = true }
 # The LDAP tests use the actual connector's TLS engine with their own loopback directory host.
 # No transport framer is needed for the plugin's plain `tcp` need. Dev-only.
 busbar-core-connector = { workspace = true }
+
+[package.metadata.busbar.test-artifacts]
+cdylib = ["BUSBAR_TEST_LDAP_PLUGIN"]
