@@ -606,7 +606,7 @@ impl<W: Wire> LdapBackend for Over<'_, W> {
         self.doing(|c| {
             let id = c.next_id();
             Doing {
-                sealed: Some(SealedWrite::message(password.ldap_simple_bind(id, dn))),
+                sealed: Some(SealedWrite::message(codec::simple_bind(id, dn, password))),
                 ..Doing::new(Stage::Send, id)
             }
         })?;

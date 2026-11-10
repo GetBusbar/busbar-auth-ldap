@@ -674,10 +674,13 @@ fn red_a_directory_that_never_answers_is_an_outage_at_the_deadline() {
         let p = load(
             leg,
             Bind {
-                conns: ConnTable::Host(conformance_host::host(
-                    d.conn_waker(),
-                    Some(conformance_host::anchors()),
-                )),
+                conns: ConnTable::Host(
+                    busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                        &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                        conformance_host::host(d.conn_waker(), Some(conformance_host::anchors())),
+                        Default::default(),
+                    ),
+                ),
                 ..bind(&d, "ldap-silent")
             },
         );
@@ -720,10 +723,13 @@ fn a_control_character_password_is_refused_before_the_dial() {
     let p = load(
         Leg::Linked,
         Bind {
-            conns: ConnTable::Host(conformance_host::host(
-                d.conn_waker(),
-                Some(conformance_host::anchors()),
-            )),
+            conns: ConnTable::Host(
+                busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                    &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                    conformance_host::host(d.conn_waker(), Some(conformance_host::anchors())),
+                    Default::default(),
+                ),
+            ),
             ..bind(&d, "ldap-control-password")
         },
     );
@@ -805,7 +811,13 @@ fn settings() -> Vec<u8> {
 
 fn live_bind(d: &Dispatcher, name: &str) -> Bind {
     Bind {
-        conns: ConnTable::Host(host(d.conn_waker(), Some(conformance_host::anchors()))),
+        conns: ConnTable::Host(
+            busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                host(d.conn_waker(), Some(conformance_host::anchors())),
+                Default::default(),
+            ),
+        ),
         ..bind(d, name)
     }
 }
@@ -1139,10 +1151,13 @@ fn row(door: DoorFn) -> LinkedRow {
 }
 fn network_bind(d: &Dispatcher) -> Bind {
     Bind {
-        conns: ConnTable::Host(conformance_host::host(
-            d.conn_waker(),
-            Some(conformance_host::anchors()),
-        )),
+        conns: ConnTable::Host(
+            busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                conformance_host::host(d.conn_waker(), Some(conformance_host::anchors())),
+                Default::default(),
+            ),
+        ),
         ..bind(d, "ldap-negative")
     }
 }
@@ -1526,14 +1541,26 @@ mod custody {
             let owner = load(
                 leg,
                 Bind {
-                    conns: ConnTable::Host(table.clone()),
+                    conns: ConnTable::Host(
+                        busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                            &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                            table.clone(),
+                            Default::default(),
+                        ),
+                    ),
                     ..bind(&d, "ldap-owner")
                 },
             );
             let other = load(
                 leg,
                 Bind {
-                    conns: ConnTable::Host(table.clone()),
+                    conns: ConnTable::Host(
+                        busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                            &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                            table.clone(),
+                            Default::default(),
+                        ),
+                    ),
                     ..bind(&d, "ldap-other")
                 },
             );

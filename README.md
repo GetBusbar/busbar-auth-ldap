@@ -154,9 +154,9 @@ dropped the same way, unlogged, and the login is unchanged.
   at `validate` and at boot. The plugin holds it, and
   the submitted end-user password, as the SDK chip's credential
   (`abi::sdk::cred::Cred`: no getter, no `Debug`, no `Display`, wiped on
-  drop). Every BIND is the chip's sealed message
-  (`Cred::ldap_simple_bind`), written to the host's stream without the
-  plugin reading it; for an `ldaps://` URL or `start_tls` it goes out
+  drop). Every BIND combines this plugin's public BER framing with the
+  opaque password using the chip's generic sealed composition, and is
+  written to the host's stream without the plugin reading it; for an `ldaps://` URL or `start_tls` it goes out
   only on a stream the host connector reports secured. Because the password is resolved
   only at `open`, `validate` runs the settings-only checks: a
   search-then-bind config with no literal password validates, and `open`

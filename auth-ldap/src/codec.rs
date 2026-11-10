@@ -7,10 +7,14 @@
 //!
 //! Requests carry the encoding ldap3 writes: a SEARCH (never dereferencing aliases, no size or time
 //! limit, types and values), an UNBIND, and the StartTLS extended request. The simple BIND, which
-//! carries a password, is the chip's sealed message (`Cred::ldap_simple_bind`), never built here. Replies decode fail-closed ([`crate::ber`]): a malformed message,
+//! carries a password, combines public BER framing with an opaque credential through the chip.
+//! Replies decode fail-closed ([`crate::ber`]): a malformed message,
 //! an overrunning nested length or a message past the 16 MiB cap is an error, never a panic.
 
 use std::collections::HashMap;
+
+use busbar_contract::abi::sdk::chip::{CredentialPart, SealedValue};
+use busbar_contract::abi::sdk::cred::{Cred, Seal};
 
 use crate::ber::{self, BerError, Tlv};
 use crate::filter;
@@ -76,6 +80,30 @@ fn message(id: i32, op: &[u8]) -> Vec<u8> {
     ber::int(&mut content, ber::INTEGER, i64::from(id));
     content.extend_from_slice(op);
     ber::element(ber::SEQUENCE, &content)
+}
+
+/// An LDAPv3 simple BIND, with its password held only in sealed custody.
+/// The owner builds the public BER prefix; the chip appends the opaque credential
+/// and carries its secure-connection requirement into the completed message.
+pub(crate) fn simple_bind(id: i32, dn: &str, password: &Cred) -> Seal {
+    let mut bind = Vec::new();
+    ber::int(&mut bind, ber::INTEGER, 3);
+    ber::tlv(&mut bind, ber::OCTET_STRING, dn.as_bytes());
+    ber::push_header(&mut bind, 0x80, password.len()); // authentication: simple [0]
+
+    let mut content = Vec::new();
+    ber::int(&mut content, ber::INTEGER, i64::from(id));
+    ber::push_header(&mut content, 0x60, bind.len() + password.len()); // BindRequest
+    content.extend_from_slice(&bind);
+    let mut prefix = Vec::new();
+    ber::push_header(&mut prefix, ber::SEQUENCE, content.len() + password.len());
+    prefix.extend_from_slice(&content);
+
+    SealedValue::compose(&[
+        CredentialPart::Public(&prefix),
+        CredentialPart::Credential(password),
+    ])
+    .field()
 }
 
 /// A SEARCH under `base` at `scope` (`SCOPE_*`) for `filter`, asking for `attrs`.

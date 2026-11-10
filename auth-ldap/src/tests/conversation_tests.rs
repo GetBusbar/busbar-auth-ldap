@@ -1054,7 +1054,7 @@ fn the_bind_in_flight_is_the_chips_sealed_message() {
 
 /// The chip's BIND message for `dn` with `password`, as the wire carries it.
 fn chip_bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
-    let mut w = SealedWrite::message(crate::tests::cred(password).ldap_simple_bind(id, dn));
+    let mut w = SealedWrite::message(codec::simple_bind(id, dn, &crate::tests::cred(password)));
     let mut bytes = Vec::new();
     let sent: Poll<Result<(), ()>> =
         busbar_contract::abi::sdk::test_support::chip::drive_sealed(&mut w, |b| {

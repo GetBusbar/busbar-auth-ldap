@@ -277,7 +277,13 @@ fn sealed_bind_resumes_the_last_service_through_the_real_completion_store() {
             })
             .to_string();
             let binding = busbar_plugin_loader::dispatch::Bind {
-                conns: ConnTable::Host(carrier.clone()),
+                conns: ConnTable::Host(
+                    busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                        &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                        carrier.clone(),
+                        Default::default(),
+                    ),
+                ),
                 ..bind(&d, "ldap-sealed-replay")
             };
             let plugin = load(leg, binding);

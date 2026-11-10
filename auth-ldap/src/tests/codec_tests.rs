@@ -46,6 +46,59 @@ fn a_simple_bind_carries_version_3_the_dn_and_the_password() {
 }
 
 #[test]
+fn simple_bind_preserves_long_ber_lengths_and_multibyte_ids() {
+    // Hand-assembled lengths: bind content 394, message content 402.
+    let mut expected = vec![
+        0x30, 0x82, 0x01, 0x92, 0x02, 0x02, 0x00, 0x80, 0x60, 0x82, 0x01, 0x8a, 0x02, 0x01, 0x03,
+        0x04, 0x81, 0x80,
+    ];
+    expected.extend_from_slice(&[b'd'; 128]);
+    expected.extend_from_slice(&[0x80, 0x82, 0x01, 0x00]);
+    expected.extend_from_slice(&[b'p'; 256]);
+    assert_eq!(bind(128, &"d".repeat(128), &"p".repeat(256)), expected);
+
+    for (length, message_len, bind_len, password_header) in [
+        (127, 0x8c, 0x86, vec![0x80, 0x7f]),
+        (128, 0x8e, 0x88, vec![0x80, 0x81, 0x80]),
+    ] {
+        let mut expected = vec![
+            0x30,
+            0x81,
+            message_len,
+            0x02,
+            0x01,
+            0x01,
+            0x60,
+            0x81,
+            bind_len,
+            0x02,
+            0x01,
+            0x03,
+            0x04,
+            0x00,
+        ];
+        expected.extend_from_slice(&password_header);
+        expected.extend_from_slice(&vec![b'p'; length]);
+        assert_eq!(bind(1, "", &"p".repeat(length)), expected);
+    }
+}
+
+#[test]
+fn simple_bind_seal_preserves_the_credential_security_requirement() {
+    use busbar_contract::abi::sdk::cred::SealedWrite;
+
+    for password in ["", "private-password"] {
+        for secure in [false, true] {
+            let credential = crate::tests::cred(password).require_secure_if(secure);
+            let sealed = super::simple_bind(1, "cn=a", &credential);
+            assert_eq!(sealed.secure_required(), secure);
+            let write = SealedWrite::message(sealed);
+            assert_eq!(write.secure_required(), secure);
+        }
+    }
+}
+
+#[test]
 fn unbind_and_start_tls_are_their_textbook_bytes() {
     assert_eq!(unbind(3), [0x30, 0x05, 0x02, 0x01, 0x03, 0x42, 0x00]);
     let ext = tlv(0x77, &tlv(0x80, b"1.3.6.1.4.1.1466.20037"));
@@ -313,12 +366,14 @@ fn an_overrunning_nested_length_fails_fast() {
     assert_eq!(decode(&m), Err(BerError::Overrun));
 }
 
-/// The chip's BIND message (`Cred::ldap_simple_bind`), as the wire carries it: the bytes above are
+/// The owner's sealed BIND message, as the wire carries it: the bytes above are
 /// 1.5.5's, so the chip's BIND is held to them.
 fn bind(id: i32, dn: &str, password: &str) -> Vec<u8> {
-    let mut w = busbar_contract::abi::sdk::cred::SealedWrite::message(
-        crate::tests::cred(password).ldap_simple_bind(id, dn),
-    );
+    let mut w = busbar_contract::abi::sdk::cred::SealedWrite::message(super::simple_bind(
+        id,
+        dn,
+        &crate::tests::cred(password),
+    ));
     let mut bytes = Vec::new();
     let sent: std::task::Poll<Result<(), ()>> =
         busbar_contract::abi::sdk::test_support::chip::drive_sealed(&mut w, |b| {

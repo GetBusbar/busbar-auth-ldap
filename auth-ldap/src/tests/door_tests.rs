@@ -1196,7 +1196,13 @@ mod reached_clock_callbacks {
                 max_inflight_cap: 8,
                 sink: Arc::new(NoSink),
                 dispatcher: d.adopter(),
-                conns: ConnTable::Host(host),
+                conns: ConnTable::Host(
+                    busbar_contract::conn::admissions::AdmissionAuthority::issue(
+                        &busbar_contract::caps::KernelSeal::acquire_for_kernel(),
+                        host,
+                        Default::default(),
+                    ),
+                ),
             },
         )
         .unwrap();
