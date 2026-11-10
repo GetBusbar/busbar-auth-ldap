@@ -739,11 +739,17 @@ impl From<String> for Io {
     }
 }
 
-/// `<ctx>: <text>` for a failed operation; a pending one stays pending.
+/// `<ctx>: <text>` for a failed operation; a pending one stays pending. A directory-refused search
+/// keeps only its result code and name — the directory's matched DN and diagnostic text are
+/// far-end strings that could echo the search filter (which contains the username), so they are
+/// not forwarded into the log line, as the bind path drops them.
 fn at(ctx: &str) -> impl FnOnce(Io) -> BindError + '_ {
     move |e| match e {
         Io::Pending => BindError::Pending,
-        Io::Failed(e) | Io::Refused { text: e, .. } => BindError::Directory(format!("{ctx}: {e}")),
+        Io::Failed(e) => BindError::Directory(format!("{ctx}: {e}")),
+        Io::Refused { rc, .. } => {
+            BindError::Directory(format!("{ctx}: rc={rc} ({})", codec::rc_name(rc)))
+        }
     }
 }
 
