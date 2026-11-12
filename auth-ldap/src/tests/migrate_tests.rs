@@ -6,6 +6,15 @@ use serde_json::{json, Value};
 
 use super::LdapMigration;
 
+/// The settings a sealed [`Migrated`] carries, read back under the dev-only test kernel seal.
+fn settings_of(answer: &Migrated) -> serde_json::Value {
+    let seal = busbar_contract::caps::KernelSeal::acquire_for_kernel();
+    serde_json::to_value(
+        busbar_contract::abi::sdk::migrate::MigrationAnswer::from(answer.clone()).authoring(&seal),
+    )
+    .expect("migrated settings serialize")
+}
+
 fn old_settings() -> Value {
     json!({
         "url": "ldaps://directory.example",
@@ -31,11 +40,11 @@ fn door_migrate(settings: &Value, from: &str) -> MigrationAnswer {
 fn assert_settings(answer: &MigrationAnswer, settings: Value) {
     assert_eq!(
         answer,
-        &MigrationAnswer::from(Migrated {
+        &MigrationAnswer::from(Migrated::new(
             settings,
-            report: answer.report.clone(),
-            needs: answer.needs.clone(),
-        })
+            answer.report.clone(),
+            answer.needs.clone()
+        ))
     );
 }
 
@@ -93,7 +102,10 @@ fn only_valid_historical_bare_items_are_wrapped() {
     ] {
         let original = json!({"user_search_filter": bare});
         let migrated = LdapMigration::migrate(original, "1.5.5");
-        assert_eq!(migrated.settings["user_search_filter"], format!("({bare})"));
+        assert_eq!(
+            settings_of(&migrated)["user_search_filter"],
+            format!("({bare})")
+        );
         assert_eq!(migrated.report.len(), 1);
         assert!(!migrated.report[0].starts_with("TODO"));
     }
@@ -113,7 +125,7 @@ fn only_valid_historical_bare_items_are_wrapped() {
     ] {
         let original = json!({"user_search_filter": unknown});
         let migrated = LdapMigration::migrate(original.clone(), "1.5.5");
-        assert_eq!(migrated.settings, original);
+        assert_eq!(settings_of(&migrated), original);
         assert_eq!(migrated.report.len(), 1);
         assert!(migrated.report[0].starts_with("TODO settings.user_search_filter:"));
         assert!(!migrated.report[0].contains("CANARY"));
@@ -204,7 +216,8 @@ fn only_the_released_baseline_converts() {
     for from in ["1.5.5", "v1.5.5"] {
         let migrated = LdapMigration::migrate(old_settings(), from);
         assert_eq!(
-            migrated.settings["user_search_filter"], "(uid={username})",
+            settings_of(&migrated)["user_search_filter"],
+            "(uid={username})",
             "{from}"
         );
         assert_eq!(migrated.needs.len(), 1, "{from}");
@@ -225,7 +238,7 @@ fn only_the_released_baseline_converts() {
 fn settings_that_are_not_an_object_are_left_with_a_todo() {
     for settings in [Value::Null, json!([]), json!("ldaps://directory.example")] {
         let migrated = LdapMigration::migrate(settings.clone(), "1.5.5");
-        assert_eq!(migrated.settings, settings);
+        assert_eq!(settings_of(&migrated), settings);
         assert_eq!(migrated.report.len(), 1, "{settings}");
         assert!(
             migrated.report[0].starts_with("TODO settings: "),
